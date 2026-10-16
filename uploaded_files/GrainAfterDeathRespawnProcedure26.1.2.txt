@@ -1,0 +1,340 @@
+package net.mcreator.thebackwoods.procedures;
+
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerContainerEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDropsEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.minecraft.world.level.block.StairBlock;
+import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.RegistryOps;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.nbt.Tag;
+import net.minecraft.nbt.NbtOps;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.entity.BlockEntity;
+import net.minecraft.world.Container;
+import net.mcreator.thebackwoods.TheBackwoodsMod;
+
+import javax.annotation.Nullable;
+import net.neoforged.bus.api.Event;
+import java.util.Set;
+
+@EventBusSubscriber
+public class GrainAfterDeathRespawnProcedure {
+
+    @SubscribeEvent
+    public static void onPlayerClone(PlayerEvent.Clone event) {
+        if (event.isWasDeath()) {
+            Player oldPlayer = event.getOriginal();
+            Player newPlayer = event.getEntity();
+
+            if (oldPlayer != null && newPlayer != null) {
+                CompoundTag oldData = oldPlayer.getPersistentData();
+                CompoundTag newData = newPlayer.getPersistentData();
+
+                if (oldData != null && newData != null) {
+                    boolean hadGrainTag = oldData.getBooleanOr("died_in_grain", false);
+                    boolean hadSubstrataTag = oldData.getBooleanOr("died_in_substrata", false);
+
+                    newData.putBoolean("died_in_grain", hadGrainTag);
+                    newData.putBoolean("died_in_substrata", hadSubstrataTag);
+
+                    if (oldData.contains("saved_death_items")) {
+                        newData.put("saved_death_items", oldData.get("saved_death_items"));
+                    }
+                }
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerDrops(LivingDropsEvent event) {
+        if (event.getEntity() instanceof Player player) {
+            if (player != null && !player.level().isClientSide()) {
+                if (player.level().getServer() != null && player.level().getServer().getGameRules().get(net.minecraft.world.level.gamerules.GameRules.KEEP_INVENTORY)) {
+                    return;
+                }
+
+                ResourceKey<Level> grainKey = ResourceKey.create(Registries.DIMENSION, Identifier.fromNamespaceAndPath("the_backwoods", "the_grain"));
+                ResourceKey<Level> subStrataKey = ResourceKey.create(Registries.DIMENSION, Identifier.fromNamespaceAndPath("the_backwoods", "the_sub_strata"));
+                ResourceKey<Level> currentDim = player.level().dimension();
+
+                if (currentDim == grainKey || currentDim == subStrataKey) {
+                    ListTag listTag = new ListTag();
+                    RegistryOps<Tag> ops = player.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+
+                    for (net.minecraft.world.entity.item.ItemEntity itemEntity : event.getDrops()) {
+                        ItemStack stack = itemEntity.getItem();
+                        if (!stack.isEmpty()) {
+                            ItemStack.CODEC.encodeStart(ops, stack).result().ifPresent(listTag::add);
+                        }
+                    }
+
+                    if (!listTag.isEmpty()) {
+                        player.getPersistentData().put("saved_death_items", listTag);
+                        event.getDrops().clear();
+                    }
+                }
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onContainerClose(PlayerContainerEvent.Close event) {
+        Player player = event.getEntity();
+        if (player != null && !player.level().isClientSide() && player.level() instanceof ServerLevel level) {
+            BlockPos playerPos = player.blockPosition();
+            int radius = 8;
+            for (BlockPos p : BlockPos.betweenClosed(playerPos.offset(-radius, -radius, -radius), playerPos.offset(radius, radius, radius))) {
+                if (level.getBlockState(p).is(Blocks.CHEST)) {
+                    BlockEntity be = level.getBlockEntity(p);
+                    if (be != null && be.getPersistentData().getBooleanOr("is_death_chest", false)) {
+                        if (be instanceof Container container && container.isEmpty()) {
+                            level.setBlock(p, Blocks.AIR.defaultBlockState(), 3);
+                            level.sendParticles(net.minecraft.core.particles.ParticleTypes.SMOKE,
+                                p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5,
+                                20, 0.25, 0.25, 0.25, 0.05);
+                            level.playSound(null, p, net.minecraft.sounds.SoundEvents.FIRE_EXTINGUISH, net.minecraft.sounds.SoundSource.BLOCKS, 0.5f, 1.0f);
+                            player.getPersistentData().putBoolean("has_death_chest", false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerTick(net.neoforged.neoforge.event.tick.PlayerTickEvent.Post event) {
+        Player player = event.getEntity();
+        if (player != null && !player.level().isClientSide()) {
+            CompoundTag data = player.getPersistentData();
+            if (data != null && data.getBooleanOr("has_death_chest", false)) {
+                String currentDim = player.level().dimension().identifier().toString();
+                String targetDim = data.getStringOr("death_chest_dim", "");
+
+                if (currentDim.contains("the_sub_strata") && currentDim.equals(targetDim)) {
+                    int cx = data.getIntOr("death_chest_x", 0);
+                    int cy = data.getIntOr("death_chest_y", 0);
+                    int cz = data.getIntOr("death_chest_z", 0);
+
+                    BlockPos targetPos = new BlockPos(cx, cy, cz);
+                    if (player.tickCount % 20 == 0 && player.level().hasChunkAt(targetPos)) {
+                        if (!player.level().getBlockState(targetPos).is(Blocks.CHEST)) {
+                            data.putBoolean("has_death_chest", false);
+                            return;
+                        }
+                    }
+
+                    if (player.tickCount % 120 == 0) {
+                        String message = String.format("XYZ: %d, %d, %d", cx, cy, cz);
+                        player.sendOverlayMessage(net.minecraft.network.chat.Component.literal(message));
+                    }
+                }
+            }
+        }
+    }
+
+    @SubscribeEvent
+    public static void onPlayerRespawned(PlayerEvent.PlayerRespawnEvent event) {
+        execute(event, event.getEntity().level(), event.getEntity());
+    }
+
+    public static void execute(LevelAccessor world, Entity entity) {
+        execute(null, world, entity);
+    }
+
+    private static void execute(@Nullable Event event, LevelAccessor world, Entity entity) {
+        if (entity == null)
+            return;
+
+        TheBackwoodsMod.queueServerWork(1, () -> {
+            if (entity instanceof ServerPlayer player && !player.level().isClientSide()) {
+                CompoundTag data = player.getPersistentData();
+                if (data == null) return;
+
+                ResourceKey<Level> grainKey = ResourceKey.create(Registries.DIMENSION, Identifier.fromNamespaceAndPath("the_backwoods", "the_grain"));
+                ResourceKey<Level> subStrataKey = ResourceKey.create(Registries.DIMENSION, Identifier.fromNamespaceAndPath("the_backwoods", "the_sub_strata"));
+
+                boolean wasInGrain = data.getBooleanOr("died_in_grain", false);
+                boolean wasInSubstrata = data.getBooleanOr("died_in_substrata", false);
+
+                if (player.level().getServer() != null) {
+                    if (wasInGrain) {
+                        data.putBoolean("died_in_grain", false);
+                        ServerLevel nextLevel = player.level().getServer().getLevel(subStrataKey);
+                        if (nextLevel != null && player.level().dimension() != subStrataKey) {
+                            double targetY = 161.0;
+                            player.teleportTo(nextLevel, player.getX(), targetY, player.getZ(), Set.of(), player.getYRot(), player.getXRot(), false);
+                            createDeathChest(nextLevel, player);
+                        }
+                    } else if (wasInSubstrata) {
+                        data.putBoolean("died_in_substrata", false);
+                        ServerLevel nextLevel = player.level().getServer().getLevel(grainKey);
+                        if (nextLevel != null && player.level().dimension() != grainKey) {
+                            double targetY = nextLevel.getHeight(Heightmap.Types.MOTION_BLOCKING, (int) player.getX(), (int) player.getZ());
+                            if (targetY <= nextLevel.getMinY()) {
+                                targetY = player.getY();
+                            }
+                            player.teleportTo(nextLevel, player.getX(), targetY, player.getZ(), Set.of(), player.getYRot(), player.getXRot(), false);
+                            createDeathChest(nextLevel, player);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    private static void createDeathChest(ServerLevel level, ServerPlayer player) {
+        CompoundTag data = player.getPersistentData();
+        if (data == null) return;
+
+        ListTag listTag = new ListTag();
+        if (data.contains("saved_death_items")) {
+            Tag tag = data.get("saved_death_items");
+            if (tag instanceof ListTag lt) {
+                listTag = lt;
+            }
+        }
+
+        if (listTag.isEmpty()) {
+            data.remove("saved_death_items");
+            return;
+        }
+
+        java.util.List<ItemStack> itemStacks = new java.util.ArrayList<>();
+        RegistryOps<Tag> ops = player.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+
+        for (int i = 0; i < listTag.size(); i++) {
+            Tag itemTag = listTag.get(i);
+            ItemStack parsed = ItemStack.CODEC.parse(ops, itemTag).result().orElse(ItemStack.EMPTY);
+            if (!parsed.isEmpty()) {
+                itemStacks.add(parsed);
+            }
+        }
+
+        if (itemStacks.isEmpty()) {
+            data.remove("saved_death_items");
+            return;
+        }
+
+        BlockPos respawnPos = player.blockPosition();
+        ResourceKey<Level> subStrataKey = ResourceKey.create(Registries.DIMENSION, Identifier.fromNamespaceAndPath("the_backwoods", "the_sub_strata"));
+        if (level.dimension() == subStrataKey) {
+            respawnPos = new BlockPos(respawnPos.getX(), 161, respawnPos.getZ());
+        }
+
+        BlockPos chestPos1 = null;
+        BlockPos chestPos2 = null;
+
+        java.util.List<BlockPos> candidates = new java.util.ArrayList<>();
+        for (BlockPos p : BlockPos.betweenClosed(respawnPos.offset(-12, -12, -12), respawnPos.offset(12, 12, 12))) {
+            net.minecraft.world.level.block.state.BlockState state = level.getBlockState(p);
+            boolean isReplaceable = state.isAir()
+                || state.canBeReplaced()
+                || state.getBlock() instanceof StairBlock
+                || state.getBlock() instanceof SlabBlock;
+
+            if (isReplaceable) {
+                candidates.add(p.immutable());
+            }
+        }
+
+        final BlockPos finalRespawnPos = respawnPos;
+        java.util.List<BlockPos> preferred = new java.util.ArrayList<>();
+        java.util.List<BlockPos> other = new java.util.ArrayList<>();
+
+        for (BlockPos p : candidates) {
+            double distSq = Math.pow(p.getX() - finalRespawnPos.getX(), 2)
+                + Math.pow(p.getY() - finalRespawnPos.getY(), 2)
+                + Math.pow(p.getZ() - finalRespawnPos.getZ(), 2);
+            if (distSq >= 9.0 && distSq <= 100.0) {
+                preferred.add(p);
+            } else {
+                other.add(p);
+            }
+        }
+
+        java.util.Comparator<BlockPos> distanceComparator = (p1, p2) -> {
+            double d1 = Math.pow(p1.getX() - finalRespawnPos.getX(), 2)
+                + Math.pow(p1.getY() - finalRespawnPos.getY(), 2)
+                + Math.pow(p1.getZ() - finalRespawnPos.getZ(), 2);
+            double d2 = Math.pow(p2.getX() - finalRespawnPos.getX(), 2)
+                + Math.pow(p2.getY() - finalRespawnPos.getY(), 2)
+                + Math.pow(p2.getZ() - finalRespawnPos.getZ(), 2);
+            return Double.compare(d1, d2);
+        };
+
+        preferred.sort(distanceComparator);
+        other.sort(distanceComparator);
+
+        java.util.List<BlockPos> sortedCandidates = new java.util.ArrayList<>(preferred);
+        sortedCandidates.addAll(other);
+
+        if (!sortedCandidates.isEmpty()) {
+            chestPos1 = sortedCandidates.get(0);
+            if (sortedCandidates.size() > 1) {
+                for (BlockPos p : sortedCandidates) {
+                    if (!p.equals(chestPos1)) {
+                        chestPos2 = p;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (chestPos1 == null) chestPos1 = respawnPos.immutable();
+        if (chestPos2 == null) chestPos2 = chestPos1.east();
+
+        level.setBlock(chestPos1, Blocks.CHEST.defaultBlockState(), 3);
+        BlockEntity be1 = level.getBlockEntity(chestPos1);
+        if (be1 != null) {
+            be1.getPersistentData().putBoolean("is_death_chest", true);
+        }
+        int itemIndex = 0;
+
+        if (be1 instanceof Container container1) {
+            int slotSize = container1.getContainerSize();
+            for (int slot = 0; slot < slotSize && itemIndex < itemStacks.size(); slot++) {
+                container1.setItem(slot, itemStacks.get(itemIndex));
+                itemIndex++;
+            }
+        }
+
+        if (itemIndex < itemStacks.size()) {
+            level.setBlock(chestPos2, Blocks.CHEST.defaultBlockState(), 3);
+            BlockEntity be2 = level.getBlockEntity(chestPos2);
+            if (be2 != null) {
+                be2.getPersistentData().putBoolean("is_death_chest", true);
+            }
+            if (be2 instanceof Container container2) {
+                int slotSize = container2.getContainerSize();
+                for (int slot = 0; slot < slotSize && itemIndex < itemStacks.size(); slot++) {
+                    container2.setItem(slot, itemStacks.get(itemIndex));
+                    itemIndex++;
+                }
+            }
+        }
+
+        data.putInt("death_chest_x", chestPos1.getX());
+        data.putInt("death_chest_y", chestPos1.getY());
+        data.putInt("death_chest_z", chestPos1.getZ());
+        data.putString("death_chest_dim", level.dimension().identifier().toString());
+        data.putBoolean("has_death_chest", true);
+        data.remove("saved_death_items");
+    }
+}
+// 26.1.2

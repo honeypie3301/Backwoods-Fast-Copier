@@ -1,0 +1,229 @@
+package net.mcreator.thebackwoods;
+
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.ai.attributes.AttributeInstance;
+import net.minecraft.world.entity.ai.attributes.AttributeModifier;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.neoforge.client.event.RenderLivingEvent;
+import net.minecraft.util.Mth;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.math.Axis;
+
+@EventBusSubscriber
+public class SplinterSwimAbility {
+	private static final ResourceLocation SWIM_BOOST_ID = ResourceLocation.fromNamespaceAndPath("the_backwoods", "splinter_swim_boost");
+
+	public SplinterSwimAbility() {
+	}
+
+	@SubscribeEvent
+	public static void init(FMLCommonSetupEvent event) {
+		new SplinterSwimAbility();
+	}
+
+	@SubscribeEvent
+	public static void clientLoad(FMLClientSetupEvent event) {
+	}
+
+	private static final class SwimProfile {
+		final double speedBoost;
+		final double maxVelocity;
+		final double thrust;
+
+		SwimProfile(double speedBoost, double maxVelocity, double thrust) {
+			this.speedBoost = speedBoost;
+			this.maxVelocity = maxVelocity;
+			this.thrust = thrust;
+		}
+	}
+
+	@EventBusSubscriber
+	private static class SplinterSwimAbilityForgeBusEvents {
+		@SubscribeEvent
+		public static void serverLoad(ServerStartingEvent event) {
+		}
+
+		@SubscribeEvent
+		public static void onEntityTick(EntityTickEvent.Pre event) {
+			Entity entity = event.getEntity();
+			if (!(entity instanceof Mob mob) || mob.level().isClientSide()) {
+				return;
+			}
+
+			SwimProfile profile = getSwimProfile(mob);
+			if (profile == null) {
+				return;
+			}
+
+			if (!mob.isAlive() || mob.isRemoved()) {
+				if (mob.isSwimming()) {
+					mob.setSwimming(false);
+				}
+				if (mob.isSprinting()) {
+					mob.setSprinting(false);
+				}
+				if (mob.getPose() == Pose.SWIMMING) {
+					mob.setPose(Pose.STANDING);
+				}
+				removeWaterSpeedBoost(mob);
+				return;
+			}
+
+			boolean inWater = mob.isInWater();
+			LivingEntity target = mob.getTarget();
+			boolean isChasingTarget = target != null && target.isAlive() && !target.isSpectator() && !(target instanceof Player player && player.isCreative());
+
+			if (inWater && isChasingTarget) {
+				if (!mob.isSwimming()) {
+					mob.setSwimming(true);
+				}
+				if (!mob.isSprinting()) {
+					mob.setSprinting(true);
+				}
+				if (mob.getPose() != Pose.SWIMMING) {
+					mob.setPose(Pose.SWIMMING);
+				}
+				applyWaterSpeedBoost(mob, profile.speedBoost);
+				guideUnderwaterChase(mob, target, profile);
+			} else {
+				if (mob.isSwimming()) {
+					mob.setSwimming(false);
+				}
+				if (mob.isSprinting()) {
+					mob.setSprinting(false);
+				}
+				if (mob.getPose() == Pose.SWIMMING) {
+					mob.setPose(Pose.STANDING);
+				}
+				removeWaterSpeedBoost(mob);
+			}
+		}
+
+		private static void guideUnderwaterChase(Mob mob, LivingEntity target, SwimProfile profile) {
+			Vec3 mobPos = mob.position();
+			Vec3 targetPos = target.position();
+			double dy = (target.getY() + (target.getBbHeight() * 0.5D)) - (mob.getY() + (mob.getBbHeight() * 0.5D));
+			double distSq = mobPos.distanceToSqr(targetPos);
+
+			if (distSq > 1.44D) {
+				Vec3 dir = targetPos.subtract(mobPos).normalize();
+				Vec3 vel = mob.getDeltaMovement();
+
+				boolean submerged = mob.isUnderWater();
+				double maxYThrust = submerged ? 0.30D : 0.12D;
+				double targetVy = Math.max(-0.25D, Math.min(maxYThrust, dy * 0.35D));
+				double newVy = (vel.y * 0.7D) + (targetVy * 0.3D);
+
+				if (dy > -0.2D && newVy < 0.05D) {
+					newVy = Math.max(newVy, submerged ? 0.08D : 0.04D);
+				}
+
+				double newVx = (vel.x * 0.8D) + (dir.x * profile.thrust);
+				double newVz = (vel.z * 0.8D) + (dir.z * profile.thrust);
+
+				double horizontalSpeed = Math.sqrt(newVx * newVx + newVz * newVz);
+				if (horizontalSpeed > profile.maxVelocity) {
+					double scale = profile.maxVelocity / horizontalSpeed;
+					newVx *= scale;
+					newVz *= scale;
+				}
+
+				mob.setDeltaMovement(newVx, newVy, newVz);
+				mob.hurtMarked = true;
+			}
+
+			mob.getLookControl().setLookAt(target, 30.0F, 30.0F);
+		}
+
+		private static void applyWaterSpeedBoost(Mob mob, double speedBoost) {
+			AttributeInstance attr = mob.getAttribute(Attributes.WATER_MOVEMENT_EFFICIENCY);
+			if (attr != null) {
+				if (attr.hasModifier(SWIM_BOOST_ID)) {
+					AttributeModifier currentMod = attr.getModifier(SWIM_BOOST_ID);
+					if (currentMod != null && Math.abs(currentMod.amount() - speedBoost) < 0.001D) {
+						return;
+					}
+					attr.removeModifier(SWIM_BOOST_ID);
+				}
+				attr.addTransientModifier(new AttributeModifier(
+					SWIM_BOOST_ID,
+					speedBoost,
+					AttributeModifier.Operation.ADD_VALUE
+				));
+			}
+		}
+
+		private static void removeWaterSpeedBoost(Mob mob) {
+			AttributeInstance attr = mob.getAttribute(Attributes.WATER_MOVEMENT_EFFICIENCY);
+			if (attr != null && attr.hasModifier(SWIM_BOOST_ID)) {
+				attr.removeModifier(SWIM_BOOST_ID);
+			}
+		}
+
+		private static SwimProfile getSwimProfile(Mob mob) {
+			ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(mob.getType());
+			if (typeId == null || !"the_backwoods".equals(typeId.getNamespace())) {
+				return null;
+			}
+
+			return switch (typeId.getPath()) {
+				case "blindspot_splinter" -> new SwimProfile(0.16D, 0.368D, 0.072D);
+				case "splinter" -> new SwimProfile(0.12D, 0.32D, 0.060D);
+				case "log_splinter" -> new SwimProfile(0.096D, 0.288D, 0.052D);
+				case "petrified_log_splinter" -> new SwimProfile(0.056D, 0.24D, 0.040D);
+				default -> null;
+			};
+		}
+	}
+
+	@EventBusSubscriber(value = Dist.CLIENT)
+	public static class SplinterSwimClientRender {
+		// Height (blocks above feet) the body tilts around; tune to the model's visual center
+		private static final float PIVOT_Y = 0.9F;
+
+		@SubscribeEvent
+		public static void onRenderLivingPre(RenderLivingEvent.Pre<?, ?> event) {
+			LivingEntity entity = event.getEntity();
+			if (entity.getPose() != Pose.SWIMMING) {
+				return;
+			}
+			ResourceLocation id = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+			if (id == null || !"the_backwoods".equals(id.getNamespace())) {
+				return;
+			}
+			switch (id.getPath()) {
+				case "blindspot_splinter", "splinter", "log_splinter", "petrified_log_splinter" -> {
+				}
+				default -> {
+					return;
+				}
+			}
+
+			float pt = event.getPartialTick();
+			float bodyRot = Mth.rotLerp(pt, entity.yBodyRotO, entity.yBodyRot);
+			float xRot = Mth.lerp(pt, entity.xRotO, entity.getXRot());
+			PoseStack pose = event.getPoseStack();
+			float yaw = 180.0F - bodyRot;
+			// Vanilla applies body yaw after this event: pre-apply it, tilt in that frame, undo it.
+			pose.mulPose(Axis.YP.rotationDegrees(yaw));
+			pose.translate(0.0F, PIVOT_Y, 0.0F);
+			pose.mulPose(Axis.XP.rotationDegrees(-90.0F - xRot));
+			pose.translate(0.0F, -PIVOT_Y, 0.0F);
+			pose.mulPose(Axis.YP.rotationDegrees(-yaw));
+		}
+	}
+}

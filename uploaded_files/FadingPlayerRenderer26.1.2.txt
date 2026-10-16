@@ -1,0 +1,450 @@
+package net.mcreator.thebackwoods;
+
+/**
+ * =========================================================================
+ *              EXISTENTIAL PHASE-SHIFTING: THE "FADED" MECHANICS
+ *                 Fading Player Renderer (Client-Only) - 26.1.2
+ * =========================================================================
+ * 
+ * INSTRUCTIONS FOR MCREATOR USER:
+ * 1. Place this file inside net/mcreator/thebackwoods/FadingPlayerRenderer.java
+ *    (or whichever folder you place it in, just update the package declaration above!).
+ * 
+ * 2. This subscriber is configured for CLIENT-ONLY rendering. It intercepts
+ *    the Player Renderer on the client side, cancels the normal opaque rendering,
+ *    and resubmits the player using a wrapped SubmitNodeCollector that dynamically
+ *    multiplies the opacity (Alpha) based on their fade_level.
+ * 
+ * Path: net/mcreator/thebackwoods/FadingPlayerRenderer.java
+ */
+
+import net.minecraft.client.player.AbstractClientPlayer;
+import net.mcreator.thebackwoods.network.TheBackwoodsModVariables;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.entity.player.AvatarRenderer;
+import net.minecraft.client.renderer.entity.state.AvatarRenderState;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.resources.Identifier;
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.RenderPlayerEvent;
+import net.neoforged.neoforge.client.event.RenderHandEvent;
+
+@EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+public class FadingPlayerRenderer {
+
+    // ==========================================
+    //            CONFIGURABLE SETTINGS
+    // ==========================================
+    // The minimum visual opacity (0.0f = completely invisible, 1.0f = fully opaque) 
+    // that a fully faded player/entity can reach. 
+    // Set to 0.0f for total invisibility, or higher (e.g. 0.15f) for a more visible ghost effect.
+    public static float MIN_OPACITY = 0.12f;
+
+    private static java.lang.reflect.Method renderItemInHandMethod = null;
+    private static boolean isRenderingFadedPlayer = false;
+    private static boolean isRenderingFadedHand = false;
+    private static boolean hasLoggedError = false;
+
+    private static double getFadeLevel(Player player) {
+        if (player == null) {
+            return 0.0;
+        }
+        try {
+            var vars = player.getData(TheBackwoodsModVariables.PLAYER_VARIABLES);
+            if (vars != null) {
+                return vars.fade_level;
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            return player.getPersistentData().getDoubleOr("fade_level", 0.0);
+        } catch (Throwable ignored) {
+        }
+        return 0.0;
+    }
+
+    static {
+        try {
+            renderItemInHandMethod = net.minecraft.client.renderer.ItemInHandRenderer.class.getDeclaredMethod(
+                "renderArmWithItem",
+                net.minecraft.client.player.AbstractClientPlayer.class,
+                float.class,
+                float.class,
+                net.minecraft.world.InteractionHand.class,
+                float.class,
+                net.minecraft.world.item.ItemStack.class,
+                float.class,
+                com.mojang.blaze3d.vertex.PoseStack.class,
+                net.minecraft.client.renderer.SubmitNodeCollector.class,
+                int.class
+            );
+            renderItemInHandMethod.setAccessible(true);
+        } catch (NoSuchMethodException e) {
+            // Robust fallback: Scan all methods of ItemInHandRenderer to locate the private renderItemInHand method via parameter count
+            for (java.lang.reflect.Method method : net.minecraft.client.renderer.ItemInHandRenderer.class.getDeclaredMethods()) {
+                if (method.getName().equals("renderArmWithItem") && method.getParameterCount() == 10) {
+                    method.setAccessible(true);
+                    renderItemInHandMethod = method;
+                    break;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+
+    // The camera state is held by the current level renderer, outside the player event.
+    // Obtain the active instance before cancelling so a lookup failure still renders the player.
+    private static CameraRenderState currentCameraState(net.minecraft.client.Minecraft mc) {
+        try {
+            java.lang.reflect.Field field = net.minecraft.client.renderer.LevelRenderer.class.getDeclaredField("levelRenderState");
+            field.setAccessible(true);
+            return ((LevelRenderState) field.get(mc.levelRenderer)).cameraRenderState;
+        } catch (ReflectiveOperationException | ClassCastException ignored) {
+            return null;
+        }
+    }
+
+    private static int fadeColor(int color, float alpha) {
+        int oldAlpha = (color >>> 24) & 255;
+        int newAlpha = Math.max(0, Math.min(255, (int) (oldAlpha * alpha)));
+        return (color & 0x00FFFFFF) | (newAlpha << 24);
+    }
+
+    private static SubmitNodeCollector wrapCollector(SubmitNodeCollector original, float alpha,
+                                                      AvatarRenderState state, AvatarRenderer<?> renderer) {
+        return (SubmitNodeCollector) java.lang.reflect.Proxy.newProxyInstance(
+            SubmitNodeCollector.class.getClassLoader(), new Class<?>[]{SubmitNodeCollector.class},
+            (proxy, method, values) -> {
+                Object[] args = values == null ? new Object[0] : values.clone();
+                String name = method.getName();
+                if (name.equals("submitModel") && args.length == 10 && args[3] instanceof RenderType type && args[6] instanceof Integer tint && shouldWrapRenderType(type)) {
+                    args[3] = getTranslucentRenderType(type, state, renderer);
+                    args[6] = fadeColor(tint, alpha);
+                } else if (name.equals("submitModelPart") && args.length == 11 && args[2] instanceof RenderType type && args[8] instanceof Integer tint && shouldWrapRenderType(type)) {
+                    args[2] = getTranslucentRenderType(type, state, renderer);
+                    args[8] = fadeColor(tint, alpha);
+                } else if (name.equals("submitCustomGeometry") && args.length == 3 && args[1] instanceof RenderType type
+                    && args[2] instanceof SubmitNodeCollector.CustomGeometryRenderer geometry && shouldWrapRenderType(type)) {
+                    args[1] = getTranslucentRenderType(type, state, renderer);
+                    args[2] = (SubmitNodeCollector.CustomGeometryRenderer)
+                        (pose, consumer) -> geometry.render(pose, wrapVertexConsumer(consumer, alpha));
+                }
+                try {
+                    Object result = method.isDefault()
+                        ? java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args)
+                        : method.invoke(original, args);
+                    if (name.equals("order") && result instanceof net.minecraft.client.renderer.OrderedSubmitNodeCollector ordered) {
+                        return wrapOrderedCollector(ordered, alpha, state, renderer);
+                    }
+                    return result;
+                } catch (java.lang.reflect.InvocationTargetException error) {
+                    throw error.getCause();
+                }
+            });
+    }
+
+    private static net.minecraft.client.renderer.OrderedSubmitNodeCollector wrapOrderedCollector(
+        net.minecraft.client.renderer.OrderedSubmitNodeCollector original, float alpha,
+        AvatarRenderState state, AvatarRenderer<?> renderer) {
+        // The ordered view uses the same submission methods as the main collector.
+        return (net.minecraft.client.renderer.OrderedSubmitNodeCollector) java.lang.reflect.Proxy.newProxyInstance(
+            SubmitNodeCollector.class.getClassLoader(),
+            new Class<?>[]{net.minecraft.client.renderer.OrderedSubmitNodeCollector.class},
+            (proxy, method, args) -> {
+                try {
+                    if (method.isDefault()) return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args);
+                    if (method.getName().equals("submitModel") && args != null && args.length == 10
+                        && args[3] instanceof RenderType type && args[6] instanceof Integer tint && shouldWrapRenderType(type)) {
+                        args[3] = getTranslucentRenderType(type, state, renderer);
+                        args[6] = fadeColor(tint, alpha);
+                    } else if (method.getName().equals("submitModelPart") && args != null && args.length == 11
+                        && args[2] instanceof RenderType type && args[8] instanceof Integer tint && shouldWrapRenderType(type)) {
+                        args[2] = getTranslucentRenderType(type, state, renderer);
+                        args[8] = fadeColor(tint, alpha);
+                    } else if (method.getName().equals("submitCustomGeometry") && args != null && args.length == 3
+                        && args[1] instanceof RenderType type
+                        && args[2] instanceof SubmitNodeCollector.CustomGeometryRenderer geometry && shouldWrapRenderType(type)) {
+                        args[1] = getTranslucentRenderType(type, state, renderer);
+                        args[2] = (SubmitNodeCollector.CustomGeometryRenderer)
+                            (pose, consumer) -> geometry.render(pose, wrapVertexConsumer(consumer, alpha));
+                    }
+                    return method.invoke(original, args);
+                } catch (java.lang.reflect.InvocationTargetException error) {
+                    throw error.getCause();
+                }
+            });
+    }
+
+    @SubscribeEvent
+    public static void onRenderPlayerPre(RenderPlayerEvent.Pre<?> event) {
+        if (isRenderingFadedPlayer) return;
+        AvatarRenderState renderState = event.getRenderState();
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        if (mc.level == null || !(mc.level.getEntity(renderState.id) instanceof Player player)) return;
+        double fadeLevel = getFadeLevel(player);
+        if (fadeLevel <= 0.0) return;
+
+        fadeLevel = Math.max(0.0, Math.min(100.0, fadeLevel));
+        float alpha = 1.0f - (float) (fadeLevel / 100.0);
+        float shimmer = (float) Math.sin((player.tickCount + event.getPartialTick()) * 0.15f) * 0.04f;
+        float finalAlpha = Math.max(MIN_OPACITY, Math.min(1.0f, alpha + shimmer));
+        CameraRenderState camera = currentCameraState(mc);
+        if (camera == null) return;
+
+        try {
+            isRenderingFadedPlayer = true;
+            AvatarRenderer<?> renderer = event.getRenderer();
+            renderer.submit(renderState, event.getPoseStack(),
+                wrapCollector(event.getSubmitNodeCollector(), finalAlpha, renderState, renderer), camera);
+            event.setCanceled(true);
+        } finally {
+            isRenderingFadedPlayer = false;
+        }
+    }
+
+    /** Render the first-person hand with the same alpha and animation as the player. */
+    @SubscribeEvent
+    public static void onRenderHand(RenderHandEvent event) {
+        if (isRenderingFadedHand) return;
+        net.minecraft.client.Minecraft mc = net.minecraft.client.Minecraft.getInstance();
+        Player player = mc.player;
+        if (!(player instanceof AbstractClientPlayer clientPlayer)) return;
+        double fadeLevel = getFadeLevel(player);
+        if (fadeLevel <= 0.0 || renderItemInHandMethod == null) return;
+        fadeLevel = Math.max(0.0, Math.min(100.0, fadeLevel));
+        float alpha = 1.0f - (float) (fadeLevel / 100.0);
+        float shimmer = (float) Math.sin((player.tickCount + event.getPartialTick()) * 0.15f) * 0.04f;
+        float finalAlpha = Math.max(MIN_OPACITY, Math.min(1.0f, alpha + shimmer));
+
+        try {
+            isRenderingFadedHand = true;
+            renderItemInHandMethod.invoke(mc.getEntityRenderDispatcher().getItemInHandRenderer(),
+                clientPlayer, event.getPartialTick(), event.getInterpolatedPitch(), event.getHand(),
+                event.getSwingProgress(), event.getItemStack(), event.getEquipProgress(),
+                event.getPoseStack(), wrapCollector(event.getSubmitNodeCollector(), finalAlpha, null, null),
+                event.getPackedLight());
+            event.setCanceled(true);
+        } catch (Exception error) {
+            if (!hasLoggedError) {
+                error.printStackTrace();
+                hasLoggedError = true;
+            }
+        } finally {
+            isRenderingFadedHand = false;
+        }
+    }
+
+    /**
+     * Maps any given RenderType to its Translucent equivalent to support alpha transparency.
+     */
+    private static RenderType getTranslucentRenderType(RenderType originalType, AvatarRenderState state, AvatarRenderer renderer) {
+        if (renderer != null && state != null) {
+            Identifier texture = renderer.getTextureLocation(state);
+            return net.minecraft.client.renderer.rendertype.RenderTypes.entityTranslucent(texture);
+        }
+        return getTranslucentRenderType(originalType, (Player) null, null);
+    }
+
+    private static RenderType getTranslucentRenderType(RenderType originalType, Player player, AvatarRenderer renderer) {
+        // General fallback for items/armor/held objects: extract the texture dynamically from originalType.toString()
+        try {
+            String str = originalType.toString();
+            int start = str.indexOf("Optional[");
+            if (start != -1) {
+                int end = str.indexOf("]", start);
+                if (end != -1) {
+                    String locStr = str.substring(start + 9, end);
+                    Identifier loc = Identifier.parse(locStr);
+                    return net.minecraft.client.renderer.rendertype.RenderTypes.entityTranslucent(loc);
+                }
+            }
+        } catch (Exception ignored) {}
+        
+        // Return the original RenderType as a safe fallback instead of forcing Steve's skin texture
+        return originalType;
+    }
+
+    private static boolean shouldWrapRenderType(RenderType renderType) {
+        if (renderType == null) {
+            return false;
+        }
+        String str = renderType.toString().toLowerCase(java.util.Locale.ROOT);
+        // We strictly avoid wrapping block, item, glint, atlas, and GUI textures
+        if (str.contains("atlas") || str.contains("item") || str.contains("block") || str.contains("glint") || str.contains("gui") || str.contains("crumbling")) {
+            return false;
+        }
+        return str.contains("entity") || str.contains("armor") || str.contains("player");
+    }
+
+    /**
+     * Highly compatible dynamic proxy-based wrapper that implements all interfaces 
+     * of the delegate VertexConsumer (including third-party custom ones like Sodium's).
+     * This completely prevents ClassCastExceptions when shaders and rendering mods are loaded!
+     */
+    private static VertexConsumer wrapVertexConsumer(VertexConsumer delegate, float alphaFactor) {
+        if (delegate == null) {
+            return null;
+        }
+        try {
+            java.util.List<Class<?>> interfaces = new java.util.ArrayList<>();
+            interfaces.add(VertexConsumer.class);
+            for (Class<?> iface : delegate.getClass().getInterfaces()) {
+                if (!interfaces.contains(iface) && java.lang.reflect.Modifier.isPublic(iface.getModifiers())) {
+                    String ifaceName = iface.getName().toLowerCase(java.util.Locale.ROOT);
+                    // Prevent fast-path bypass from optimization mods by not implementing their proprietary interfaces.
+                    if (ifaceName.contains("sodium") || ifaceName.contains("rubidium") || ifaceName.contains("oculus") || ifaceName.contains("iris") || ifaceName.contains("embeddium")) {
+                        continue;
+                    }
+                    interfaces.add(iface);
+                }
+            }
+
+            return (VertexConsumer) java.lang.reflect.Proxy.newProxyInstance(
+                VertexConsumer.class.getClassLoader(),
+                interfaces.toArray(new Class<?>[0]),
+                new java.lang.reflect.InvocationHandler() {
+                    @Override
+                    public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] args) throws Throwable {
+                        String name = method.getName();
+                        
+                        if ((name.equals("setColor") || name.equals("color")) && args != null) {
+                            if (args.length == 4) {
+                                if (args[3] instanceof Integer) {
+                                    int r = (Integer) args[0];
+                                    int g = (Integer) args[1];
+                                    int b = (Integer) args[2];
+                                    int a = (Integer) args[3];
+                                    int scaledAlpha = Math.max(0, Math.min(255, (int) (a * alphaFactor)));
+                                    Object result = method.invoke(delegate, r, g, b, scaledAlpha);
+                                    return result == delegate ? proxy : result;
+                                } else if (args[3] instanceof Float) {
+                                    float r = (Float) args[0];
+                                    float g = (Float) args[1];
+                                    float b = (Float) args[2];
+                                    float a = (Float) args[3];
+                                    float scaledAlpha = Math.max(0.0f, Math.min(1.0f, a * alphaFactor));
+                                    Object result = method.invoke(delegate, r, g, b, scaledAlpha);
+                                    return result == delegate ? proxy : result;
+                                }
+                            } else if (args.length == 1 && args[0] instanceof Integer) {
+                                int argb = (Integer) args[0];
+                                int a = (argb >> 24) & 0xFF;
+                                int r = (argb >> 16) & 0xFF;
+                                int g = (argb >> 8) & 0xFF;
+                                int b = argb & 0xFF;
+                                int scaledAlpha = Math.max(0, Math.min(255, (int) (a * alphaFactor)));
+                                int newArgb = (scaledAlpha << 24) | (r << 16) | (g << 8) | b;
+                                Object result = method.invoke(delegate, newArgb);
+                                return result == delegate ? proxy : result;
+                            }
+                        }
+
+                        if (name.equals("putBulkData") && args != null) {
+                            for (int i = 0; i <= args.length - 4; i++) {
+                                if (args[i] instanceof Float && args[i+1] instanceof Float && args[i+2] instanceof Float && args[i+3] instanceof Float) {
+                                    float a = (Float) args[i+3];
+                                    args[i+3] = Math.max(0.0f, Math.min(1.0f, a * alphaFactor));
+                                    break;
+                                }
+                            }
+                        }
+
+                        try {
+                            if (method.isDefault()) {
+                                try {
+                                    Object result = java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args);
+                                    return result == proxy || result == delegate ? proxy : result;
+                                } catch (Throwable t) {
+                                    // Fallback to normal invocation
+                                }
+                            }
+                            
+                            Object result = method.invoke(delegate, args);
+                            if (result == delegate) {
+                                return proxy;
+                            }
+                            return result;
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    }
+                }
+            );
+        } catch (Throwable t) {
+            return new SafeAlphaVertexConsumer(delegate, alphaFactor);
+        }
+    }
+
+    /**
+     * A highly precise delegating VertexConsumer that intercepts all setColor() and color() calls
+     * and multiplies the Alpha parameter by our fade factor.
+     */
+    private static class SafeAlphaVertexConsumer implements VertexConsumer {
+        private final VertexConsumer delegate;
+        private final float alphaFactor;
+
+        public SafeAlphaVertexConsumer(VertexConsumer delegate, float alphaFactor) {
+            this.delegate = delegate;
+            this.alphaFactor = alphaFactor;
+        }
+
+        @Override
+        public VertexConsumer addVertex(float x, float y, float z) {
+            delegate.addVertex(x, y, z);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setColor(int r, int g, int b, int a) {
+            // Apply the fade scale factor to the alpha byte (0-255)
+            int scaledAlpha = Math.max(0, Math.min(255, (int) (a * alphaFactor)));
+            delegate.setColor(r, g, b, scaledAlpha);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setColor(int color) {
+            delegate.setColor(fadeColor(color, alphaFactor));
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setLineWidth(float width) {
+            delegate.setLineWidth(width);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv(float u, float v) {
+            delegate.setUv(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv1(int u, int v) {
+            delegate.setUv1(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setUv2(int u, int v) {
+            delegate.setUv2(u, v);
+            return this;
+        }
+
+        @Override
+        public VertexConsumer setNormal(float x, float y, float z) {
+            delegate.setNormal(x, y, z);
+            return this;
+        }
+    }
+}
+// 26.1.2

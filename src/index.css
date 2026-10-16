@@ -1,0 +1,50 @@
+@import "tailwindcss";
+
+:root,
+html,
+body {
+  color-scheme: dark;
+  background-color: #020403;
+}
+
+/* Custom Bespoke Dark Obsidian/Emerald Scrollbars (Chromium / WebKit / Safari) */
+*::-webkit-scrollbar {
+  width: 6px !important;
+  height: 6px !important;
+}
+
+*::-webkit-scrollbar-track {
+  background: #030504 !important;
+}
+
+*::-webkit-scrollbar-corner {
+  background: #030504 !important;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #142918 !important;
+  border-radius: 3px !important;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #1e3f26 !important;
+}
+
+/* Firefox-only fallback (scoped so Chrome 121+ does not disable ::-webkit-scrollbar) */
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #142918 #030504;
+  }
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

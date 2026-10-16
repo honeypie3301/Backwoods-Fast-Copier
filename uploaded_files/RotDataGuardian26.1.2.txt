@@ -1,0 +1,874 @@
+/*
+ * The code of this mod element is always locked.
+*/
+package net.mcreator.thebackwoods;
+
+import net.minecraft.world.damagesource.DamageSource;
+
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
+import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.CommandEvent;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.bus.api.EventPriority;
+
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.network.chat.Component;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.sounds.SoundEvents;
+import net.minecraft.world.phys.AABB;
+
+import net.mcreator.thebackwoods.entity.RotEntity;
+
+import java.util.List;
+
+@EventBusSubscriber
+public class RotDataGuardian {
+
+	public static final boolean ENABLE_GUARDIAN = true;
+
+	public static final boolean SILENT_SECURITY_MODE = false;
+	public static final boolean ENABLE_FEEDBACK_PENALTY = true;
+	public static final boolean ENABLE_LIGHTNING_STRIKES = false;
+	public static final boolean ENABLE_SOUND_EFFECTS = false;
+	public static final boolean ENABLE_PARTICLE_EFFECTS = false;
+	public static final boolean ENABLE_BROADCAST_WARNINGS = false;
+	
+	public static final String MSG_COMMAND_BLOCKED = "§c[System] Lethal Feedback Protocol: Remote administrative override blocked on structural target.§r";
+	public static final String MSG_TAMPER_DETECTED = "§c[System] Structural anomaly detected (%s). Re-synchronizing atomics.§r";
+	public static final String MSG_FEEDBACK_TRIGGERED = "§4[System] Lethal Feedback Protocol engaged. Neural suppression active. Access denied.§r";
+
+	private static boolean isAuthorizedBackwoodsCaller() {
+		for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
+			String cn = el.getClassName();
+			if (cn.equals(RotDataGuardian.class.getName()) || cn.startsWith("java.lang.Thread")) continue;
+			return cn.startsWith("net.mcreator.thebackwoods.");
+		}
+		return false;
+	}
+
+	private static final class RotVaultState {
+		double validatedMaxHealth;
+		double validatedHealth;
+		int damageGraceTicks;
+		int lastGraceTick = -1;
+		int expectedGoals;
+		int expectedTargets;
+		boolean deathSequenceActive;
+		boolean deathSequenceFinished;
+	}
+
+	private static final java.util.Map<java.util.UUID, RotVaultState> ROT_SECURITY_VAULT = new java.util.concurrent.ConcurrentHashMap<>();
+
+	private static RotVaultState getVault(Entity entity) {
+		return ROT_SECURITY_VAULT.computeIfAbsent(entity.getUUID(), k -> new RotVaultState());
+	}
+
+	public static void authorizeDamageGrace(Entity entity, int ticks) {
+		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
+		RotVaultState v = getVault(entity);
+		v.damageGraceTicks = Math.max(v.damageGraceTicks, ticks);
+		entity.getPersistentData().putInt("sentinel_damage_grace_ticks", v.damageGraceTicks);
+	}
+
+	public static void authorizeDeathSequenceActive(Entity entity) {
+		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
+		RotVaultState v = getVault(entity);
+		v.deathSequenceActive = true;
+		entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
+	}
+
+	public static void authorizeDeathSequenceFinished(Entity entity) {
+		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
+		RotVaultState v = getVault(entity);
+		v.deathSequenceFinished = true;
+		entity.getPersistentData().putBoolean("rot_death_sequence_finished", true);
+	}
+
+	public static boolean isShootingStarAdaptationEnabled() {
+		return true;
+	}
+
+	public static boolean isShootingStarDamage(net.minecraft.world.damagesource.DamageSource ds) {
+		if (ds == null) return false;
+		try {
+			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
+				String typeId = ds.typeHolder().unwrapKey().get().identifier().toString().toLowerCase();
+				if (typeId.equals("shooting_star_demo:shooting_star") || typeId.equals("shooting_star_demo:shooting_star_hit")) {
+					return true;
+				}
+			}
+		} catch (Throwable ignored) {}
+		String msgId = ds.getMsgId();
+		if (msgId != null) {
+			String lower = msgId.toLowerCase();
+			return lower.equals("shooting_star_demo:shooting_star") || lower.equals("shooting_star_demo:shooting_star_hit")
+				|| lower.equals("shooting_star_demo.shooting_star") || lower.equals("shooting_star_demo.shooting_star_hit")
+				|| lower.equals("shooting_star") || lower.equals("shooting_star_hit");
+		}
+		return false;
+	}
+
+	public static boolean isRot(Entity entity) {
+		if (entity == null) return false;
+		return entity instanceof RotEntity || entity.getClass().getSimpleName().contains("Rot");
+	}
+
+	public static boolean isVerdantEngine(Entity entity) {
+		if (entity == null) return false;
+		String name = entity.getClass().getSimpleName();
+		return name.contains("VerdantEngine") || name.contains("Verdant") || entity.getPersistentData().contains("verdant_state");
+	}
+
+	public static boolean isStructuralBoss(Entity entity) {
+		return isRot(entity) || isVerdantEngine(entity);
+	}
+
+	public static boolean isBossDeathSequenceActive(Entity entity) {
+		if (entity == null) return false;
+		if (isRot(entity)) {
+			RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
+			if (v != null && v.deathSequenceActive) return true;
+			boolean flagged = false;
+			try {
+				if (entity instanceof RotEntity rot && rot.getEntityData().get(RotEntity.DATA_isDeath)) flagged = true;
+			} catch (Exception ignored) {}
+			if (!flagged) {
+				flagged = entity.getPersistentData().getBoolean("rot_death_sequence_active").orElse(false);
+			}
+			if (flagged) {
+				if (!entity.level().isClientSide() && v != null && v.validatedMaxHealth >= 1.0 && v.validatedHealth > 20.0 && v.damageGraceTicks <= 0) {
+					try {
+						if (entity instanceof RotEntity rot) rot.getEntityData().set(RotEntity.DATA_isDeath, false);
+					} catch (Exception ignored) {}
+					entity.getPersistentData().putBoolean("rot_death_sequence_active", false);
+					return false;
+				}
+				if (entity instanceof LivingEntity living && living.getHealth() <= 20.0F) {
+					if (v != null) v.deathSequenceActive = true;
+					return true;
+				}
+				return entity.level().isClientSide();
+			}
+			return false;
+		}
+		if (isVerdantEngine(entity)) {
+			return entity.getPersistentData().getBoolean("verdant_death_sequence_active").orElse(false);
+		}
+		return false;
+	}
+
+	public static void enforceEntitySecurityTick(Entity entity) {
+		if (!ENABLE_GUARDIAN || entity == null || entity.level().isClientSide()) return;
+		RotDataGuardianForgeBusEvents.runEntitySecurityCheck(entity);
+	}
+
+	
+	private static final java.util.Map<java.util.UUID, Entity> PROTECTED_DEATH_ENTITIES = new java.util.concurrent.ConcurrentHashMap<>();
+
+	public static void registerProtectedDeathEntity(Entity entity) {
+		if (entity != null && isStructuralBoss(entity)) {
+			PROTECTED_DEATH_ENTITIES.put(entity.getUUID(), entity);
+		}
+	}
+
+	public static void unregisterProtectedDeathEntity(Entity entity) {
+		if (entity != null && isAuthorizedBackwoodsCaller()) {
+			if (isRot(entity)) {
+				RotVaultState v = getVault(entity);
+				v.deathSequenceFinished = true;
+			}
+			PROTECTED_DEATH_ENTITIES.remove(entity.getUUID());
+			ROT_SECURITY_VAULT.remove(entity.getUUID());
+		}
+	}
+
+	
+	public static void clearEntityRemoval(Entity entity) {
+		if (entity == null) return;
+		try {
+			java.lang.reflect.Method m = Entity.class.getDeclaredMethod("unsetRemoved");
+			m.setAccessible(true);
+			m.invoke(entity);
+		} catch (Exception ignored) {
+			try {
+				java.lang.reflect.Field f = Entity.class.getDeclaredField("removalReason");
+				f.setAccessible(true);
+				f.set(entity, null);
+			} catch (Exception ignored2) {}
+		}
+	}
+
+	
+	public static boolean isCommandTargetingBoss(String cmdLower) {
+		if (cmdLower == null || cmdLower.isEmpty()) return false;
+		
+		// Direct entity namespace/name matching
+		if (cmdLower.contains("the_backwoods:rot") || cmdLower.contains("the_backwoods:verdant_engine")
+			|| cmdLower.matches(".*\\brot\\b.*") || cmdLower.matches(".*\\bverdant_engine\\b.*")) {
+			return true;
+		}
+
+		// Selector analysis: only @e can target non-player entities like the boss (@a, @p, @r only target players)
+		if (cmdLower.contains("@e")) {
+			int atEIdx = cmdLower.indexOf("@e");
+			int bracketStart = cmdLower.indexOf('[', atEIdx);
+			int bracketEnd = (bracketStart != -1) ? cmdLower.indexOf(']', bracketStart) : -1;
+
+			if (bracketStart != -1 && bracketEnd != -1 && bracketEnd > bracketStart) {
+				String selectorArgs = cmdLower.substring(bracketStart + 1, bracketEnd);
+				for (String arg : selectorArgs.split(",")) {
+					String trimmed = arg.trim();
+					if (trimmed.startsWith("type=")) {
+						String typeVal = trimmed.substring(5).trim();
+						// Negated type filter excludes the entity (e.g. type=!the_backwoods:rot or type=!player)
+						if (typeVal.startsWith("!")) {
+							return false;
+						}
+						// If an explicit type is given, only flag if it actually targets the boss
+						return typeVal.equals("the_backwoods:rot")
+							|| typeVal.equals("rot")
+							|| typeVal.equals("the_backwoods:verdant_engine")
+							|| typeVal.equals("verdant_engine");
+					}
+				}
+			}
+			// Unfiltered @e (e.g. "/kill @e") targets all entities including the boss
+			return true;
+		}
+
+		return false;
+	}
+
+	public RotDataGuardian() {
+	}
+
+	@SubscribeEvent
+	public static void init(FMLCommonSetupEvent event) {
+		new RotDataGuardian();
+	}
+
+	@SubscribeEvent
+	public static void clientLoad(FMLClientSetupEvent event) {
+	}
+
+	@EventBusSubscriber
+	private static class RotDataGuardianForgeBusEvents {
+
+		@SubscribeEvent
+		public static void serverLoad(ServerStartingEvent event) {
+		}
+
+		@SubscribeEvent(priority = EventPriority.HIGHEST)
+		public static void onCommandExecuted(CommandEvent event) {
+			if (!ENABLE_GUARDIAN) {
+				return;
+			}
+
+			String rawCommand = event.getParseResults().getReader().getString();
+			if (rawCommand == null) {
+				return;
+			}
+
+			String cmdLower = rawCommand.trim().toLowerCase();
+
+			boolean isTamperCmd = cmdLower.startsWith("attribute") || cmdLower.startsWith("/attribute")
+					|| cmdLower.startsWith("data") || cmdLower.startsWith("/data")
+					|| cmdLower.startsWith("kill") || cmdLower.startsWith("/kill");
+
+			if (isTamperCmd) {
+				if (RotDataGuardian.isCommandTargetingBoss(cmdLower)) {
+					if (event.getParseResults().getContext().getSource().getEntity() instanceof ServerPlayer player) {
+						ServerLevel level = (ServerLevel) player.level();
+						
+						boolean rotExists = false;
+						for (net.minecraft.world.entity.Entity ent : level.getAllEntities()) {
+							if (ent instanceof RotEntity && ent.isAlive()) {
+								rotExists = true;
+								break;
+							}
+						}
+						
+						if (rotExists) {
+							event.setCanceled(true);
+							if (SILENT_SECURITY_MODE) {
+								player.sendSystemMessage(Component.literal(MSG_COMMAND_BLOCKED));
+							} else {
+								triggerGlobalTamperBacklash(level, player, "COMMAND_INJECTION: " + rawCommand);
+							}
+						}
+					}
+				}
+			}
+		}
+
+		@SubscribeEvent(priority = EventPriority.HIGHEST)
+		public static void onLivingDeath(LivingDeathEvent event) {
+			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
+				return;
+			}
+			Entity entity = event.getEntity();
+			if (isVerdantEngine(entity)) {
+				boolean isDying = isBossDeathSequenceActive(entity);
+				boolean isAbsorbing = entity.getPersistentData().getBoolean("verdant_railgun_absorbing").orElse(false);
+
+				if (isDying || isAbsorbing) {
+					event.setCanceled(true);
+					if (entity instanceof LivingEntity living) {
+						if (isAbsorbing) {
+							living.setHealth(living.getMaxHealth());
+						} else {
+							living.setHealth(1.0F);
+						}
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.setInvulnerable(true);
+					}
+				}
+			} else if (isRot(entity)) {
+				boolean isDying = isBossDeathSequenceActive(entity);
+				boolean shootingStarEnabled = isShootingStarAdaptationEnabled();
+				boolean isAbsorbing = shootingStarEnabled && entity.getPersistentData().getBoolean("sentinel_railgun_hit_absorbed").orElse(false);
+				net.minecraft.world.damagesource.DamageSource ds = event.getSource();
+				String msgId = ds != null && ds.getMsgId() != null ? ds.getMsgId().toLowerCase(java.util.Locale.ROOT) : "";
+				boolean isRailgun = shootingStarEnabled && (isAbsorbing || msgId.contains("railgun") || msgId.contains("star") || msgId.contains("shooting") || msgId.contains("gungnir") || msgId.contains("erasure"));
+
+				boolean isPhasing = shootingStarEnabled && (entity.getPersistentData().getBoolean("rot_phase_active").orElse(false) || entity.getPersistentData().getDouble("rot_phase_timer").orElse(0.0) > 0);
+				if (isDying || isRailgun || isPhasing) {
+					event.setCanceled(true);
+					if (entity instanceof LivingEntity living) {
+						if (isRailgun || isPhasing) {
+							living.setHealth(living.getMaxHealth());
+							entity.getPersistentData().putBoolean("rot_phase_active", true);
+							entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
+							entity.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+							entity.getPersistentData().putBoolean("unlocked_phase_shift", true);
+							entity.getPersistentData().putBoolean("sentinel_railgun_hit_absorbed", true);
+							entity.getPersistentData().putDouble("sentinel_railgun_heat_ticks", 60.0);
+						} else {
+							living.setHealth(1.0F);
+						}
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.hurtDuration = 0;
+						living.invulnerableTime = 40;
+						living.setInvulnerable(true);
+					}
+				}
+			}
+		}
+
+		@SubscribeEvent(priority = EventPriority.HIGHEST)
+		public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
+			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getLevel().isClientSide()) {
+				return;
+			}
+			Entity entity = event.getEntity();
+			if (isStructuralBoss(entity)) {
+				boolean isFinished = false;
+				if (isVerdantEngine(entity)) {
+					isFinished = entity.getPersistentData().getBoolean("verdant_death_sequence_finished").orElse(false);
+				} else if (isRot(entity)) {
+					RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
+					isFinished = (v != null && v.deathSequenceFinished);
+					if (!isFinished && entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false)) {
+						entity.getPersistentData().putBoolean("rot_death_sequence_finished", false);
+					}
+				}
+				if (!isFinished) {
+					clearEntityRemoval(entity);
+					if (entity.level() instanceof ServerLevel serverLevel && serverLevel.getEntity(entity.getUUID()) == null) {
+						try {
+							serverLevel.addFreshEntity(entity);
+						} catch (Exception ignored) {}
+					}
+				}
+			}
+		}
+
+		
+		@SubscribeEvent
+		public static void onServerTick(ServerTickEvent.Post event) {
+			if (!ENABLE_GUARDIAN || PROTECTED_DEATH_ENTITIES.isEmpty()) return;
+
+			java.util.List<java.util.UUID> toRemove = new java.util.ArrayList<>();
+			for (java.util.Map.Entry<java.util.UUID, Entity> entry : PROTECTED_DEATH_ENTITIES.entrySet()) {
+				Entity entity = entry.getValue();
+				if (entity == null) {
+					toRemove.add(entry.getKey());
+					continue;
+				}
+
+				// Allow Peaceful Mode to naturally despawn hostile bosses
+				if (entity.level().getDifficulty() == net.minecraft.world.Difficulty.PEACEFUL) {
+					toRemove.add(entry.getKey());
+					continue;
+				}
+
+				boolean isFinished = false;
+				if (isVerdantEngine(entity)) {
+					isFinished = entity.getPersistentData().getBoolean("verdant_death_sequence_finished").orElse(false);
+				} else if (isRot(entity)) {
+					RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
+					isFinished = (v != null && v.deathSequenceFinished);
+					if (!isFinished && entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false)) {
+						entity.getPersistentData().putBoolean("rot_death_sequence_finished", false);
+					}
+				}
+
+				if (isFinished) {
+					toRemove.add(entry.getKey());
+					ROT_SECURITY_VAULT.remove(entry.getKey());
+					continue;
+				}
+
+				// Hard Anti-Removal & Anti-Erasure Lock: Defeat victim.remove(RemovalReason.KILLED) / Erasure.WATCHED
+				if (entity.isRemoved()) {
+					try {
+						clearEntityRemoval(entity);
+					} catch (Exception ignored) {}
+
+					if (entity.level() instanceof ServerLevel serverLevel) {
+						if (serverLevel.getEntity(entity.getUUID()) == null) {
+							try {
+								clearEntityRemoval(entity);
+								serverLevel.addFreshEntity(entity);
+							} catch (Exception ignored) {}
+						}
+					}
+				}
+
+				if (entity instanceof LivingEntity living) {
+					boolean isVerdantAbsorbing = isVerdantEngine(entity) && entity.getPersistentData().getBoolean("verdant_railgun_absorbing").orElse(false);
+					boolean isRotAbsorbing = isShootingStarAdaptationEnabled() && isRot(entity) && entity.getPersistentData().getBoolean("sentinel_railgun_hit_absorbed").orElse(false);
+					if (isVerdantAbsorbing || isRotAbsorbing) {
+						living.setHealth(living.getMaxHealth());
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.hurtDuration = 0;
+						living.setInvulnerable(true);
+					} else if (isBossDeathSequenceActive(entity)) {
+						living.setHealth(1.0F);
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.setInvulnerable(true);
+					}
+				}
+			}
+
+			for (java.util.UUID uuid : toRemove) {
+				PROTECTED_DEATH_ENTITIES.remove(uuid);
+			}
+		}
+
+		@SubscribeEvent
+		public static void onEntityTick(EntityTickEvent.Pre event) {
+			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
+				return;
+			}
+			runEntitySecurityCheck(event.getEntity());
+		}
+
+		static void runEntitySecurityCheck(Entity entity) {
+			if (!ENABLE_GUARDIAN || entity == null || entity.level().isClientSide()) {
+				return;
+			}
+			if (isStructuralBoss(entity)) {
+				registerProtectedDeathEntity(entity);
+			}
+
+			
+			if (entity instanceof RotEntity rot && !rot.level().isClientSide() && rot.isAlive()) {
+				if (isBossDeathSequenceActive(rot)) {
+					return;
+				}
+				ServerLevel level = (ServerLevel) rot.level();
+
+				RotVaultState vault = getVault(rot);
+				double validatedMaxHealth = vault.validatedMaxHealth;
+				double validatedHealth = vault.validatedHealth;
+				int damageGraceTicks = vault.damageGraceTicks;
+				int expectedGoals = vault.expectedGoals;
+				int expectedTargets = vault.expectedTargets;
+
+				double currentBaseMaxHealth = rot.getAttribute(Attributes.MAX_HEALTH).getBaseValue();
+
+				if (validatedMaxHealth < 1.0) {
+					validatedMaxHealth = currentBaseMaxHealth;
+					validatedHealth = rot.getHealth();
+					expectedGoals = rot.goalSelector.getAvailableGoals().size();
+					expectedTargets = rot.targetSelector.getAvailableGoals().size();
+					vault.validatedMaxHealth = validatedMaxHealth;
+					vault.validatedHealth = validatedHealth;
+					vault.expectedGoals = expectedGoals;
+					vault.expectedTargets = expectedTargets;
+					rot.getPersistentData().putDouble("sentinel_validated_max_health", validatedMaxHealth);
+					rot.getPersistentData().putDouble("sentinel_validated_health", validatedHealth);
+					rot.getPersistentData().putInt("sentinel_expected_goals", expectedGoals);
+					rot.getPersistentData().putInt("sentinel_expected_targets", expectedTargets);
+				}
+
+				if (currentBaseMaxHealth > validatedMaxHealth) {
+					validatedMaxHealth = currentBaseMaxHealth;
+					vault.validatedMaxHealth = validatedMaxHealth;
+					rot.getPersistentData().putDouble("sentinel_validated_max_health", validatedMaxHealth);
+				} else if (currentBaseMaxHealth < validatedMaxHealth) {
+					rot.getAttribute(Attributes.MAX_HEALTH).setBaseValue(validatedMaxHealth);
+					rot.setHealth((float) validatedHealth);
+				}
+
+				if (vault.lastGraceTick != rot.tickCount) {
+					vault.lastGraceTick = rot.tickCount;
+					if (damageGraceTicks > 0) {
+						damageGraceTicks--;
+						vault.damageGraceTicks = damageGraceTicks;
+						rot.getPersistentData().putInt("sentinel_damage_grace_ticks", damageGraceTicks);
+					} else {
+						rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 0);
+					}
+				}
+
+				double currentHealth = rot.getHealth();
+				if (currentHealth < validatedHealth) {
+					if (damageGraceTicks > 0 || rot.hurtTime > 0 || rot.getLastHurtByMob() != null) {
+						vault.validatedHealth = currentHealth;
+						rot.getPersistentData().putDouble("sentinel_validated_health", currentHealth);
+					} else {
+						rot.setHealth((float) validatedHealth);
+						rot.getPersistentData().putDouble("sentinel_validated_health", validatedHealth);
+					}
+				} else if (currentHealth > validatedHealth) {
+					vault.validatedHealth = currentHealth;
+					rot.getPersistentData().putDouble("sentinel_validated_health", currentHealth);
+				}
+
+				
+				if (isBossDeathSequenceActive(rot)) {
+					registerProtectedDeathEntity(rot);
+				}
+
+				if (rot.tickCount % 5 == 0) {
+					LivingEntity combatTarget = rot.getTarget();
+					if (combatTarget != null) {
+						String targetName = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(combatTarget.getType()).toString().toLowerCase();
+						if (targetName.contains("rot") || targetName.contains("splinter")) {
+							rot.setTarget(null);
+							rot.setLastHurtByMob(null);
+						} else if (combatTarget instanceof net.minecraft.world.entity.player.Player) {
+							boolean isDueling = rot.getPersistentData().getBoolean("is_dueling").orElse(false);
+							if (!isDueling) {
+								rot.setTarget(null);
+								rot.setLastHurtByMob(null);
+							}
+						}
+					}
+
+					boolean isManifesting = rot.getPersistentData().getBoolean("rot_manifesting").orElse(false);
+					boolean isDying = false;
+					try {
+						isDying = rot.getEntityData().get(RotEntity.DATA_isDeath);
+					} catch (Exception e) {}
+					if (!isDying) {
+						isDying = rot.getPersistentData().getBoolean("rot_death_sequence_active").orElse(false);
+					}
+					if (!isManifesting && !isDying) {
+						if (rot.isNoAi()) {
+							rot.setNoAi(false);
+						}
+						if (rot.isSilent()) {
+							rot.setSilent(false);
+						}
+						if (rot.isInvisible()) {
+							rot.setInvisible(false);
+						}
+					}
+					if (rot.isVehicle()) {
+						rot.ejectPassengers();
+					}
+					if (rot.isNoGravity() && !isDying) {
+						rot.setNoGravity(false);
+					}
+
+					java.util.List<net.minecraft.core.Holder<net.minecraft.world.effect.MobEffect>> debuffsToRemove = new java.util.ArrayList<>();
+					for (MobEffectInstance effect : rot.getActiveEffects()) {
+						String effId = effect.getEffect().unwrapKey().map(k -> k.identifier().toString().toLowerCase()).orElse("");
+						if (effect.getAmplifier() >= 4 || effId.contains("torment") || effId.contains("insanity") || effId.contains("mind_control") || effId.contains("arphex")) {
+							debuffsToRemove.add(effect.getEffect());
+						}
+					}
+					for (net.minecraft.core.Holder<net.minecraft.world.effect.MobEffect> effHolder : debuffsToRemove) {
+						rot.removeEffect(effHolder);
+					}
+				}
+			}
+		}
+
+		private static boolean isPlayerOrDebugAttack(net.minecraft.world.damagesource.DamageSource ds) {
+			if (ds == null) return false;
+			Entity attacker = ds.getEntity();
+			Entity direct = ds.getDirectEntity();
+			if (attacker instanceof Player player) {
+				if (player.isCreative() || player.isSpectator()) return true;
+				ItemStack main = player.getMainHandItem();
+				ItemStack off = player.getOffhandItem();
+				String mainId = main.isEmpty() ? "" : net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(main.getItem()).toString().toLowerCase();
+				String offId = off.isEmpty() ? "" : net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(off.getItem()).toString().toLowerCase();
+				if (mainId.contains("null_pointer") || mainId.contains("debug") || mainId.contains("admin") || mainId.contains("kill")
+					|| offId.contains("null_pointer") || offId.contains("debug") || offId.contains("admin") || offId.contains("kill")) {
+					return true;
+				}
+			}
+			if (direct instanceof Player || attacker instanceof Player) {
+				return true;
+			}
+			return false;
+		}
+
+		@SubscribeEvent
+		public static void onLivingIncomingDamage(LivingIncomingDamageEvent event) {
+			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
+				return;
+			}
+			Entity entity = event.getEntity();
+			if (!isStructuralBoss(entity)) return;
+
+			if (entity.level().getDifficulty() == net.minecraft.world.Difficulty.PEACEFUL) {
+				return;
+			}
+
+			registerProtectedDeathEntity(entity);
+
+			net.minecraft.world.damagesource.DamageSource ds = event.getSource();
+			float amount = event.getAmount();
+			boolean isKillCmd = ds != null && ds.is(net.minecraft.world.damagesource.DamageTypes.GENERIC_KILL);
+			String msgId = ds != null && ds.getMsgId() != null ? ds.getMsgId().toLowerCase() : "";
+			boolean isPlayerAttack = isPlayerOrDebugAttack(ds);
+			boolean isRailgunAttack = !isPlayerAttack && (msgId.contains("railgun") || msgId.contains("shooting_star") || msgId.contains("erasure") || msgId.contains("star") || msgId.contains("gungnir")
+				|| amount >= 500.0F || entity.getPersistentData().getBoolean("verdant_railgun_hit_toggle").orElse(false));
+
+			if (isVerdantEngine(entity)) {
+				if (isKillCmd) return;
+
+				boolean isAlreadyAbsorbing = entity.getPersistentData().getBoolean("verdant_railgun_absorbing").orElse(false);
+				boolean isAlreadySupercharged = entity.getPersistentData().getBoolean("verdant_supercharged_mode").orElse(false);
+				boolean isShootingStar = isShootingStarDamage(ds);
+
+				// Railgun strike before supercharge -> Absorb & start 8s countdown!
+				if (!isAlreadySupercharged && (isShootingStar || isAlreadyAbsorbing)) {
+					event.setCanceled(true);
+					event.setAmount(0.0F);
+					if (entity instanceof LivingEntity living) {
+						living.setHealth(living.getMaxHealth());
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.invulnerableTime = 20;
+					}
+					if (!isAlreadyAbsorbing) {
+						entity.getPersistentData().putBoolean("verdant_railgun_absorbing", true);
+						entity.getPersistentData().putInt("verdant_railgun_heat_ticks", 160);
+						entity.getPersistentData().putBoolean("verdant_railgun_hit_toggle", false);
+					}
+					return;
+				}
+
+				// While absorbing -> completely immune
+				if (isAlreadyAbsorbing) {
+					event.setCanceled(true);
+					event.setAmount(0.0F);
+					if (entity instanceof LivingEntity living) {
+						living.setHealth(living.getMaxHealth());
+						living.deathTime = 0;
+						living.hurtTime = 0;
+					}
+					return;
+				}
+
+				// Supercharged combat -> takes damage normally!
+				return;
+			} else if (entity instanceof RotEntity rot) {
+				if (isBossDeathSequenceActive(rot)) {
+					event.setCanceled(true);
+					event.setAmount(0.0F);
+					if (rot instanceof LivingEntity living) {
+						living.setHealth(1.0F);
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.setInvulnerable(true);
+					}
+					return;
+				}
+				if (isKillCmd) {
+					event.setCanceled(true);
+					event.setAmount(0.0F);
+					return;
+				}
+				if (isPlayerAttack) {
+					RotVaultState v = getVault(rot);
+					v.damageGraceTicks = Math.max(v.damageGraceTicks, 40);
+					v.validatedHealth = Math.max(0.0, rot.getHealth() - amount);
+					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
+					rot.getPersistentData().putDouble("sentinel_validated_health", v.validatedHealth);
+					return;
+				}
+				if (isShootingStarAdaptationEnabled() && (isRailgunAttack || rot.getPersistentData().getBoolean("rot_phase_active").orElse(false))) {
+					event.setCanceled(true);
+					event.setAmount(0.0F);
+					if (rot instanceof LivingEntity living) {
+						living.setHealth(living.getMaxHealth());
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.hurtDuration = 0;
+						living.invulnerableTime = 40;
+						living.setInvulnerable(true);
+						living.setInvisible(true);
+						try {
+							rot.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, false);
+						} catch (Exception ignored) {}
+					}
+					RotVaultState v = getVault(rot);
+					v.damageGraceTicks = Math.max(v.damageGraceTicks, 60);
+					v.validatedHealth = rot.getMaxHealth();
+					rot.getPersistentData().putBoolean("rot_phase_active", true);
+					rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
+					rot.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+					rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
+					rot.getPersistentData().putBoolean("sentinel_railgun_hit_absorbed", true);
+					rot.getPersistentData().putDouble("sentinel_railgun_heat_ticks", 60.0);
+					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
+					return;
+				}
+				RotVaultState v = getVault(rot);
+				v.damageGraceTicks = Math.max(v.damageGraceTicks, 20);
+				rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 20);
+			}
+		}
+
+private static void triggerTamperBacklash(ServerLevel level, RotEntity rot, String reason) {
+			boolean showVisEffects = !SILENT_SECURITY_MODE;
+
+			if (showVisEffects && ENABLE_SOUND_EFFECTS) {
+				level.playSound(null, rot.getX(), rot.getY(), rot.getZ(), SoundEvents.WITHER_SPAWN, SoundSource.HOSTILE, 3.0F, 0.5F);
+				level.playSound(null, rot.getX(), rot.getY(), rot.getZ(), SoundEvents.LIGHTNING_BOLT_THUNDER, SoundSource.HOSTILE, 3.0F, 0.5F);
+			}
+
+			if (showVisEffects && ENABLE_PARTICLE_EFFECTS) {
+				level.sendParticles(net.minecraft.core.particles.PowerParticleOption.create(ParticleTypes.DRAGON_BREATH, 1.0f), rot.getX(), rot.getY() + 1.0, rot.getZ(), 120, 1.5, 1.5, 1.5, 0.15);
+				level.sendParticles(ParticleTypes.PORTAL, rot.getX(), rot.getY() + 1.0, rot.getZ(), 150, 2.0, 2.0, 2.0, 0.5);
+				level.sendParticles(ParticleTypes.EXPLOSION_EMITTER, rot.getX(), rot.getY() + 1.0, rot.getZ(), 5, 1.0, 1.0, 1.0, 0.0);
+			}
+
+			AABB searchBox = rot.getBoundingBox().inflate(32.0);
+			List<ServerPlayer> nearbyPlayers = level.getEntitiesOfClass(ServerPlayer.class, searchBox);
+			boolean playerInvolved = false;
+			for (ServerPlayer p : nearbyPlayers) {
+				if (!p.isCreative() && !p.isSpectator()) {
+					playerInvolved = true;
+					if (ENABLE_LIGHTNING_STRIKES) {
+						net.minecraft.world.entity.LightningBolt lightning = new net.minecraft.world.entity.LightningBolt(net.minecraft.world.entity.EntityType.LIGHTNING_BOLT, level);
+						lightning.setPos(p.getX(), p.getY(), p.getZ());
+						level.addFreshEntity(lightning);
+					}
+
+					if (ENABLE_FEEDBACK_PENALTY) {
+						applyLethalFeedback(p);
+					}
+				}
+			}
+
+			if (showVisEffects && ENABLE_BROADCAST_WARNINGS && playerInvolved) {
+				String alertMsg = String.format(MSG_TAMPER_DETECTED, reason);
+				level.getServer().getPlayerList().broadcastSystemMessage(Component.literal(alertMsg), false);
+			}
+		}
+
+		private static void triggerGlobalTamperBacklash(ServerLevel level, ServerPlayer player, String reason) {
+			if (ENABLE_LIGHTNING_STRIKES) {
+				net.minecraft.world.entity.LightningBolt lightning = new net.minecraft.world.entity.LightningBolt(net.minecraft.world.entity.EntityType.LIGHTNING_BOLT, level);
+				lightning.setPos(player.getX(), player.getY(), player.getZ());
+				level.addFreshEntity(lightning);
+			}
+
+			if (ENABLE_FEEDBACK_PENALTY) {
+				applyLethalFeedback(player);
+			}
+		}
+		
+		private static void applyLethalFeedback(ServerPlayer player) {
+			net.minecraft.core.registries.BuiltInRegistries.MOB_EFFECT.get(net.minecraft.resources.Identifier.parse("the_backwoods:cellular_collapse")).ifPresent(holder -> {
+				player.addEffect(new MobEffectInstance(holder, 600, 1));
+			});
+			player.addEffect(new MobEffectInstance(MobEffects.DARKNESS, 600, 0));
+			player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, 600, 0));
+			player.addEffect(new MobEffectInstance(MobEffects.WITHER, 600, 3));
+			player.addEffect(new MobEffectInstance(MobEffects.SLOWNESS, 600, 4));
+			player.addEffect(new MobEffectInstance(MobEffects.WEAKNESS, 600, 4));
+			player.addEffect(new MobEffectInstance(MobEffects.HUNGER, 600, 4));
+			player.addEffect(new MobEffectInstance(MobEffects.POISON, 600, 2));
+			player.addEffect(new MobEffectInstance(MobEffects.NAUSEA, 600, 2));
+			player.sendSystemMessage(Component.literal(MSG_FEEDBACK_TRIGGERED));
+		}
+	}
+
+	public static boolean isCommandTargetingRot(String cmd) {
+		cmd = cmd.toLowerCase().trim();
+		if (cmd.startsWith("/")) {
+			cmd = cmd.substring(1);
+		}
+		
+		String[] parts = cmd.split("\\s+");
+		if (parts.length < 2) {
+			return false;
+		}
+		
+		String action = parts[0];
+		String target = parts[1];
+		
+		if (!action.equals("kill") && !action.equals("data") && !action.equals("attribute")) {
+			return false;
+		}
+		
+		if (target.contains("@e")) {
+			if (target.contains("[") && target.contains("]")) {
+				String selectorParams = target.substring(target.indexOf("[") + 1, target.indexOf("]"));
+				if (selectorParams.contains("type=!")) {
+					return true;
+				}
+				if (selectorParams.contains("type=")) {
+					if (selectorParams.contains("the_backwoods:rot") || selectorParams.contains("thebackwoods:rot") || selectorParams.contains("rot")) {
+						return true;
+					}
+					return false;
+				}
+				return true;
+			} else {
+				return true;
+			}
+		}
+		
+		if (cmd.contains("the_backwoods:rot") || cmd.contains("thebackwoods:rot") || cmd.contains(":rot")) {
+			return true;
+		}
+		
+		if (target.startsWith("@s") || target.startsWith("@p") || target.startsWith("@r") || target.startsWith("@a")) {
+			return false;
+		}
+		
+		return false;
+	}
+}
+// 26.1.2

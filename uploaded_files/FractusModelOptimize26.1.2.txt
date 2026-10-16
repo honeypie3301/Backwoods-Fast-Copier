@@ -1,0 +1,459 @@
+/*
+ * MCreator Custom Element: FractusModelOptimize (26.1.2)
+ * Optimized client-side renderer for Fractus and Fractus Prime entities.
+ *
+ * Optimizations implemented:
+ * 1. Emissive Layer Pass Optimization: The emissive eyes layers only render the core model part,
+ *    skipping outer shells, frames, and sub-bones during eye shader passes.
+ * 2. Active Animation State Gating: Skips inactive laser/burst animation keyframe evaluations.
+ * 3. Array-based Pose Resets: Zero stream/iterator allocation overhead per frame.
+ * 4. Distance LOD: Throttles animation keyframe evaluations at long distance (> 28 blocks).
+ * 5. Dynamic Auto-Scale Detection: Automatically determines entity scale from attributes, NBT,
+ *    or bounding box dimensions without hardcoding.
+ */
+package net.mcreator.thebackwoods;
+
+import net.minecraft.client.animation.KeyframeAnimation;
+import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.client.renderer.entity.EntityRendererProvider;
+import net.minecraft.client.renderer.entity.MobRenderer;
+import net.minecraft.client.renderer.entity.RenderLayerParent;
+import net.minecraft.client.renderer.entity.layers.EyesLayer;
+import net.minecraft.client.renderer.entity.layers.RenderLayer;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.LivingEntity;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+
+import com.mojang.blaze3d.vertex.PoseStack;
+
+import net.mcreator.thebackwoods.client.model.ModelFractus_1;
+import net.mcreator.thebackwoods.client.model.animations.Fractus_1Animation;
+import net.mcreator.thebackwoods.entity.FractusEntity;
+import net.mcreator.thebackwoods.entity.FractusPrimeEntity;
+import net.mcreator.thebackwoods.procedures.FractusDisplayConditionAngerProcedure;
+import net.mcreator.thebackwoods.procedures.FractusDisplayConditionNormalProcedure;
+
+@EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+public class FractusModelOptimize {
+
+	public FractusModelOptimize() {
+	}
+
+	@SubscribeEvent
+	public static void init(FMLCommonSetupEvent event) {
+		new FractusModelOptimize();
+	}
+
+	@SubscribeEvent
+	public static void clientLoad(FMLClientSetupEvent event) {
+	}
+
+	@SubscribeEvent
+	public static void registerRenderers(EntityRenderersEvent.RegisterRenderers event) {
+		EntityType<FractusEntity> fractusType = (EntityType<FractusEntity>) BuiltInRegistries.ENTITY_TYPE.get(Identifier.parse("the_backwoods:fractus"))
+				.map(h -> (EntityType<?>) h.value()).orElse(null);
+		if (fractusType != null) {
+			event.registerEntityRenderer(fractusType, OptimizedFractusRenderer::new);
+		}
+
+		EntityType<FractusPrimeEntity> fractusPrimeType = (EntityType<FractusPrimeEntity>) BuiltInRegistries.ENTITY_TYPE.get(Identifier.parse("the_backwoods:fractus_prime"))
+				.map(h -> (EntityType<?>) h.value()).orElse(null);
+		if (fractusPrimeType != null) {
+			event.registerEntityRenderer(fractusPrimeType, OptimizedFractusPrimeRenderer::new);
+		}
+	}
+
+	
+	public static boolean isLaserActiveFast(LivingEntity entity) {
+		if (entity instanceof FractusEntity fe) {
+			return fe.getEntityData().get(FractusEntity.DATA_is_laser_activating)
+				|| fe.getEntityData().get(FractusEntity.DATA_is_laser_burst_activating)
+				|| (fe.isShiftKeyDown() && fe.isSprinting());
+		} else if (entity instanceof FractusPrimeEntity fpe) {
+			return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_activating)
+				|| fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_burst_activating)
+				|| fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_aoe_activating)
+				|| fpe.getStingerCount() > 0;
+		}
+		return false;
+	}
+
+	public static float getDynamicScale(LivingEntity entity, float fallbackScale) {
+		if (entity == null) return fallbackScale;
+		try {
+			if (entity.getPersistentData().contains("visual_scale")) {
+				return (float) entity.getPersistentData().getDoubleOr("visual_scale", fallbackScale);
+			}
+			if (entity.getPersistentData().contains("scale")) {
+				return (float) entity.getPersistentData().getDoubleOr("scale", fallbackScale);
+			}
+			float attrScale = entity.getScale();
+			if (attrScale > 0.01f && Math.abs(attrScale - 1.0f) > 0.01f) {
+				return attrScale;
+			}
+			float width = entity.getBbWidth();
+			if (width > 0.01f && Math.abs(width - 1.0f) > 0.05f) {
+				return width;
+			}
+		} catch (Throwable ignored) {
+		}
+		return fallbackScale;
+	}
+
+	// =========================================================================
+	// RENDER STATES
+	// =========================================================================
+	public static class FractusRenderState extends LivingEntityRenderState {
+		public FractusEntity entity;
+		public double distSqr;
+		public boolean isAnger;
+		public boolean isNormal;
+		public float scale = 1.0f;
+	}
+
+	public static class FractusPrimeRenderState extends LivingEntityRenderState {
+		public FractusPrimeEntity entity;
+		public double distSqr;
+		public boolean isAnger;
+		public boolean isNormal;
+		public float scale = 2.0f;
+	}
+
+	// =========================================================================
+	// OPTIMIZED BASE MODEL
+	// =========================================================================
+	public static class OptimizedFractusModel extends ModelFractus_1 {
+		private final ModelPart root;
+		private final ModelPart allPart;
+		private final ModelPart outerPart;
+		private final ModelPart outer2Part;
+		private final ModelPart shellPart;
+		private final ModelPart shell2Part;
+		private final ModelPart corePart;
+		private final ModelPart[] animatableParts;
+
+		private final KeyframeAnimation keyframeAnimation0;
+		private final KeyframeAnimation keyframeAnimation1;
+		private final KeyframeAnimation keyframeAnimation2;
+		private final KeyframeAnimation keyframeAnimation3;
+		private final KeyframeAnimation keyframeAnimation4;
+
+		private int lastAnimatedTick = -1;
+		private boolean outerShellsHidden = false;
+
+		private KeyframeAnimation safeBake(net.minecraft.client.animation.AnimationDefinition def) {
+			if (def == null) return null;
+			try {
+				return def.bake(this.root);
+			} catch (IllegalArgumentException e) {
+				return new net.minecraft.client.animation.AnimationDefinition(0, false, java.util.Map.of()).bake(this.root);
+			}
+		}
+
+		public OptimizedFractusModel(ModelPart root) {
+			super(root);
+			this.root = root;
+
+			this.keyframeAnimation0 = safeBake(Fractus_1Animation.idle);
+			this.keyframeAnimation1 = safeBake(Fractus_1Animation.laser_activate);
+			this.keyframeAnimation2 = safeBake(Fractus_1Animation.laser_deactivate);
+			this.keyframeAnimation3 = safeBake(Fractus_1Animation.laser_burst_activate);
+			this.keyframeAnimation4 = safeBake(Fractus_1Animation.laser_burst_deactivate);
+
+			ModelPart a = null;
+			ModelPart o = null;
+			ModelPart o2 = null;
+			ModelPart s = null;
+			ModelPart s2 = null;
+			ModelPart c = null;
+
+			try {
+				a = root.getChild("all");
+				o = a.getChild("outer");
+				o2 = a.getChild("outer2");
+				s = a.getChild("shell");
+				s2 = a.getChild("shell2");
+				c = a.getChild("core");
+			} catch (Exception ignored) {
+			}
+
+			this.allPart = a != null ? a : root;
+			this.outerPart = o;
+			this.outer2Part = o2;
+			this.shellPart = s;
+			this.shell2Part = s2;
+			this.corePart = c;
+
+			java.util.List<ModelPart> list = new java.util.ArrayList<>();
+			if (this.allPart != null) list.add(this.allPart);
+			if (this.outerPart != null) list.add(this.outerPart);
+			if (this.outer2Part != null) list.add(this.outer2Part);
+			if (this.shellPart != null) list.add(this.shellPart);
+			if (this.shell2Part != null) list.add(this.shell2Part);
+			if (this.corePart != null) list.add(this.corePart);
+			this.animatableParts = list.toArray(new ModelPart[0]);
+		}
+
+		public void hideOuterShells() {
+			if (this.outerPart != null) this.outerPart.visible = false;
+			if (this.outer2Part != null) this.outer2Part.visible = false;
+			if (this.shellPart != null) this.shellPart.visible = false;
+			if (this.shell2Part != null) this.shell2Part.visible = false;
+			this.outerShellsHidden = true;
+		}
+
+		public void restoreOuterShells() {
+			if (this.outerPart != null) this.outerPart.visible = true;
+			if (this.outer2Part != null) this.outer2Part.visible = true;
+			if (this.shellPart != null) this.shellPart.visible = true;
+			if (this.shell2Part != null) this.shell2Part.visible = true;
+			this.outerShellsHidden = false;
+		}
+
+		public void setupOptimizedAnim(LivingEntityRenderState state) {
+			double distSqr = 0.0;
+			int entityTick = (int) state.ageInTicks;
+
+			if (state instanceof FractusRenderState frs) {
+				distSqr = frs.distSqr;
+				if (frs.entity != null) entityTick = frs.entity.tickCount;
+			} else if (state instanceof FractusPrimeRenderState fprs) {
+				distSqr = fprs.distSqr;
+				if (fprs.entity != null) entityTick = fprs.entity.tickCount;
+			}
+
+			int lodInterval = distSqr > 2304.0 ? 4 : (distSqr > 784.0 ? 2 : 1);
+			if (lodInterval > 1 && lastAnimatedTick != -1 && (entityTick - lastAnimatedTick < lodInterval)) {
+				return;
+			}
+			lastAnimatedTick = entityTick;
+
+			if (this.animatableParts.length > 0) {
+				for (ModelPart part : this.animatableParts) {
+					part.resetPose();
+				}
+			} else {
+				this.root.getAllParts().forEach(ModelPart::resetPose);
+			}
+
+			float ageInTicks = state.ageInTicks;
+			if (state instanceof FractusRenderState frs && frs.entity != null) {
+				FractusEntity fe = frs.entity;
+				if (this.keyframeAnimation0 != null) this.keyframeAnimation0.apply(fe.animationState0, ageInTicks);
+				if (isLaserActiveFast(fe)) {
+					if (this.keyframeAnimation1 != null && fe.animationState1.isStarted()) this.keyframeAnimation1.apply(fe.animationState1, ageInTicks);
+					if (this.keyframeAnimation2 != null && fe.animationState2.isStarted()) this.keyframeAnimation2.apply(fe.animationState2, ageInTicks);
+					if (this.keyframeAnimation3 != null && fe.animationState3.isStarted()) this.keyframeAnimation3.apply(fe.animationState3, ageInTicks);
+					if (this.keyframeAnimation4 != null && fe.animationState4.isStarted()) this.keyframeAnimation4.apply(fe.animationState4, ageInTicks);
+				}
+			} else if (state instanceof FractusPrimeRenderState fprs && fprs.entity != null) {
+				FractusPrimeEntity fpe = fprs.entity;
+				if (this.keyframeAnimation0 != null) this.keyframeAnimation0.apply(fpe.animationState0, ageInTicks);
+				if (isLaserActiveFast(fpe)) {
+					if (this.keyframeAnimation1 != null && fpe.animationState1.isStarted()) this.keyframeAnimation1.apply(fpe.animationState1, ageInTicks);
+					if (this.keyframeAnimation2 != null && fpe.animationState2.isStarted()) this.keyframeAnimation2.apply(fpe.animationState2, ageInTicks);
+					if (this.keyframeAnimation3 != null && fpe.animationState3.isStarted()) this.keyframeAnimation3.apply(fpe.animationState3, ageInTicks);
+					if (this.keyframeAnimation4 != null && fpe.animationState4.isStarted()) this.keyframeAnimation4.apply(fpe.animationState4, ageInTicks);
+				}
+			}
+		}
+
+		@Override
+		public void setupAnim(LivingEntityRenderState state) {
+			setupOptimizedAnim(state);
+			super.setupAnim(state);
+		}
+	}
+
+	// =========================================================================
+	// STANDARD FRACTUS RENDERER
+	// =========================================================================
+	public static class OptimizedFractusRenderer extends MobRenderer<FractusEntity, FractusRenderState, OptimizedFractusModel> {
+		private final Identifier entityTexture = Identifier.parse("the_backwoods:textures/entities/fractus_skin_2.png");
+
+		@SuppressWarnings({"rawtypes", "unchecked"})
+		public OptimizedFractusRenderer(EntityRendererProvider.Context context) {
+			super(context, new OptimizedFractusModel(context.bakeLayer(ModelFractus_1.LAYER_LOCATION)), 0.5f);
+
+			final Identifier ANGER_TEXTURE = Identifier.parse("the_backwoods:textures/entities/fractus_core_2_e.png");
+			final Identifier NORMAL_TEXTURE = Identifier.parse("the_backwoods:textures/entities/fractus_core_e.png");
+
+			this.addLayer((RenderLayer) new EyesLayer((RenderLayerParent) this) {
+				private final RenderType EYE_TYPE = RenderTypes.eyes(ANGER_TEXTURE);
+
+				@Override
+				public RenderType renderType() {
+					return EYE_TYPE;
+				}
+
+				@Override
+				public void submit(PoseStack poseStack, SubmitNodeCollector bufferSource, int light, EntityRenderState state, float yRot, float xRot) {
+					if (state instanceof FractusRenderState frs && frs.distSqr <= 4096.0 && frs.isAnger) {
+						OptimizedFractusModel model = (OptimizedFractusModel) this.getParentModel();
+						model.hideOuterShells();
+						try {
+							super.submit(poseStack, bufferSource, light, state, yRot, xRot);
+						} finally {
+							model.restoreOuterShells();
+						}
+					}
+				}
+			});
+
+			this.addLayer((RenderLayer) new EyesLayer((RenderLayerParent) this) {
+				private final RenderType EYE_TYPE = RenderTypes.eyes(NORMAL_TEXTURE);
+
+				@Override
+				public RenderType renderType() {
+					return EYE_TYPE;
+				}
+
+				@Override
+				public void submit(PoseStack poseStack, SubmitNodeCollector bufferSource, int light, EntityRenderState state, float yRot, float xRot) {
+					if (state instanceof FractusRenderState frs && frs.distSqr <= 4096.0 && frs.isNormal) {
+						OptimizedFractusModel model = (OptimizedFractusModel) this.getParentModel();
+						model.hideOuterShells();
+						try {
+							super.submit(poseStack, bufferSource, light, state, yRot, xRot);
+						} finally {
+							model.restoreOuterShells();
+						}
+					}
+				}
+			});
+		}
+
+		@Override
+		public FractusRenderState createRenderState() {
+			return new FractusRenderState();
+		}
+
+		@Override
+		public void extractRenderState(FractusEntity entity, FractusRenderState state, float partialTick) {
+			super.extractRenderState(entity, state, partialTick);
+			state.entity = entity;
+			state.distSqr = this.entityRenderDispatcher.distanceToSqr(entity);
+			state.isAnger = FractusDisplayConditionAngerProcedure.execute(entity);
+			state.isNormal = FractusDisplayConditionNormalProcedure.execute(entity);
+			state.scale = getDynamicScale(entity, 1.0f);
+		}
+
+		@Override
+		protected void scale(FractusRenderState state, PoseStack poseStack) {
+			if (Math.abs(state.scale - 1.0f) > 0.001f) {
+				poseStack.scale(state.scale, state.scale, state.scale);
+			}
+		}
+
+		@Override
+		public Identifier getTextureLocation(FractusRenderState state) {
+			return entityTexture;
+		}
+	}
+
+	// =========================================================================
+	// FRACTUS PRIME RENDERER
+	// =========================================================================
+	public static class OptimizedFractusPrimeRenderer extends MobRenderer<FractusPrimeEntity, FractusPrimeRenderState, OptimizedFractusModel> {
+		private final Identifier entityTexture = Identifier.parse("the_backwoods:textures/entities/fractus_skin_2.png");
+
+		@SuppressWarnings({"rawtypes", "unchecked"})
+		public OptimizedFractusPrimeRenderer(EntityRendererProvider.Context context) {
+			super(context, new OptimizedFractusModel(context.bakeLayer(ModelFractus_1.LAYER_LOCATION)), 0.5f);
+
+			final Identifier ANGER_TEXTURE = Identifier.parse("the_backwoods:textures/entities/fractus_core_2_e.png");
+			final Identifier NORMAL_TEXTURE = Identifier.parse("the_backwoods:textures/entities/fractus_core_e.png");
+
+			this.addLayer((RenderLayer) new EyesLayer((RenderLayerParent) this) {
+				private final RenderType EYE_TYPE = RenderTypes.eyes(ANGER_TEXTURE);
+
+				@Override
+				public RenderType renderType() {
+					return EYE_TYPE;
+				}
+
+				@Override
+				public void submit(PoseStack poseStack, SubmitNodeCollector bufferSource, int light, EntityRenderState state, float yRot, float xRot) {
+					if (state instanceof FractusPrimeRenderState fprs && fprs.distSqr <= 4096.0 && fprs.isAnger) {
+						OptimizedFractusModel model = (OptimizedFractusModel) this.getParentModel();
+						model.hideOuterShells();
+						try {
+							super.submit(poseStack, bufferSource, light, state, yRot, xRot);
+						} finally {
+							model.restoreOuterShells();
+						}
+					}
+				}
+			});
+
+			this.addLayer((RenderLayer) new EyesLayer((RenderLayerParent) this) {
+				private final RenderType EYE_TYPE = RenderTypes.eyes(NORMAL_TEXTURE);
+
+				@Override
+				public RenderType renderType() {
+					return EYE_TYPE;
+				}
+
+				@Override
+				public void submit(PoseStack poseStack, SubmitNodeCollector bufferSource, int light, EntityRenderState state, float yRot, float xRot) {
+					if (state instanceof FractusPrimeRenderState fprs && fprs.distSqr <= 4096.0 && fprs.isNormal) {
+						OptimizedFractusModel model = (OptimizedFractusModel) this.getParentModel();
+						model.hideOuterShells();
+						try {
+							super.submit(poseStack, bufferSource, light, state, yRot, xRot);
+						} finally {
+							model.restoreOuterShells();
+						}
+					}
+				}
+			});
+		}
+
+		@Override
+		public FractusPrimeRenderState createRenderState() {
+			return new FractusPrimeRenderState();
+		}
+
+		@Override
+		public void extractRenderState(FractusPrimeEntity entity, FractusPrimeRenderState state, float partialTick) {
+			super.extractRenderState(entity, state, partialTick);
+			state.entity = entity;
+			state.distSqr = this.entityRenderDispatcher.distanceToSqr(entity);
+			state.isAnger = entity.getHealth() <= 100.0f;
+			state.isNormal = entity.getHealth() > 100.0f;
+			state.scale = getDynamicScale(entity, 2.0f);
+		}
+
+		@Override
+		protected void scale(FractusPrimeRenderState state, PoseStack poseStack) {
+			if (Math.abs(state.scale - 1.0f) > 0.001f) {
+				poseStack.scale(state.scale, state.scale, state.scale);
+			}
+		}
+
+		@Override
+		public Identifier getTextureLocation(FractusPrimeRenderState state) {
+			return entityTexture;
+		}
+	}
+
+	@EventBusSubscriber
+	private static class FractusModelOptimizeForgeBusEvents {
+		@SubscribeEvent
+		public static void serverLoad(ServerStartingEvent event) {
+		}
+	} // 26.1.2
+}

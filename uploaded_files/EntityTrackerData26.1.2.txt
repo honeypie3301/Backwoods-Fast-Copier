@@ -1,0 +1,342 @@
+package net.mcreator.thebackwoods;
+
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.storage.LevelResource;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.neoforge.event.server.ServerStoppingEvent;
+import net.neoforged.neoforge.event.tick.LevelTickEvent;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+
+import org.slf4j.Logger;
+import com.mojang.logging.LogUtils;
+
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+
+@EventBusSubscriber
+public class EntityTrackerData {
+
+	private static final Logger LOGGER = LogUtils.getLogger();
+
+	public static final String FILE_NAME = "the_backwoods_entity_tracker.dat";
+	public static final int DEFAULT_LOADER_RADIUS = 2;
+	public static final int MAX_LOADER_TICKET_RADIUS = 38; // Extended to 38 chunks (608m) for Supercharged Verdant Engine
+	public static int LOADER_TICKET_RADIUS = DEFAULT_LOADER_RADIUS;
+
+	// In-memory per-dimension registry
+	private final Map<UUID, TrackedEntry> trackedEntities = new ConcurrentHashMap<>();
+	private final Map<UUID, Set<Long>> entityDesiredChunks = new ConcurrentHashMap<>();
+	private final Map<Long, Set<UUID>> chunkOwners = new ConcurrentHashMap<>();
+
+	private static final Map<String, EntityTrackerData> DIMENSION_DATA = new ConcurrentHashMap<>();
+
+	public EntityTrackerData() {
+	}
+
+	public static EntityTrackerData get(ServerLevel level) {
+		if (level == null) return null;
+		String dimKey = level.dimension().identifier().toString();
+		return DIMENSION_DATA.computeIfAbsent(dimKey, k -> {
+			EntityTrackerData data = new EntityTrackerData();
+			data.loadFromFile(level);
+			return data;
+		});
+	}
+
+	public static void track(Entity entity, int ticketRadius, String typeTag) {
+		if (entity != null && !entity.level().isClientSide() && entity.level() instanceof ServerLevel serverLevel) {
+			track(serverLevel, entity.getUUID(), entity.blockPosition(), ticketRadius, typeTag);
+		}
+	}
+
+	public static void track(ServerLevel level, UUID uuid, BlockPos pos, int ticketRadius, String typeTag) {
+		if (level == null || uuid == null || pos == null) return;
+		EntityTrackerData data = get(level);
+		if (data != null) {
+			data.trackEntry(level, uuid, pos, ticketRadius, typeTag);
+		}
+	}
+
+	public static void updatePosition(Entity entity, int ticketRadius) {
+		if (entity != null && !entity.level().isClientSide() && entity.level() instanceof ServerLevel serverLevel) {
+			EntityTrackerData data = get(serverLevel);
+			if (data != null && data.trackedEntities.containsKey(entity.getUUID())) {
+				TrackedEntry old = data.trackedEntities.get(entity.getUUID());
+				String typeTag = old != null ? old.typeTag : "entity";
+				track(serverLevel, entity.getUUID(), entity.blockPosition(), ticketRadius, typeTag);
+			}
+		}
+	}
+
+	public static void untrack(Entity entity) {
+		if (entity != null && !entity.level().isClientSide() && entity.level() instanceof ServerLevel serverLevel) {
+			untrack(serverLevel, entity.getUUID());
+		}
+	}
+
+	public static void untrack(ServerLevel level, UUID uuid) {
+		if (level == null || uuid == null) return;
+		EntityTrackerData data = get(level);
+		if (data != null) {
+			data.untrackEntry(level, uuid);
+		}
+	}
+
+	public static boolean isTracked(ServerLevel level, UUID uuid) {
+		if (level == null || uuid == null) return false;
+		EntityTrackerData data = get(level);
+		return data != null && data.trackedEntities.containsKey(uuid);
+	}
+
+	public Map<UUID, TrackedEntry> getTrackedEntities() {
+		return Collections.unmodifiableMap(this.trackedEntities);
+	}
+
+	public static Set<Long> computeChunkSet(BlockPos pos, int radius) {
+		Set<Long> chunks = new HashSet<>();
+		int centerCx = pos.getX() >> 4;
+		int centerCz = pos.getZ() >> 4;
+		int r = Math.max(1, radius);
+		int rSq = r * r;
+		for (int dx = -r; dx <= r; dx++) {
+			for (int dz = -r; dz <= r; dz++) {
+				if (r > 6 && (dx * dx + dz * dz > rSq)) continue; // Circular chunk loading for wide radii
+				chunks.add(ChunkPos.pack(centerCx + dx, centerCz + dz));
+			}
+		}
+		return chunks;
+	}
+
+	public synchronized void trackEntry(ServerLevel level, UUID uuid, BlockPos pos, int radius, String typeTag) {
+		if (uuid == null || pos == null) return;
+		int safeRadius = Math.min(MAX_LOADER_TICKET_RADIUS, Math.max(1, radius));
+		String safeType = typeTag != null ? typeTag : "entity";
+		TrackedEntry existing = this.trackedEntities.get(uuid);
+		if (existing != null && existing.ticketRadius() == safeRadius && safeType.equals(existing.typeTag())
+				&& (existing.pos().getX() >> 4) == (pos.getX() >> 4)
+				&& (existing.pos().getZ() >> 4) == (pos.getZ() >> 4)) {
+			return;
+		}
+		TrackedEntry entry = new TrackedEntry(uuid, pos.immutable(), safeRadius, safeType);
+		this.trackedEntities.put(uuid, entry);
+		saveToFile(level);
+
+		Set<Long> newDesired = computeChunkSet(pos, safeRadius);
+		Set<Long> oldDesired = this.entityDesiredChunks.put(uuid, newDesired);
+		if (oldDesired == null) {
+			oldDesired = Collections.emptySet();
+		}
+
+		for (Long chunkKey : oldDesired) {
+			if (!newDesired.contains(chunkKey)) {
+				Set<UUID> owners = this.chunkOwners.get(chunkKey);
+				if (owners != null) {
+					owners.remove(uuid);
+					if (owners.isEmpty()) {
+						this.chunkOwners.remove(chunkKey);
+						applyChunkForced(level, chunkKey, false, uuid);
+					}
+				}
+			}
+		}
+
+		for (Long chunkKey : newDesired) {
+			Set<UUID> owners = this.chunkOwners.computeIfAbsent(chunkKey, k -> ConcurrentHashMap.newKeySet());
+			boolean wasEmpty = owners.isEmpty();
+			owners.add(uuid);
+			if (wasEmpty) {
+				applyChunkForced(level, chunkKey, true, uuid);
+			}
+		}
+	}
+
+	public synchronized void untrackEntry(ServerLevel level, UUID uuid) {
+		if (uuid == null) return;
+		this.trackedEntities.remove(uuid);
+		saveToFile(level);
+
+		Set<Long> oldDesired = this.entityDesiredChunks.remove(uuid);
+		if (oldDesired != null) {
+			for (Long chunkKey : oldDesired) {
+				Set<UUID> owners = this.chunkOwners.get(chunkKey);
+				if (owners != null) {
+					owners.remove(uuid);
+					if (owners.isEmpty()) {
+						this.chunkOwners.remove(chunkKey);
+						applyChunkForced(level, chunkKey, false, uuid);
+					}
+				}
+			}
+		}
+	}
+
+	public boolean isChunkOwned(int cx, int cz) {
+		long key = ChunkPos.pack(cx, cz);
+		Set<UUID> owners = this.chunkOwners.get(key);
+		return owners != null && !owners.isEmpty();
+	}
+
+	public static boolean isChunkOwnedByTracker(ServerLevel level, int cx, int cz) {
+		if (level == null) return false;
+		EntityTrackerData data = get(level);
+		return data != null && data.isChunkOwned(cx, cz);
+	}
+
+	private static void applyChunkForced(ServerLevel level, long chunkKey, boolean forced, UUID uuid) {
+		if (level == null) return;
+		Set<Long> forcedChunks = level.getChunkSource().getForceLoadedChunks();
+		if (forcedChunks != null && forcedChunks.contains(chunkKey) == forced) return;
+		ChunkPos chunkPos = ChunkPos.unpack(chunkKey);
+		int cx = chunkPos.x();
+		int cz = chunkPos.z();
+		try {
+			level.setChunkForced(cx, cz, forced);
+		} catch (Exception e) {
+			LOGGER.error("Failed to {} chunk [{}, {}] in dimension {} for entity {}: {}",
+				forced ? "force" : "unforce", cx, cz, level.dimension().identifier(), uuid != null ? uuid : "system", e.getMessage(), e);
+		}
+	}
+
+	public synchronized void reconcileAndValidateTickets(ServerLevel level) {
+		if (level == null) return;
+
+		Map<UUID, Set<Long>> rebuiltEntityDesired = new HashMap<>();
+		Map<Long, Set<UUID>> rebuiltChunkOwners = new HashMap<>();
+
+		for (TrackedEntry entry : this.trackedEntities.values()) {
+			Set<Long> desired = computeChunkSet(entry.pos, entry.ticketRadius);
+			rebuiltEntityDesired.put(entry.uuid, desired);
+			for (Long chunkKey : desired) {
+				rebuiltChunkOwners.computeIfAbsent(chunkKey, k -> ConcurrentHashMap.newKeySet()).add(entry.uuid);
+			}
+		}
+
+		for (Long chunkKey : new HashSet<>(this.chunkOwners.keySet())) {
+			if (!rebuiltChunkOwners.containsKey(chunkKey)) {
+				this.chunkOwners.remove(chunkKey);
+				applyChunkForced(level, chunkKey, false, null);
+			}
+		}
+
+		this.entityDesiredChunks.clear();
+		this.entityDesiredChunks.putAll(rebuiltEntityDesired);
+		for (Map.Entry<Long, Set<UUID>> entry : rebuiltChunkOwners.entrySet()) {
+			this.chunkOwners.computeIfAbsent(entry.getKey(), k -> ConcurrentHashMap.newKeySet()).addAll(entry.getValue());
+		}
+
+		Set<Long> forcedChunks = level.getChunkSource().getForceLoadedChunks();
+		for (Long chunkKey : this.chunkOwners.keySet()) {
+			if (forcedChunks == null || !forcedChunks.contains(chunkKey)) {
+				applyChunkForced(level, chunkKey, true, null);
+			}
+		}
+	}
+
+	private void saveToFile(ServerLevel level) {
+		try {
+			if (level.getServer() == null) return;
+			Path dir = level.getServer().getWorldPath(LevelResource.ROOT).resolve("data");
+			Files.createDirectories(dir);
+			String dimName = level.dimension().identifier().getPath().replace(':', '_');
+			Path file = dir.resolve("entity_tracker_" + dimName + ".txt");
+
+			List<String> lines = new ArrayList<>();
+			for (TrackedEntry entry : this.trackedEntities.values()) {
+				lines.add(entry.uuid + "," + entry.pos.getX() + "," + entry.pos.getY() + "," + entry.pos.getZ() + "," + entry.ticketRadius + "," + entry.typeTag);
+			}
+			Files.write(file, lines);
+		} catch (Exception e) {
+			LOGGER.error("Failed to save entity tracker data for dimension {}: {}", level.dimension().identifier(), e.getMessage(), e);
+		}
+	}
+
+	private void loadFromFile(ServerLevel level) {
+		try {
+			if (level.getServer() == null) return;
+			Path dir = level.getServer().getWorldPath(LevelResource.ROOT).resolve("data");
+			String dimName = level.dimension().identifier().getPath().replace(':', '_');
+			Path file = dir.resolve("entity_tracker_" + dimName + ".txt");
+			if (!Files.exists(file)) return;
+
+			List<String> lines = Files.readAllLines(file);
+			for (String line : lines) {
+				if (line == null || line.trim().isEmpty()) continue;
+				String[] parts = line.split(",");
+				if (parts.length >= 6) {
+					UUID uuid = UUID.fromString(parts[0]);
+					int x = Integer.parseInt(parts[1]);
+					int y = Integer.parseInt(parts[2]);
+					int z = Integer.parseInt(parts[3]);
+					int radius = Integer.parseInt(parts[4]);
+					String type = parts[5];
+					this.trackedEntities.put(uuid, new TrackedEntry(uuid, new BlockPos(x, y, z), radius, type));
+				}
+			}
+		} catch (Exception e) {
+			LOGGER.error("Failed to load entity tracker data for dimension {}: {}", level.dimension().identifier(), e.getMessage(), e);
+		}
+	}
+
+	public record TrackedEntry(UUID uuid, BlockPos pos, int ticketRadius, String typeTag) {
+	}
+
+	@SubscribeEvent
+	public static void onLevelLoad(LevelEvent.Load event) {
+		if (!event.getLevel().isClientSide() && event.getLevel() instanceof ServerLevel serverLevel) {
+			EntityTrackerData data = EntityTrackerData.get(serverLevel);
+			if (data != null) {
+				data.reconcileAndValidateTickets(serverLevel);
+			}
+		}
+	}
+
+	@SubscribeEvent
+	public static void onServerStarting(ServerStartingEvent event) {
+		if (event.getServer() != null) {
+			for (ServerLevel level : event.getServer().getAllLevels()) {
+				EntityTrackerData data = EntityTrackerData.get(level);
+				if (data != null) {
+					data.reconcileAndValidateTickets(level);
+				}
+			}
+		}
+	}
+
+	@SubscribeEvent
+	public static void onLevelTick(LevelTickEvent.Post event) {
+		if (!event.getLevel().isClientSide() && event.getLevel() instanceof ServerLevel serverLevel) {
+			if (serverLevel.getGameTime() % 40 == 0) {
+				EntityTrackerData data = EntityTrackerData.get(serverLevel);
+				if (data != null && !data.getTrackedEntities().isEmpty()) {
+					data.reconcileAndValidateTickets(serverLevel);
+				}
+			}
+		}
+	}
+
+	@SubscribeEvent
+	public static void onEntityLeaveLevel(EntityLeaveLevelEvent event) {
+		Entity entity = event.getEntity();
+		if (entity != null && !event.getLevel().isClientSide() && event.getLevel() instanceof ServerLevel level) {
+			Entity.RemovalReason reason = entity.getRemovalReason();
+			if (reason == Entity.RemovalReason.KILLED) {
+				EntityTrackerData.untrack(level, entity.getUUID());
+			}
+		}
+	}
+
+	@SubscribeEvent
+	public static void onServerStopping(ServerStoppingEvent event) {
+		DIMENSION_DATA.clear();
+	}
+ // 26.1.2
+}

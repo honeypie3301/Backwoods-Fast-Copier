@@ -1,0 +1,344 @@
+package net.mcreator.thebackwoods.procedures;
+
+// 26.1.2 neoforge
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.bus.api.SubscribeEvent;
+
+import net.minecraft.world.entity.ai.attributes.Attributes;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.effect.MobEffects;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.network.protocol.game.ClientboundUpdateMobEffectPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerAbilitiesPacket;
+import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
+import net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket;
+import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
+import net.minecraft.ChatFormatting;
+
+import net.mcreator.thebackwoods.TheBackwoodsMod;
+import net.mcreator.thebackwoods.entity.SplinterEntity;
+import net.mcreator.thebackwoods.entity.LogSplinterEntity;
+
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
+
+@EventBusSubscriber
+public class GrainEntranceProcedure {
+
+	/* =========================================================================
+	 * DIMENSION IDENTIFIERS
+	 * ========================================================================= */
+	private static final ResourceKey<Level> BACKWOODS_DIM = ResourceKey.create(
+		Registries.DIMENSION,
+		Identifier.parse("the_backwoods:backwoods")
+	);
+
+	private static final ResourceKey<Level> GRAIN_DIM = ResourceKey.create(
+		Registries.DIMENSION,
+		Identifier.parse("the_backwoods:the_grain")
+	);
+
+	/* =========================================================================
+	 * CHASE ENTRY CONSTANTS (GrainEntryProcedure)
+	 * ========================================================================= */
+	private static final int CHASE_INITIAL_DELAY_TICKS = 40;
+	private static final int CHASE_REAPPLY_INTERVAL_TICKS = 100;
+	private static final int CHASE_TELEPORT_ON_APPLICATION = 4;
+	private static final int CHASE_TELEPORT_DELAY_TICKS = 78;
+	private static final double SPLINTER_DETECT_RADIUS = 32.0;
+	private static final int BLINDNESS_DURATION_TICKS = 40;
+	private static final int BLINDNESS_AMPLIFIER = 1;
+
+	private static final float CAVE_SOUND_VOLUME = 2.0f;
+	private static final float CAVE_SOUND_PITCH = 0.85f;
+
+	private static final float PRE_TELEPORT_SOUND_VOLUME = 2.0f;
+	private static final float PRE_TELEPORT_SOUND_PITCH = 0.8f;
+
+	private static final String[] CHASE_PARANOIA_MESSAGES = {
+		"Curiosity is a heavy burden.",
+		"We see you seeing us.",
+		"Eyes belong in sockets, traveler.",
+		"Your eyes are in the wrong place.",
+		"The camera doesn't protect you.",
+		"Last chance."
+	};
+
+	/* =========================================================================
+	 * SKY ENTRY CONSTANTS (GrainSkyEntryProcedure)
+	 * ========================================================================= */
+	private static final double SKY_THRESHOLD = 200.0;
+	private static final double SAFE_FALL_VALUE = 1024.0;
+	private static final int LAUNCH_DURATION_TICKS = 250; // 12.5 seconds upward pull
+
+	/* =========================================================================
+	 * STATE TRACKING MAPS
+	 * ========================================================================= */
+	// Chase Entry State
+	private static final Map<UUID, Boolean> thirdFrontState = new ConcurrentHashMap<>();
+	private static final Map<UUID, Boolean> prevThirdFrontState = new ConcurrentHashMap<>();
+	private static final Map<UUID, Integer> heldTicks = new ConcurrentHashMap<>();
+	private static final Map<UUID, Integer> applicationCount = new ConcurrentHashMap<>();
+	private static final Map<UUID, Boolean> teleportQueued = new ConcurrentHashMap<>();
+
+	// Sky Entry State
+	private static final Map<UUID, Integer> ascensionTimers = new ConcurrentHashMap<>();
+	private static final Map<UUID, Integer> entryCooldowns = new ConcurrentHashMap<>();
+	private static final Map<UUID, Integer> safeFallResetTimers = new ConcurrentHashMap<>();
+
+	public static void execute() {
+		// MCreator procedure compatibility stub
+	}
+
+	/* =========================================================================
+	 * UNIFIED TICK HANDLER
+	 * ========================================================================= */
+	@SubscribeEvent
+	public static void onPlayerTick(PlayerTickEvent.Post event) {
+		Player player = event.getEntity();
+		if (player == null)
+			return;
+
+		// Subsystem 1: Third-person chase entry mechanic (runs on both client and server)
+		tickChaseEntry(player);
+
+		// Subsystem 2: Sky ascension launch entry mechanic (runs on server only)
+		if (!player.level().isClientSide() && player instanceof ServerPlayer serverPlayer) {
+			tickSkyAscensionEntry(serverPlayer);
+		}
+	}
+
+	/* =========================================================================
+	 * SUBSYSTEM 1: CHASE ENTRY MECHANICS
+	 * ========================================================================= */
+	private static void tickChaseEntry(Player player) {
+		UUID id = player.getUUID();
+		Level level = player.level();
+
+		if (!level.dimension().equals(BACKWOODS_DIM)) {
+			thirdFrontState.remove(id);
+			prevThirdFrontState.remove(id);
+			heldTicks.remove(id);
+			applicationCount.remove(id);
+			teleportQueued.remove(id);
+			return;
+		}
+
+		if (level.isClientSide()) {
+			boolean inThirdFront = isThirdPersonFrontForLocalPlayer(player);
+			thirdFrontState.put(id, inThirdFront);
+			return;
+		}
+
+		boolean inThirdFront = thirdFrontState.getOrDefault(id, false);
+		boolean wasInThirdFront = prevThirdFrontState.getOrDefault(id, false);
+
+		int currentHeld = heldTicks.getOrDefault(id, 0);
+		int apps = applicationCount.getOrDefault(id, 0);
+
+		if (inThirdFront && isChasedBySplinter(player)) {
+			if (!wasInThirdFront) {
+				currentHeld = 1;
+			} else {
+				currentHeld++;
+			}
+
+			if (currentHeld == CHASE_INITIAL_DELAY_TICKS) {
+				apps++;
+				applyBlindnessAndCaveSound(player);
+			} else if (currentHeld > CHASE_INITIAL_DELAY_TICKS && (currentHeld - CHASE_INITIAL_DELAY_TICKS) % CHASE_REAPPLY_INTERVAL_TICKS == 0) {
+				apps++;
+				applyBlindnessAndCaveSound(player);
+			}
+		} else {
+			currentHeld = 0;
+			apps = 0;
+		}
+
+		heldTicks.put(id, currentHeld);
+		applicationCount.put(id, apps);
+		prevThirdFrontState.put(id, inThirdFront);
+
+		if (apps >= CHASE_TELEPORT_ON_APPLICATION && player instanceof ServerPlayer sp) {
+			if (teleportQueued.getOrDefault(id, false))
+				return;
+
+			teleportQueued.put(id, true);
+
+			String selectedMsg = CHASE_PARANOIA_MESSAGES[sp.getRandom().nextInt(CHASE_PARANOIA_MESSAGES.length)];
+			sp.sendOverlayMessage(Component.literal(selectedMsg).withStyle(ChatFormatting.ITALIC, ChatFormatting.GRAY));
+
+			playPreTeleportSound(sp);
+
+			heldTicks.put(id, 0);
+			applicationCount.put(id, 0);
+			prevThirdFrontState.put(id, false);
+
+			TheBackwoodsMod.queueServerWork(CHASE_TELEPORT_DELAY_TICKS, () -> {
+				if (sp.isRemoved()) {
+					teleportQueued.put(id, false);
+					return;
+				}
+
+				ServerLevel grainLevel = sp.level().getServer().getLevel(GRAIN_DIM);
+				if (grainLevel != null) {
+					sp.connection.send(new ClientboundGameEventPacket(ClientboundGameEventPacket.WIN_GAME, 0));
+					sp.teleportTo(grainLevel, sp.getX(), sp.getY(), sp.getZ(), Set.of(), sp.getYRot(), sp.getXRot(), true);
+					sp.connection.send(new ClientboundPlayerAbilitiesPacket(sp.getAbilities()));
+					for (MobEffectInstance effect : sp.getActiveEffects()) {
+						sp.connection.send(new ClientboundUpdateMobEffectPacket(sp.getId(), effect, false));
+					}
+					sp.connection.send(new ClientboundLevelEventPacket(1032, BlockPos.ZERO, 0, false));
+				}
+
+				teleportQueued.put(id, false);
+			});
+		}
+	}
+
+	private static void applyBlindnessAndCaveSound(Player player) {
+		if (player instanceof ServerPlayer sp) {
+			sp.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, BLINDNESS_DURATION_TICKS, BLINDNESS_AMPLIFIER, false, false));
+
+			if (sp.level() instanceof ServerLevel serverLevel) {
+				SoundEvent s = BuiltInRegistries.SOUND_EVENT.getValue(Identifier.parse("ambient.cave"));
+				if (s != null) {
+					serverLevel.playSound(null, BlockPos.containing(sp.getX(), sp.getY(), sp.getZ()), s, SoundSource.HOSTILE, CAVE_SOUND_VOLUME, CAVE_SOUND_PITCH);
+				}
+			}
+		}
+	}
+
+	private static boolean isChasedBySplinter(Player player) {
+		AABB box = AABB.ofSize(player.position(), SPLINTER_DETECT_RADIUS, SPLINTER_DETECT_RADIUS, SPLINTER_DETECT_RADIUS);
+
+		Predicate<LivingEntity> isChasing = splinter ->
+			splinter.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED)
+			&& splinter.getAttribute(Attributes.MOVEMENT_SPEED).getBaseValue() > 0;
+
+		boolean regularChasing = !player.level().getEntitiesOfClass(
+			SplinterEntity.class, box, isChasing
+		).isEmpty();
+
+		boolean logChasing = !player.level().getEntitiesOfClass(
+			LogSplinterEntity.class, box, isChasing
+		).isEmpty();
+
+		return regularChasing || logChasing;
+	}
+
+	private static void playPreTeleportSound(ServerPlayer sp) {
+		if (sp.level() instanceof ServerLevel serverLevel) {
+			SoundEvent s = BuiltInRegistries.SOUND_EVENT.getValue(Identifier.parse("the_backwoods:wood_creak_paranoia"));
+			if (s != null) {
+				serverLevel.playSound(null, BlockPos.containing(sp.getX(), sp.getY(), sp.getZ()), s, SoundSource.HOSTILE, PRE_TELEPORT_SOUND_VOLUME, PRE_TELEPORT_SOUND_PITCH);
+			}
+		}
+	}
+
+	private static boolean isThirdPersonFrontForLocalPlayer(Player player) {
+		try {
+			Object minecraft = Class.forName("net.minecraft.client.Minecraft").getMethod("getInstance").invoke(null);
+			Object localPlayer = minecraft.getClass().getField("player").get(minecraft);
+			if (localPlayer == null || localPlayer != player)
+				return false;
+
+			Object options = minecraft.getClass().getField("options").get(minecraft);
+			Object cameraType = options.getClass().getMethod("getCameraType").invoke(options);
+
+			boolean isMirrored = (boolean) cameraType.getClass().getMethod("isMirrored").invoke(cameraType);
+			boolean isFirstPerson = (boolean) cameraType.getClass().getMethod("isFirstPerson").invoke(cameraType);
+
+			return isMirrored && !isFirstPerson;
+		} catch (Throwable ignored) {
+			return false;
+		}
+	}
+
+	/* =========================================================================
+	 * SUBSYSTEM 2: SKY ENTRY MECHANICS
+	 * ========================================================================= */
+	private static void tickSkyAscensionEntry(ServerPlayer _player) {
+		UUID playerUUID = _player.getUUID();
+
+		if (entryCooldowns.containsKey(playerUUID)) {
+			int cd = entryCooldowns.get(playerUUID) - 1;
+			if (cd <= 0) entryCooldowns.remove(playerUUID);
+			else entryCooldowns.put(playerUUID, cd);
+		}
+
+		if (safeFallResetTimers.containsKey(playerUUID)) {
+			int timer = safeFallResetTimers.get(playerUUID) - 1;
+			if (timer <= 0 && _player.onGround()) {
+				if (_player.getAttributes().hasAttribute(Attributes.SAFE_FALL_DISTANCE)) {
+					_player.getAttribute(Attributes.SAFE_FALL_DISTANCE).setBaseValue(3.0);
+				}
+				safeFallResetTimers.remove(playerUUID);
+			} else {
+				safeFallResetTimers.put(playerUUID, timer);
+			}
+		}
+
+		if (_player.level().dimension().equals(BACKWOODS_DIM) && _player.getY() >= SKY_THRESHOLD
+				&& !entryCooldowns.containsKey(playerUUID) && !_player.isCreative()) {
+
+			int currentTicks = ascensionTimers.getOrDefault(playerUUID, 0);
+
+			if (currentTicks == 0) {
+				_player.sendOverlayMessage(Component.literal("The sky is only a mirror.")
+					.withStyle(ChatFormatting.ITALIC, ChatFormatting.AQUA));
+			}
+
+			if (currentTicks < LAUNCH_DURATION_TICKS) {
+				_player.setDeltaMovement(0, 0.45, 0);
+				_player.hurtMarked = true;
+				_player.connection.send(new ClientboundSetEntityMotionPacket(_player));
+
+				ascensionTimers.put(playerUUID, currentTicks + 1);
+
+				if (currentTicks + 1 >= LAUNCH_DURATION_TICKS) {
+					executeSeamlessTeleport(_player, playerUUID);
+				}
+			}
+		} else if (ascensionTimers.containsKey(playerUUID)) {
+			ascensionTimers.remove(playerUUID);
+		}
+	}
+
+	private static void executeSeamlessTeleport(ServerPlayer _player, UUID playerUUID) {
+		ServerLevel grainLevel = _player.level().getServer().getLevel(GRAIN_DIM);
+		if (grainLevel != null) {
+			if (_player.getAttributes().hasAttribute(Attributes.SAFE_FALL_DISTANCE)) {
+				_player.getAttribute(Attributes.SAFE_FALL_DISTANCE).setBaseValue(SAFE_FALL_VALUE);
+			}
+
+			_player.teleportTo(grainLevel, _player.getX(), 250.0, _player.getZ(), Set.of(), _player.getYRot(), _player.getXRot(), true);
+
+			ascensionTimers.remove(playerUUID);
+			entryCooldowns.put(playerUUID, 400);
+			safeFallResetTimers.put(playerUUID, 800);
+
+			_player.connection.send(new ClientboundPlayerAbilitiesPacket(_player.getAbilities()));
+			for (MobEffectInstance effect : _player.getActiveEffects())
+				_player.connection.send(new ClientboundUpdateMobEffectPacket(_player.getId(), effect, false));
+			_player.connection.send(new ClientboundLevelEventPacket(1032, BlockPos.ZERO, 0, false));
+		}
+	}
+} // 26.1.2

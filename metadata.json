@@ -1,0 +1,6 @@
+{
+  "name": "Backwoods Companion",
+  "description": "Companion workspace for Backwoods mod development and wiki documentation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,132 @@
+package net.mcreator.thebackwoods.world.feature;
+
+import com.mojang.serialization.Codec;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
+import net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration;
+
+public class LignumColonyFeature extends Feature<NoneFeatureConfiguration> {
+    private static final ResourceKey<Block> LIGNUM_CARO_KEY = ResourceKey.create(
+        Registries.BLOCK, 
+        Identifier.fromNamespaceAndPath("the_backwoods", "lignum_caro")
+    );
+
+    public LignumColonyFeature(Codec<NoneFeatureConfiguration> codec) {
+        super(codec);
+    }
+
+    @Override
+    public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+        WorldGenLevel level = context.level();
+        BlockPos origin = context.origin();
+        long seed = level.getSeed();
+
+        // 1.21.8 registry access layer lookup
+        var blockGetter = level.registryAccess().lookupOrThrow(Registries.BLOCK);
+        var blockHolder = blockGetter.get(LIGNUM_CARO_KEY).orElse(null);
+        if (blockHolder == null) {
+            return false;
+        }
+        BlockState colonyBlock = blockHolder.value().defaultBlockState();
+
+        // =========================================================================
+        // CONFIGURABLE COLONY ADJUSTMENTS
+        // =========================================================================
+        double baseCellScale = 0.026; 
+        double lineThickness = 0.045; 
+        int placementDepth = 45;
+        // =========================================================================
+
+        int minX = origin.getX() & (~15);
+        int minZ = origin.getZ() & (~15);
+
+        boolean generatedAny = false;
+
+        for (int rx = 0; rx < 16; rx++) {
+            for (int rz = 0; rz < 16; rz++) {
+                int worldX = minX + rx;
+                int worldZ = minZ + rz;
+
+                if (isCellularMembrane(worldX, worldZ, seed, baseCellScale, lineThickness)) {
+                    int surfaceY = level.getHeight(Heightmap.Types.WORLD_SURFACE_WG, worldX, worldZ) - 1;
+                    
+                    if (surfaceY > level.getMinY()) {
+                        for (int depth = 0; depth < placementDepth; depth++) {
+                            BlockPos targetPos = new BlockPos(worldX, surfaceY - depth, worldZ);
+                            
+                            if (targetPos.getY() > level.getMinY()) {
+                                BlockState existingBlock = level.getBlockState(targetPos);
+                                if (!existingBlock.isAir()) {
+                                    level.setBlock(targetPos, colonyBlock, 2); // 2 bypasses physics updates cleanly
+                                    generatedAny = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return generatedAny;
+    }
+
+    private boolean isCellularMembrane(double x, double z, long seed, double baseScale, double thickness) {
+        double macroNoise = Math.sin(x * (baseScale * 0.1) + seed) * Math.cos(z * (baseScale * 0.1) - seed);
+        double activeScale = baseScale + (macroNoise * (baseScale * 0.3)); 
+
+        double scaledX = x * activeScale;
+        double scaledZ = z * activeScale;
+
+        int cellX = (int) Math.floor(scaledX);
+        int cellZ = (int) Math.floor(scaledZ);
+
+        double minDistance1 = Double.MAX_VALUE;
+        double minDistance2 = Double.MAX_VALUE;
+
+        for (int i = -1; i <= 1; i++) {
+            for (int j = -1; j <= 1; j++) {
+                int targetGridX = cellX + i;
+                int targetGridZ = cellZ + j;
+
+                long hash = hashCoords(targetGridX, targetGridZ, seed);
+                double offsetX = ((hash & 0xFFF) / 4095.0);
+                double offsetZ = (((hash >> 12) & 0xFFF) / 4095.0);
+
+                double warpX = Math.sin(targetGridZ * 2.0 + seed) * 0.35;
+                double warpZ = Math.cos(targetGridX * 2.0 - seed) * 0.35;
+
+                double featurePointX = targetGridX + offsetX + warpX;
+                double featurePointZ = targetGridZ + offsetZ + warpZ;
+
+                double distance = Math.hypot(scaledX - featurePointX, scaledZ - featurePointZ);
+
+                if (distance < minDistance1) {
+                    minDistance2 = minDistance1;
+                    minDistance1 = distance;
+                } else if (distance < minDistance2) {
+                    minDistance2 = distance;
+                }
+            }
+        }
+
+        double boundaryField = minDistance2 - minDistance1;
+        double localWobble = Math.sin(x * 0.1) * Math.cos(z * 0.1);
+        double thicknessThreshold = thickness + (localWobble * (thickness * 0.3));
+
+        return boundaryField < thicknessThreshold;
+    }
+
+    private long hashCoords(int x, int z, long seed) {
+        long h = seed + x * 3129841L + z * 116129781L;
+        h = (h ^ (h >>> 25)) * 268435459L;
+        return h ^ (h >>> 27);
+    } // 1.21.8
+}

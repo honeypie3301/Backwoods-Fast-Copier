@@ -1,0 +1,946 @@
+package net.mcreator.thebackwoods;
+
+// 26.1.2
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.AbstractClientPlayer;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.client.renderer.entity.player.AvatarRenderer;
+import net.minecraft.client.renderer.entity.state.AvatarRenderState;
+import net.minecraft.client.renderer.entity.state.EntityRenderState;
+import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.rendertype.RenderTypes;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
+import net.minecraft.client.renderer.state.level.LevelRenderState;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.world.effect.MobEffect;
+import net.minecraft.world.effect.MobEffectInstance;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.player.Player;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.ClientTickEvent;
+import net.neoforged.neoforge.client.event.ExtractLevelRenderStateEvent;
+import net.neoforged.neoforge.client.event.RenderLivingEvent;
+import net.neoforged.neoforge.client.event.RenderNameTagEvent;
+import net.neoforged.neoforge.client.event.RenderPlayerEvent;
+import net.neoforged.neoforge.client.event.ViewportEvent;
+import net.neoforged.neoforge.client.event.sound.PlaySoundEvent;
+
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.NeutralMob;
+import net.minecraft.world.entity.PathfinderMob;
+import net.minecraft.world.entity.TamableAnimal;
+import net.minecraft.world.entity.ai.util.DefaultRandomPos;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
+import java.util.List;
+import java.util.ArrayList;
+
+import net.mcreator.thebackwoods.init.TheBackwoodsModMobEffects;
+
+@EventBusSubscriber(modid = "the_backwoods")
+public class Prosopagnosia {
+	private static Holder<MobEffect> cachedEffectHolder = null;
+	private static boolean effectHolderSearched = false;
+
+	public static boolean isBackwoodsEntity(LivingEntity entity) {
+		if (entity == null) {
+			return false;
+		}
+		try {
+			Identifier id = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+			if (id != null && "the_backwoods".equals(id.getNamespace())) {
+				return true;
+			}
+		} catch (Throwable ignored) {
+		}
+		return entity.getClass().getName().startsWith("net.mcreator.thebackwoods");
+	}
+
+	public static void purgeProsopagnosia(LivingEntity entity) {
+		if (entity == null) {
+			return;
+		}
+
+		try {
+			if (entity.hasEffect(TheBackwoodsModMobEffects.PROSOPAGNOSIA_EFFECT)) {
+				entity.removeEffect(TheBackwoodsModMobEffects.PROSOPAGNOSIA_EFFECT);
+			}
+		} catch (Throwable ignored) {
+		}
+
+		if (cachedEffectHolder != null && entity.hasEffect(cachedEffectHolder)) {
+			try {
+				entity.removeEffect(cachedEffectHolder);
+			} catch (Throwable ignored) {
+			}
+		}
+
+		if (!entity.getActiveEffects().isEmpty()) {
+			for (MobEffectInstance effect : new java.util.ArrayList<>(entity.getActiveEffects())) {
+				Holder<MobEffect> holder = effect.getEffect();
+				Identifier id = holder.unwrapKey().map(ResourceKey::identifier).orElse(null);
+				if (id != null && id.getNamespace().equals("the_backwoods") && id.getPath().startsWith("prosopagnosia")) {
+					try {
+						entity.removeEffect(holder);
+					} catch (Throwable ignored) {
+					}
+				}
+			}
+		}
+
+		try {
+			if (entity.getPersistentData().contains("prosopagnosia_active")) {
+				entity.getPersistentData().remove("prosopagnosia_active");
+			}
+			if (entity.getPersistentData().contains("prosopagnosia_hallucination")) {
+				entity.getPersistentData().remove("prosopagnosia_hallucination");
+			}
+		} catch (Throwable ignored) {
+		}
+	}
+
+	public static boolean hasProsopagnosia(LivingEntity entity) {
+		if (entity == null) {
+			return false;
+		}
+
+		// Mod ID entities are completely immune to Prosopagnosia: immediately purge if applied
+		if (isBackwoodsEntity(entity)) {
+			purgeProsopagnosia(entity);
+			return false;
+		}
+
+		if (!entity.getActiveEffects().isEmpty()) {
+			try {
+				if (entity.hasEffect(TheBackwoodsModMobEffects.PROSOPAGNOSIA_EFFECT)) {
+					return true;
+				}
+			} catch (Throwable ignored) {
+			}
+
+			if (!effectHolderSearched) {
+				effectHolderSearched = true;
+				for (Holder<MobEffect> holder : BuiltInRegistries.MOB_EFFECT.asHolderIdMap()) {
+					Identifier id = holder.unwrapKey().map(ResourceKey::identifier).orElse(null);
+					if (id != null && id.getNamespace().equals("the_backwoods") && id.getPath().startsWith("prosopagnosia")) {
+						cachedEffectHolder = holder;
+						break;
+					}
+				}
+			}
+
+			if (cachedEffectHolder != null && entity.hasEffect(cachedEffectHolder)) {
+				return true;
+			}
+
+			if (cachedEffectHolder == null) {
+				for (MobEffectInstance effect : entity.getActiveEffects()) {
+					Holder<MobEffect> holder = effect.getEffect();
+					Identifier id = holder.unwrapKey().map(ResourceKey::identifier).orElse(null);
+					if (id != null && id.getNamespace().equals("the_backwoods") && id.getPath().startsWith("prosopagnosia")) {
+						cachedEffectHolder = holder;
+						return true;
+					}
+				}
+			}
+		}
+
+		try {
+			if (entity.getPersistentData().getBooleanOr("prosopagnosia_active", false)) {
+				return true;
+			}
+		} catch (Throwable ignored) {
+		}
+
+		return false;
+	}
+
+	@SubscribeEvent
+	public static void onEntityTick(EntityTickEvent.Pre event) {
+		if (event.getEntity() == null) {
+			return;
+		}
+
+		if (!(event.getEntity() instanceof LivingEntity entity) || entity instanceof Player) {
+			return;
+		}
+
+		if (entity.level().isClientSide() || !entity.isAlive()) {
+			return;
+		}
+
+		if (isBackwoodsEntity(entity)) {
+			purgeProsopagnosia(entity);
+			return;
+		}
+
+		if (!hasProsopagnosia(entity)) {
+			return;
+		}
+
+		// 1. Breakdown of Pack & Protective Instincts
+		// Clear aggression, targets, and pack instincts: entity cannot distinguish allies from threats
+		if (entity instanceof Mob mob) {
+			if (mob.getTarget() != null) {
+				mob.setTarget(null);
+			}
+			if (mob.isAggressive()) {
+				mob.setAggressive(false);
+			}
+			if (mob.isSprinting()) {
+				mob.setSprinting(false); // Prevents sprinting/walking dust particles under feet
+			}
+		}
+
+		if (entity instanceof NeutralMob neutral) {
+			if (neutral.isAngry() || neutral.getPersistentAngerTarget() != null) {
+				neutral.stopBeingAngry();
+				neutral.setPersistentAngerTarget(null);
+			}
+		}
+
+		if (entity instanceof TamableAnimal tamable) {
+			if (tamable.isOrderedToSit() || tamable.isInSittingPose()) {
+				tamable.setOrderedToSit(false);
+				tamable.setInSittingPose(false);
+			}
+		}
+
+		// 2. Scan for all living entities within paranoid sight range (16 horizontal, 8 vertical)
+		AABB scanBox = entity.getBoundingBox().inflate(16.0, 8.0, 16.0);
+		List<LivingEntity> nearby = entity.level().getEntitiesOfClass(
+			LivingEntity.class,
+			scanBox,
+			other -> other != entity && other.isAlive() && !other.isSpectator()
+				&& !(other instanceof Player p && (p.isCreative() || p.isSpectator()))
+		);
+
+		List<LivingEntity> seenThreats = null;
+		if (!nearby.isEmpty()) {
+			for (LivingEntity other : nearby) {
+				// Line of sight check: flees from every entity they see (including pack mates, owners, villagers)
+				if (entity.hasLineOfSight(other)) {
+					if (seenThreats == null) {
+						seenThreats = new ArrayList<>();
+					}
+					seenThreats.add(other);
+				}
+			}
+		}
+
+		// Read hallucination timer (26.1.2 Mojang getIntOr)
+		int hallucinationTimer = 0;
+		try {
+			hallucinationTimer = entity.getPersistentData().getIntOr("prosopagnosia_hallucination", 0);
+		} catch (Throwable ignored) {
+		}
+
+		// Determine if navigation re-pathing is needed this tick
+		boolean shouldUpdateNav = false;
+		if (entity instanceof Mob mob) {
+			// Recalculate immediately on collision, routine update every 8 ticks (staggered by entity ID),
+			// or when navigation finished/idle check every 4 ticks (staggered) instead of every single tick
+			shouldUpdateNav = entity.horizontalCollision
+				|| ((entity.tickCount + entity.getId()) % 8 == 0)
+				|| (mob.getNavigation().isDone() && ((entity.tickCount + entity.getId()) % 4 == 0));
+		}
+
+		// 3. Fleeing logic: Real Threats vs Phantom Hallucinations
+		if (seenThreats != null && !seenThreats.isEmpty()) {
+			// Real entities seen: clear any phantom hallucination timer because active threats take priority
+			if (hallucinationTimer > 0) {
+				try {
+					entity.getPersistentData().putInt("prosopagnosia_hallucination", 0);
+				} catch (Throwable ignored) {
+				}
+			}
+
+			double entityX = entity.getX();
+			double entityZ = entity.getZ();
+			double repelX = 0.0;
+			double repelZ = 0.0;
+			LivingEntity nearestThreat = null;
+			double minDistanceSq = Double.MAX_VALUE;
+
+			for (LivingEntity threat : seenThreats) {
+				double distSq = entity.distanceToSqr(threat);
+				if (distSq < minDistanceSq) {
+					minDistanceSq = distSq;
+					nearestThreat = threat;
+				}
+
+				double dx = entityX - threat.getX();
+				double dz = entityZ - threat.getZ();
+				double hDistSq = dx * dx + dz * dz;
+				if (hDistSq > 0.0001) {
+					double hDist = Math.sqrt(hDistSq);
+					double dist = Math.sqrt(distSq);
+					double scale = 1.0 / (hDist * Math.max(0.5, dist));
+					repelX += dx * scale;
+					repelZ += dz * scale;
+				}
+			}
+
+			Vec3 repelVector;
+			double rLenSq = repelX * repelX + repelZ * repelZ;
+			if (rLenSq < 0.0001) {
+				double rx = entity.getRandom().nextDouble() - 0.5;
+				double rz = entity.getRandom().nextDouble() - 0.5;
+				double rLen = Math.sqrt(rx * rx + rz * rz);
+				if (rLen > 0.0001) {
+					repelVector = new Vec3(rx / rLen, 0.0, rz / rLen);
+				} else {
+					repelVector = new Vec3(1.0, 0.0, 0.0);
+				}
+			} else {
+				double rLen = Math.sqrt(rLenSq);
+				repelVector = new Vec3(repelX / rLen, 0.0, repelZ / rLen);
+			}
+
+			Vec3 fleeTarget = entity.position().add(repelVector.scale(14.0));
+
+			if (shouldUpdateNav && entity instanceof PathfinderMob pathfinderMob && nearestThreat != null) {
+				try {
+					Vec3 randomAway = DefaultRandomPos.getPosAway(pathfinderMob, 16, 7, nearestThreat.position());
+					if (randomAway != null) {
+						fleeTarget = randomAway;
+					}
+				} catch (Throwable ignored) {
+				}
+			}
+
+			executeFleeMovement(entity, fleeTarget, repelVector, shouldUpdateNav);
+
+			// Erratic panicked glances while fleeing: rapidly look back at threats
+			if (entity instanceof Mob mob && entity.getRandom().nextFloat() < 0.30f) {
+				if (nearestThreat != null && entity.getRandom().nextBoolean()) {
+					mob.getLookControl().setLookAt(nearestThreat.getX(), nearestThreat.getEyeY(), nearestThreat.getZ());
+				} else {
+					float jitterYaw = (entity.getRandom().nextFloat() - 0.5f) * 140.0f;
+					mob.setYRot(mob.getYRot() + jitterYaw);
+					mob.setYHeadRot(mob.getYRot());
+				}
+			}
+		} else {
+			// No real entities in sight: Handle Phantom Hallucinations & Paranoid Twitches
+			if (hallucinationTimer > 0) {
+				hallucinationTimer--;
+				try {
+					entity.getPersistentData().putInt("prosopagnosia_hallucination", hallucinationTimer);
+				} catch (Throwable ignored) {
+				}
+
+				// Generate or maintain phantom flee vector away from an imaginary threat
+				double px = Math.cos(entity.tickCount * 0.15);
+				double pz = Math.sin(entity.tickCount * 0.15);
+				if (entity.getRandom().nextFloat() < 0.10f) {
+					px = entity.getRandom().nextDouble() - 0.5;
+					pz = entity.getRandom().nextDouble() - 0.5;
+				}
+				double pLen = Math.sqrt(px * px + pz * pz);
+				Vec3 phantomRepel = pLen > 0.0001 ? new Vec3(px / pLen, 0.0, pz / pLen) : new Vec3(1.0, 0.0, 0.0);
+				Vec3 fleeTarget = entity.position().add(phantomRepel.scale(12.0));
+
+				if (shouldUpdateNav && entity instanceof PathfinderMob pathfinderMob) {
+					try {
+						Vec3 randomAway = DefaultRandomPos.getPos(pathfinderMob, 14, 7);
+						if (randomAway != null) {
+							fleeTarget = randomAway;
+						}
+					} catch (Throwable ignored) {
+					}
+				}
+
+				executeFleeMovement(entity, fleeTarget, phantomRepel, shouldUpdateNav);
+
+				// Panicked erratic head jerking during hallucination
+				if (entity instanceof Mob mob && entity.getRandom().nextFloat() < 0.35f) {
+					float jitterYaw = (entity.getRandom().nextFloat() - 0.5f) * 180.0f;
+					mob.setYRot(mob.getYRot() + jitterYaw);
+					mob.setYHeadRot(mob.getYRot());
+				}
+			} else {
+				// 2% chance per tick (~every 2.5 seconds) to hallucinate a phantom threat in the shadows
+				if (entity.getRandom().nextFloat() < 0.02f) {
+					int newTimer = 30 + entity.getRandom().nextInt(40);
+					try {
+						entity.getPersistentData().putInt("prosopagnosia_hallucination", newTimer);
+					} catch (Throwable ignored) {
+					}
+					// Sudden startle jump
+					if (entity.onGround()) {
+						entity.setDeltaMovement(entity.getDeltaMovement().add(0.0, 0.25, 0.0));
+					}
+				} else {
+					// Paranoid idle scanning: frequently look around, checking behind their back
+					if (entity instanceof Mob mob && entity.getRandom().nextFloat() < 0.20f) {
+						float twitchYaw = (entity.getRandom().nextFloat() - 0.5f) * 160.0f;
+						mob.setYRot(mob.getYRot() + twitchYaw);
+						mob.setYHeadRot(mob.getYRot());
+					}
+				}
+			}
+		}
+	}
+
+	private static void executeFleeMovement(LivingEntity entity, Vec3 fleeTarget, Vec3 escapeDir, boolean shouldUpdateNav) {
+		if (entity instanceof Mob mob) {
+			if (shouldUpdateNav) {
+				mob.getNavigation().moveTo(fleeTarget.x, fleeTarget.y, fleeTarget.z, 1.45);
+			}
+			if (mob.isSprinting()) {
+				mob.setSprinting(false); // Ensure no dust/walking particles spawn
+			}
+		} else {
+			// Non-mob / aquatic / flying propulsion push
+			Vec3 push = escapeDir.scale(0.035);
+			entity.setDeltaMovement(entity.getDeltaMovement().add(push));
+		}
+
+		// Jump panic if obstructed by a wall or obstacle
+		if (entity.horizontalCollision && entity.onGround()) {
+			entity.setDeltaMovement(entity.getDeltaMovement().add(0.0, 0.38, 0.0));
+		}
+	}
+
+	@EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+	public static class ClientEvents {
+		public static final boolean PROCEDURAL_TEXTURING = true;
+		private static final Identifier OAK_BIPED_TEXTURE = Identifier.parse("the_backwoods:textures/entities/oak_biped.png");
+		private static final Identifier OAK_BIPED_SLIM_TEXTURE = Identifier.parse("the_backwoods:textures/entities/oak_biped_slim.png");
+		private static final Identifier OAK_PLANKS_TEXTURE = Identifier.parse("minecraft:textures/block/oak_planks.png");
+		private static boolean isRenderingSplinter = false;
+
+		private static boolean isSlimPlayer(Player player) {
+		if (player instanceof AbstractClientPlayer clientPlayer) {
+			try {
+				var skin = clientPlayer.getSkin();
+				if (skin != null && skin.model() != null) {
+					return "SLIM".equalsIgnoreCase(skin.model().name()) || "slim".equalsIgnoreCase(skin.model().toString());
+				}
+			} catch (Throwable ignored) {
+			}
+		}
+		return false;
+	}
+
+	@SubscribeEvent
+	public static void onClientTick(ClientTickEvent.Post event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			if (mc.getMusicManager() != null) {
+				mc.getMusicManager().stopPlaying();
+			}
+		}
+	}
+
+	@SubscribeEvent
+	public static void onPlaySound(PlaySoundEvent event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || !hasProsopagnosia(mc.player)) {
+			return;
+		}
+
+		if (event.getSound() != null) {
+			Identifier loc = event.getSound().getIdentifier();
+			if (loc != null && "the_backwoods".equals(loc.getNamespace())) {
+				return;
+			}
+
+			String name = event.getName() != null ? event.getName().toLowerCase(java.util.Locale.ROOT) : "";
+			if (name.startsWith("the_backwoods:") || name.contains("the_backwoods")) {
+				return;
+			}
+
+			SoundSource source = event.getSound().getSource();
+			if (source == SoundSource.MUSIC || source == SoundSource.AMBIENT || source == SoundSource.RECORDS) {
+				event.setSound(null);
+				return;
+			}
+
+			String path = loc != null ? loc.getPath().toLowerCase(java.util.Locale.ROOT) : "";
+			if (name.contains("music") || name.contains("ambient") || path.contains("music") || path.contains("ambient")) {
+				event.setSound(null);
+			}
+		}
+	}
+
+	// ---- Fog distance / sky override -------------------------------------------------
+	private static final float FOG_START = 56.0f;
+	private static final float FOG_END = 96.0f;
+	private static int skyLogCount = 0;
+	private static int renderFogLogCount = 0;
+	private static java.lang.reflect.Field levelStateField = null;
+	private static java.lang.reflect.Field skyStateField = null;
+
+	private static boolean callFloatSetter(Object target, String name, float value) {
+		try {
+			java.lang.reflect.Method m = target.getClass().getMethod(name, float.class);
+			m.invoke(target, value);
+			return true;
+		} catch (Throwable ignored) {
+			return false;
+		}
+	}
+
+	@SubscribeEvent
+	public static void onRenderFog(ViewportEvent.RenderFog event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || !hasProsopagnosia(mc.player)) {
+			return;
+		}
+		blackenSky(mc);
+		// Only cancel (replace vanilla fog) if BOTH setters exist, otherwise leave vanilla fog alone
+		boolean near = callFloatSetter(event, "setNearPlaneDistance", FOG_START);
+		boolean far = callFloatSetter(event, "setFarPlaneDistance", FOG_END);
+		if (renderFogLogCount++ < 3) {
+			org.slf4j.LoggerFactory.getLogger("Prosopagnosia").info("[Prosopagnosia] RenderFog fired: nearSetter={} farSetter={} cancellable={}", near, far, event instanceof net.neoforged.bus.api.ICancellableEvent);
+		}
+		if (near && far && event instanceof net.neoforged.bus.api.ICancellableEvent cancellable) {
+			cancellable.setCanceled(true);
+		}
+	}
+
+	/**
+	 * Blacks out the extracted SkyRenderState (dome colour, sunrise/sunset, stars, end flash) and switches the
+	 * skybox enum to NONE so sun/moon/stars/dome are skipped. The state is re-extracted every frame, so this is
+	 * called from several render-time events; whichever one fires after extraction and before the sky pass wins.
+	 * Look for "[Prosopagnosia]" lines in latest.log to see the real field names/values.
+	 */
+	private static void blackenSky(Minecraft mc) {
+		try {
+			if (mc.levelRenderer == null) return;
+			if (levelStateField == null) {
+				levelStateField = net.minecraft.client.renderer.LevelRenderer.class.getDeclaredField("levelRenderState");
+				levelStateField.setAccessible(true);
+			}
+			Object levelState = levelStateField.get(mc.levelRenderer);
+			if (levelState == null) return;
+			if (skyStateField == null) {
+				for (java.lang.reflect.Field f : levelState.getClass().getDeclaredFields()) {
+					if (f.getType().getSimpleName().equals("SkyRenderState") || f.getName().toLowerCase(java.util.Locale.ROOT).contains("sky")) {
+						f.setAccessible(true);
+						skyStateField = f;
+						break;
+					}
+				}
+				org.slf4j.LoggerFactory.getLogger("Prosopagnosia").info("[Prosopagnosia] sky state field on {}: {}", levelState.getClass().getName(), skyStateField == null ? "NOT FOUND" : skyStateField.getName() + " : " + skyStateField.getType().getName());
+			}
+			if (skyStateField == null) return;
+			Object sky = skyStateField.get(levelState);
+			if (sky == null) return;
+			boolean log = skyLogCount < 3;
+			skyLogCount++;
+			for (java.lang.reflect.Field f : sky.getClass().getDeclaredFields()) {
+				int mod = f.getModifiers();
+				if (java.lang.reflect.Modifier.isStatic(mod) || java.lang.reflect.Modifier.isFinal(mod)) continue;
+				f.setAccessible(true);
+				String n = f.getName().toLowerCase(java.util.Locale.ROOT);
+				if (log) {
+					org.slf4j.LoggerFactory.getLogger("Prosopagnosia").info("[Prosopagnosia] sky field {} {} = {}", f.getType().getSimpleName(), f.getName(), f.get(sky));
+				}
+				Class<?> t = f.getType();
+				if (t.isEnum()) {
+					for (Object constant : t.getEnumConstants()) {
+						if (((Enum<?>) constant).name().equals("NONE")) {
+							f.set(sky, constant);
+							break;
+						}
+					}
+				} else if (t == int.class && n.contains("color")) {
+					f.setInt(sky, n.contains("sunrise") || n.contains("sunset") ? 0 : 0xFF000000);
+				} else if (t == float.class && (n.contains("brightness") || n.contains("alpha") || n.contains("intensity"))) {
+					f.setFloat(sky, 0.0f);
+				}
+			}
+			patchFogParameters(mc);
+		} catch (Throwable ignored) {
+		}
+	}
+
+	private static int fogEventCount = 0;
+
+	private static boolean fogStructureLogged = true; // set to false to dump FogRenderer/LevelRenderer structure again
+
+	/**
+	 * FogRenderer keeps a FogParameters record (rgba + environmental/render start/end + cull distance).
+	 * Records are immutable, so build a copy with black colour and our fog distances and swap it in.
+	 */
+	private static void patchFogParameters(Minecraft mc) {
+		try {
+			Object fogRenderer = null;
+			for (java.lang.reflect.Field f : mc.gameRenderer.getClass().getDeclaredFields()) {
+				if (f.getType().getSimpleName().equals("FogRenderer")) {
+					f.setAccessible(true);
+					fogRenderer = f.get(mc.gameRenderer);
+					break;
+				}
+			}
+			if (fogRenderer == null) return;
+			org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger("Prosopagnosia");
+			if (!fogStructureLogged) {
+				fogStructureLogged = true;
+				for (java.lang.reflect.Field f : fogRenderer.getClass().getDeclaredFields()) {
+					log.info("[Prosopagnosia] FogRenderer field: {} {} {}", java.lang.reflect.Modifier.toString(f.getModifiers()), f.getType().getSimpleName(), f.getName());
+				}
+				for (java.lang.reflect.Method m : fogRenderer.getClass().getDeclaredMethods()) {
+					log.info("[Prosopagnosia] FogRenderer method: {}", m.toGenericString());
+				}
+				for (java.lang.reflect.Field f : net.minecraft.client.renderer.LevelRenderer.class.getDeclaredFields()) {
+					log.info("[Prosopagnosia] LevelRenderer field: {} {}", f.getType().getSimpleName(), f.getName());
+				}
+				for (java.lang.reflect.Method m : net.minecraft.client.renderer.LevelRenderer.class.getDeclaredMethods()) {
+					String mn = m.getName().toLowerCase(java.util.Locale.ROOT);
+					if (mn.contains("sky") || mn.contains("fog") || mn.contains("clear") || mn.contains("renderlevel")) {
+						log.info("[Prosopagnosia] LevelRenderer method: {}", m.toGenericString());
+					}
+				}
+			}
+			java.lang.reflect.Field pf = fogRenderer.getClass().getDeclaredField("parameters");
+			pf.setAccessible(true);
+			Object p = pf.get(fogRenderer);
+			if (p == null || !p.getClass().isRecord()) return;
+			java.lang.reflect.RecordComponent[] comps = p.getClass().getRecordComponents();
+			Class<?>[] types = new Class<?>[comps.length];
+			Object[] vals = new Object[comps.length];
+			for (int i = 0; i < comps.length; i++) {
+				types[i] = comps[i].getType();
+				java.lang.reflect.Method acc = comps[i].getAccessor();
+				acc.setAccessible(true);
+				vals[i] = acc.invoke(p);
+				String n = comps[i].getName();
+				if (types[i] == float.class) {
+					if (n.equals("red") || n.equals("green") || n.equals("blue")) vals[i] = 0.0f;
+					else if (n.equals("renderStart")) vals[i] = FOG_START;
+					else if (n.equals("renderEnd")) vals[i] = FOG_END;
+				}
+			}
+			java.lang.reflect.Constructor<?> ctor = p.getClass().getDeclaredConstructor(types);
+			ctor.setAccessible(true);
+			pf.set(fogRenderer, ctor.newInstance(vals));
+		} catch (Throwable t) {
+			org.slf4j.LoggerFactory.getLogger("Prosopagnosia").warn("[Prosopagnosia] patchFogParameters failed: {}", t.toString());
+		}
+	}
+
+	/**
+	 * Fired right after the game fills the LevelRenderState for this frame and before anything is drawn.
+	 * This is the one point where our edits to the sky state can't be overwritten by extraction.
+	 */
+	@SubscribeEvent
+	public static void onExtractLevelRenderState(ExtractLevelRenderStateEvent event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			blackenSky(mc);
+		}
+	}
+
+	@SubscribeEvent
+	public static void onComputeFov(ViewportEvent.ComputeFov event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			blackenSky(mc);
+		}
+	}
+
+	@SubscribeEvent
+	public static void onComputeCameraAngles(ViewportEvent.ComputeCameraAngles event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			blackenSky(mc);
+		}
+	}
+
+	@SubscribeEvent
+	public static void onComputeFogColor(ViewportEvent.ComputeFogColor event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			if (fogEventCount++ < 3) {
+				org.slf4j.LoggerFactory.getLogger("Prosopagnosia").info("[Prosopagnosia] ComputeFogColor fired, vanilla rgb = {} {} {}", event.getRed(), event.getGreen(), event.getBlue());
+			}
+			event.setRed(0.0f);
+			event.setGreen(0.0f);
+			event.setBlue(0.0f);
+			blackenSky(mc);
+		}
+	}
+
+	@SubscribeEvent
+	public static void onRenderNameTag(RenderNameTagEvent.CanRender event) {
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player != null && hasProsopagnosia(mc.player)) {
+			for (java.lang.reflect.Method m : event.getClass().getMethods()) {
+				if (m.getName().equals("setCanRender") && m.getParameterCount() == 1) {
+					Class<?> paramType = m.getParameterTypes()[0];
+					if (paramType.isEnum()) {
+						for (Object constant : paramType.getEnumConstants()) {
+							if (((Enum<?>) constant).name().equals("FALSE")) {
+								try {
+									m.invoke(event, constant);
+								} catch (Throwable ignored) {
+								}
+								return;
+							}
+						}
+					} else if (paramType == boolean.class) {
+						try {
+							m.invoke(event, false);
+						} catch (Throwable ignored) {
+						}
+						return;
+					}
+				}
+			}
+		}
+	}
+
+	private static CameraRenderState currentCameraState(Minecraft mc) {
+		try {
+			java.lang.reflect.Field field = net.minecraft.client.renderer.LevelRenderer.class.getDeclaredField("levelRenderState");
+			field.setAccessible(true);
+			return ((LevelRenderState) field.get(mc.levelRenderer)).cameraRenderState;
+		} catch (Throwable ignored) {
+			return null;
+		}
+	}
+
+	private static boolean shouldReplaceRenderType(RenderType renderType) {
+		if (renderType == null) {
+			return false;
+		}
+		String str = renderType.toString().toLowerCase(java.util.Locale.ROOT);
+		if (str.contains("atlas") || str.contains("item") || str.contains("block") || str.contains("glint") || str.contains("gui") || str.contains("crumbling") || str.contains("translucent")) {
+			return false;
+		}
+		return str.contains("entity") || str.contains("armor") || str.contains("player");
+	}
+
+	private static SubmitNodeCollector wrapCollector(SubmitNodeCollector original, Identifier texture) {
+		RenderType splinterType = RenderTypes.entityCutout(texture);
+		return (SubmitNodeCollector) java.lang.reflect.Proxy.newProxyInstance(
+			SubmitNodeCollector.class.getClassLoader(),
+			new Class<?>[]{SubmitNodeCollector.class},
+			(proxy, method, values) -> {
+				Object[] args = values == null ? new Object[0] : values.clone();
+				String name = method.getName();
+				if (name.equals("submitModel") && args.length == 10 && args[3] instanceof RenderType type && shouldReplaceRenderType(type)) {
+					args[3] = splinterType;
+				} else if (name.equals("submitModelPart") && args.length == 11 && args[2] instanceof RenderType type && shouldReplaceRenderType(type)) {
+					args[2] = splinterType;
+				} else if (name.equals("submitCustomGeometry") && args.length == 3 && args[1] instanceof RenderType type && shouldReplaceRenderType(type)) {
+					args[1] = splinterType;
+				}
+				try {
+					Object result = method.isDefault()
+						? java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args)
+						: method.invoke(original, args);
+					if (name.equals("order") && result instanceof net.minecraft.client.renderer.OrderedSubmitNodeCollector ordered) {
+						return wrapOrderedCollector(ordered, texture);
+					}
+					return result;
+				} catch (java.lang.reflect.InvocationTargetException e) {
+					throw e.getCause();
+				}
+			});
+	}
+
+	private static net.minecraft.client.renderer.OrderedSubmitNodeCollector wrapOrderedCollector(net.minecraft.client.renderer.OrderedSubmitNodeCollector original, Identifier texture) {
+		RenderType splinterType = RenderTypes.entityCutout(texture);
+		return (net.minecraft.client.renderer.OrderedSubmitNodeCollector) java.lang.reflect.Proxy.newProxyInstance(
+			SubmitNodeCollector.class.getClassLoader(),
+			new Class<?>[]{net.minecraft.client.renderer.OrderedSubmitNodeCollector.class},
+			(proxy, method, args) -> {
+				try {
+					if (method.isDefault()) {
+						return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, args);
+					}
+					if (method.getName().equals("submitModel") && args != null && args.length == 10 && args[3] instanceof RenderType type && shouldReplaceRenderType(type)) {
+						args[3] = splinterType;
+					} else if (method.getName().equals("submitModelPart") && args != null && args.length == 11 && args[2] instanceof RenderType type && shouldReplaceRenderType(type)) {
+						args[2] = splinterType;
+					} else if (method.getName().equals("submitCustomGeometry") && args != null && args.length == 3 && args[1] instanceof RenderType type && shouldReplaceRenderType(type)) {
+						args[1] = splinterType;
+					}
+					return method.invoke(original, args);
+				} catch (java.lang.reflect.InvocationTargetException error) {
+					throw error.getCause();
+				}
+			});
+	}
+
+	private static boolean isBiped(LivingEntity entity, Object renderer) {
+		if (entity instanceof Player) {
+			return true;
+		}
+
+		if (isBackwoodsEntity(entity)) {
+			return false;
+		}
+
+		if (entity != null) {
+			String name = entity.getClass().getName().toLowerCase(java.util.Locale.ROOT);
+			// Never replace skeleton skin or non-human shaped mobs (skeletons have bone UVs, illagers/villagers have robes & joined arms, piglins have snouts/ears)
+			if (name.contains("skeleton") || name.contains("stray") || name.contains("wither")
+					|| name.contains("piglin") || name.contains("illager") || name.contains("pillager")
+					|| name.contains("vindicator") || name.contains("evoker") || name.contains("villager")
+					|| name.contains("witch")) {
+				return false;
+			}
+			// Standard human-shaped zombies or custom splinters
+			if (name.contains("zombie") || name.contains("splinter")) {
+				return true;
+			}
+		}
+
+		// Safe model check avoiding direct PlayerModel/ZombieModel class references in 26.1.2
+		if (renderer instanceof LivingEntityRenderer<?, ?, ?> livingRenderer) {
+			Object model = livingRenderer.getModel();
+			if (model != null) {
+				String modelName = model.getClass().getSimpleName();
+				if (modelName.contains("Player") || modelName.contains("Zombie") || modelName.contains("Humanoid")) {
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	private static LivingEntity getEntityFromEvent(RenderLivingEvent.Pre<?, ?, ?> event) {
+		try {
+			java.lang.reflect.Method m = event.getClass().getMethod("getEntity");
+			Object res = m.invoke(event);
+			if (res instanceof LivingEntity le) return le;
+		} catch (Throwable ignored) {
+		}
+		try {
+			Object state = event.getRenderState();
+			if (state != null) {
+				try {
+					java.lang.reflect.Method m2 = state.getClass().getMethod("getEntity");
+					Object res = m2.invoke(state);
+					if (res instanceof LivingEntity le) return le;
+				} catch (Throwable ignored) {
+				}
+				try {
+					java.lang.reflect.Field f = state.getClass().getDeclaredField("entity");
+					f.setAccessible(true);
+					Object res = f.get(state);
+					if (res instanceof LivingEntity le) return le;
+				} catch (Throwable ignored) {
+				}
+
+				if (state instanceof EntityRenderState renderState) {
+					Minecraft minecraft = Minecraft.getInstance();
+					if (minecraft.level != null && renderState.entityType != null) {
+						LivingEntity closest = null;
+						double closestDistanceSq = 4.0;
+						for (net.minecraft.world.entity.Entity candidate : minecraft.level.entitiesForRendering()) {
+							if (!(candidate instanceof LivingEntity livingCandidate)) continue;
+							if (candidate.getType() != renderState.entityType) continue;
+							double dx = candidate.getX() - renderState.x;
+							double dy = candidate.getY() - renderState.y;
+							double dz = candidate.getZ() - renderState.z;
+							double distanceSq = dx * dx + dy * dy + dz * dz;
+							if (distanceSq < closestDistanceSq) {
+								closest = livingCandidate;
+								closestDistanceSq = distanceSq;
+							}
+						}
+						if (closest != null) return closest;
+					}
+				}
+			}
+		} catch (Throwable ignored) {
+		}
+		return null;
+	}
+
+	@SubscribeEvent
+	public static void onRenderPlayerPre(RenderPlayerEvent.Pre<?> event) {
+		if (isRenderingSplinter) {
+			return;
+		}
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || !hasProsopagnosia(mc.player) || mc.level == null) {
+			return;
+		}
+
+		AvatarRenderState renderState = event.getRenderState();
+		if (renderState == null) {
+			return;
+		}
+		net.minecraft.world.entity.Entity entity = mc.level.getEntity(renderState.id);
+		if (!(entity instanceof Player targetPlayer) || targetPlayer == mc.player) {
+			return;
+		}
+
+		CameraRenderState camera = currentCameraState(mc);
+		if (camera == null) {
+			return;
+		}
+
+		try {
+			isRenderingSplinter = true;
+			AvatarRenderer renderer = event.getRenderer();
+			Identifier texture = isSlimPlayer(targetPlayer) ? OAK_BIPED_SLIM_TEXTURE : OAK_BIPED_TEXTURE;
+			renderer.submit(renderState, event.getPoseStack(), wrapCollector(event.getSubmitNodeCollector(), texture), camera);
+			event.setCanceled(true);
+		} finally {
+			isRenderingSplinter = false;
+		}
+	}
+
+	@SubscribeEvent
+	public static void onRenderLivingPre(RenderLivingEvent.Pre<?, ?, ?> event) {
+		if (isRenderingSplinter) {
+			return;
+		}
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.player == null || !hasProsopagnosia(mc.player) || mc.level == null) {
+			return;
+		}
+
+		LivingEntity living = getEntityFromEvent(event);
+		if (living == null || living == mc.player || living instanceof Player || isBackwoodsEntity(living)) {
+			return;
+		}
+
+		boolean isBipedMob = isBiped(living, event.getRenderer());
+		if (!PROCEDURAL_TEXTURING && !isBipedMob) {
+			return;
+		}
+
+		CameraRenderState camera = currentCameraState(mc);
+		if (camera == null) {
+			return;
+		}
+
+		LivingEntityRenderState renderState = event.getRenderState();
+		if (renderState == null) {
+			return;
+		}
+
+		try {
+			isRenderingSplinter = true;
+			@SuppressWarnings("rawtypes")
+			LivingEntityRenderer rawRenderer = (LivingEntityRenderer) event.getRenderer();
+			Identifier texture = (!PROCEDURAL_TEXTURING || isBipedMob) ? OAK_BIPED_TEXTURE : OAK_PLANKS_TEXTURE;
+			//noinspection unchecked
+			rawRenderer.submit(renderState, event.getPoseStack(), wrapCollector(event.getSubmitNodeCollector(), texture), camera);
+			event.setCanceled(true);
+		} finally {
+			isRenderingSplinter = false;
+		}
+	}
+} // ClientEvents
+} // Prosopagnosia (26.1.2)

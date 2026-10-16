@@ -1,0 +1,32 @@
+package net.mcreator.thebackwoods.procedures;
+
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.commands.arguments.DimensionArgument;
+
+import com.mojang.brigadier.context.CommandContext;
+import java.util.Collections;
+
+public class SwitchDimensionsProcProcedure {
+    public static void execute(LevelAccessor world, double x, double y, double z, CommandContext<CommandSourceStack> arguments) {
+        try {
+            ServerPlayer player = arguments.getSource().getPlayerOrException();
+            ServerLevel targetLevel = DimensionArgument.getDimension(arguments, "target_dim");
+
+            if (targetLevel != null) {
+                // Fixed: Added the empty relative set, a pitch/yaw placeholder, and 'true' to reset positioning properly in 1.21.8
+                player.teleportTo(
+                    targetLevel, 
+                    player.getX(), player.getY(), player.getZ(), 
+                    Collections.emptySet(), 
+                    player.getYRot(), player.getXRot(), 
+                    true
+                );
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+} // 26.1.2
