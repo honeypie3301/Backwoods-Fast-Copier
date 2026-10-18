@@ -80,6 +80,67 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
+// Active Server-Sent Events client connections
+const sseClients = new Set<express.Response>();
+
+function broadcastFilesChanged() {
+  const payload = JSON.stringify({ type: 'files_changed', timestamp: Date.now() });
+  for (const client of sseClients) {
+    try {
+      client.write(`data: ${payload}\n\n`);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
+
+// Debounced filesystem watcher on uploaded_files
+let watchDebounceTimer: NodeJS.Timeout | null = null;
+try {
+  fs.watch(UPLOAD_DIR, (_eventType, filename) => {
+    // Ignore dotfiles, temp files, or lock files
+    if (filename && (filename.startsWith('.') || filename.endsWith('~') || filename.endsWith('.tmp'))) {
+      return;
+    }
+    if (watchDebounceTimer) {
+      clearTimeout(watchDebounceTimer);
+    }
+    watchDebounceTimer = setTimeout(() => {
+      broadcastFilesChanged();
+    }, 200);
+  });
+} catch (err) {
+  console.error('Failed to initialize fs.watch on UPLOAD_DIR:', err);
+}
+
+// GET /api/files/stream - Server-Sent Events stream for real-time filesystem updates
+app.get('/api/files/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders?.();
+
+  // Send initial connected confirmation
+  res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
+  sseClients.add(res);
+
+  // Send keep-alive comments every 20 seconds
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(heartbeat);
+      sseClients.delete(res);
+    }
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    sseClients.delete(res);
+  });
+});
+
 // GET /api/files - list all files in uploaded_files
 app.get('/api/files', (req, res) => {
   try {
@@ -205,6 +266,8 @@ app.post('/api/files', (req, res) => {
     const stats = fs.statSync(filePath);
     const { version, source } = detectVersion(safeName, fileContent);
 
+    broadcastFilesChanged();
+
     res.json({
       success: true,
       file: {
@@ -233,6 +296,7 @@ app.delete('/api/files/:filename', (req, res) => {
     }
 
     fs.unlinkSync(filePath);
+    broadcastFilesChanged();
     res.json({ success: true, message: `File ${filename} deleted successfully.` });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

@@ -1,5 +1,6 @@
 package net.mcreator.thebackwoods.procedures;
 // 1.21.1 neoforge
+import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.bus.api.SubscribeEvent;
@@ -26,6 +27,7 @@ import net.minecraft.core.registries.Registries;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.world.level.block.state.properties.Property;
 import net.mcreator.thebackwoods.init.TheBackwoodsModBlocks;
@@ -36,11 +38,20 @@ import net.minecraft.nbt.Tag;
 
 import java.util.HashSet;
 import java.util.Set;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @EventBusSubscriber
-public class DimensionDefenseProcedure {
+public final class DimensionDefenseProcedure {
+
+    // ---------- PERFORMANCE CACHES ----------
+    private static final Map<Block, Boolean> FIRE_CACHE = new ConcurrentHashMap<>();
+    private static final Map<Block, Boolean> SMOLDERING_PLANK_CACHE = new ConcurrentHashMap<>();
+    // ----------------------------------------
 
     // ==========================================
     // DIMENSIONS
@@ -91,6 +102,20 @@ public class DimensionDefenseProcedure {
     private static final String NBT_LAVA_COOLDOWN_KEY = "grain_lava_purge_cd";
 
     // ==========================================
+    // LAVA SUPPRESSION CONSTANTS
+    // ==========================================
+    private static final int SUPPRESSION_CHECK_INTERVAL_TICKS = 3;           // Scan roughly 7 times per second
+    private static final int SUPPRESSION_SCAN_RADIUS_XZ = 128;               // Expanded horizontal range (257x257 block chunk diameter)
+    private static final int Y_THRESHOLD = -54;                              // only suppress at or below this Y
+    private static final int MAX_CHECKS_PER_PLAYER_SCAN = 1200000;           // High budget so the scan actually completes
+    private static final int MAX_REMOVALS_PER_PLAYER_SCAN = 8192;            // Allows removing vast sections of lakes at once
+    private static final long PLAYER_LAVA_PROTECTION_TICKS = 20L * 60L * 10L; // 10 minutes
+    private static final int PROTECTION_CLEANUP_INTERVAL_TICKS = 20 * 30;     // every 30 seconds
+
+    // OPTIMIZATION: Store primitives (Long coordinates) instead of heavy concatenated Strings
+    private static final Map<Long, Long> PLAYER_PLACED_LAVA = new ConcurrentHashMap<>();
+
+    // ==========================================
     // TNT DEFENSE CONSTANTS
     // ==========================================
     private static final int TNT_CHECK_INTERVAL_TICKS = 8;
@@ -102,6 +127,18 @@ public class DimensionDefenseProcedure {
 
     // Compatibility method for MCreator
     public static void execute() {
+    }
+
+    @SubscribeEvent
+    public static void onBlockPlace(BlockEvent.EntityPlaceEvent event) {
+        if (!(event.getEntity() instanceof Player)) return;
+        if (!event.getPlacedBlock().getFluidState().is(Fluids.LAVA)) return;
+        if (!(event.getLevel() instanceof Level level)) return;
+
+        ResourceKey<Level> dim = level.dimension();
+        if (!isTargetDimension(dim)) return;
+
+        PLAYER_PLACED_LAVA.put(event.getPos().asLong(), level.getGameTime());
     }
 
     @SubscribeEvent
@@ -118,9 +155,10 @@ public class DimensionDefenseProcedure {
         // 1. Fire Defense (Valid in: The Grain, Backwoods, The Sub Strata, The Petrified Weald)
         tickFireDefense(level, player, dim);
 
-        // 2 & 3. Lava & TNT Defense (Valid in: The Grain, Backwoods, The Sub Strata)
+        // 2, 3 & 4. Lava Defense, Lava Suppression & TNT Defense (Valid in: The Grain, Backwoods, The Sub Strata)
         if (LAVA_AND_TNT_VALID_DIMENSIONS.contains(dim)) {
             tickLavaDefense(level, player);
+            tickLavaSuppression(level, player, dim);
             tickTntDefense(level, player);
         }
     }
@@ -163,6 +201,7 @@ public class DimensionDefenseProcedure {
     private static void silentPurgeSliced(Level level, BlockPos center, int tickCount) {
         if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
         net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
 
         boolean isStrongDim = level.dimension() == THE_GRAIN || level.dimension() == THE_SUB_STRATA;
         int totalSlices = isStrongDim ? 3 : 12;
@@ -194,7 +233,12 @@ public class DimensionDefenseProcedure {
 
                 if (currentChunk == null || czChunk != lastChunkZ) {
                     lastChunkZ = czChunk;
-                    currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
                 }
 
                 if (currentChunk == null) continue;
@@ -211,6 +255,7 @@ public class DimensionDefenseProcedure {
                     if (secIndex < 0 || secIndex >= sections.length) continue;
                     net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
                     if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(DimensionDefenseProcedure::isFire)) continue;
 
                     int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
                     int startY = Math.max(localMinY, secMinY);
@@ -240,6 +285,7 @@ public class DimensionDefenseProcedure {
     private static int countFireInThreatRadius(Level level, BlockPos center) {
         if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return 0;
         net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
 
         int count = 0;
         int cx = center.getX();
@@ -261,7 +307,12 @@ public class DimensionDefenseProcedure {
 
                 if (currentChunk == null || czChunk != lastChunkZ) {
                     lastChunkZ = czChunk;
-                    currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
                 }
 
                 if (currentChunk == null) continue;
@@ -278,6 +329,7 @@ public class DimensionDefenseProcedure {
                     if (secIndex < 0 || secIndex >= sections.length) continue;
                     net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
                     if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(DimensionDefenseProcedure::isFire)) continue;
 
                     int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
                     int startY = Math.max(localMinY, secMinY);
@@ -299,6 +351,7 @@ public class DimensionDefenseProcedure {
     private static void purgeFireInThreatRadius(Level level, BlockPos center) {
         if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
         net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
 
         BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
         int cx = center.getX();
@@ -320,7 +373,12 @@ public class DimensionDefenseProcedure {
 
                 if (currentChunk == null || czChunk != lastChunkZ) {
                     lastChunkZ = czChunk;
-                    currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
                 }
 
                 if (currentChunk == null) continue;
@@ -337,6 +395,7 @@ public class DimensionDefenseProcedure {
                     if (secIndex < 0 || secIndex >= sections.length) continue;
                     net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
                     if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(DimensionDefenseProcedure::isFire)) continue;
 
                     int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
                     int startY = Math.max(localMinY, secMinY);
@@ -387,27 +446,66 @@ public class DimensionDefenseProcedure {
     }
 
     private static void startDominoPurge(Level level, Player player, BlockPos center) {
+        if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
+
         List<BlockPos> firePositions = new ArrayList<>();
         List<BlockPos> plankPositions = new ArrayList<>();
-        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
         int cx = center.getX();
         int cy = center.getY();
         int cz = center.getZ();
 
-        for (int dx = -FIRE_THREAT_RADIUS_XZ; dx <= FIRE_THREAT_RADIUS_XZ; dx += 2) {
-            for (int dz = -FIRE_THREAT_RADIUS_XZ; dz <= FIRE_THREAT_RADIUS_XZ; dz += 2) {
-                for (int dy = -FIRE_THREAT_RADIUS_Y; dy <= FIRE_THREAT_RADIUS_Y; dy += 2) {
-                    for (int ox = 0; ox < 2; ox++) {
-                        for (int oy = 0; oy < 2; oy++) {
-                            for (int oz = 0; oz < 2; oz++) {
-                                p.set(cx + dx + ox, cy + dy + oy, cz + dz + oz);
-                                BlockState state = level.getBlockState(p);
-                                if (isFire(state)) {
-                                    firePositions.add(p.immutable());
-                                } else if (isSmolderingPlank(state)) {
-                                    plankPositions.add(p.immutable());
-                                }
-                            }
+        int minY = cy - FIRE_THREAT_RADIUS_Y;
+        int maxY = cy + FIRE_THREAT_RADIUS_Y + 1;
+
+        for (int dx = -FIRE_THREAT_RADIUS_XZ; dx <= FIRE_THREAT_RADIUS_XZ + 1; dx++) {
+            int absX = cx + dx;
+            int cxChunk = absX >> 4;
+            int lastChunkZ = -999;
+            net.minecraft.world.level.chunk.LevelChunk currentChunk = null;
+
+            for (int dz = -FIRE_THREAT_RADIUS_XZ; dz <= FIRE_THREAT_RADIUS_XZ + 1; dz++) {
+                int absZ = cz + dz;
+                int czChunk = absZ >> 4;
+
+                if (currentChunk == null || czChunk != lastChunkZ) {
+                    lastChunkZ = czChunk;
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
+                }
+
+                if (currentChunk == null) continue;
+
+                int localMinY = Math.max(currentChunk.getMinBuildHeight(), minY);
+                int localMaxY = Math.min(currentChunk.getMaxBuildHeight() - 1, maxY);
+
+                int minSection = (localMinY - currentChunk.getMinBuildHeight()) >> 4;
+                int maxSection = (localMaxY - currentChunk.getMinBuildHeight()) >> 4;
+
+                net.minecraft.world.level.chunk.LevelChunkSection[] sections = currentChunk.getSections();
+
+                for (int secIndex = minSection; secIndex <= maxSection; secIndex++) {
+                    if (secIndex < 0 || secIndex >= sections.length) continue;
+                    net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
+                    if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(state -> isFire(state) || isSmolderingPlank(state))) continue;
+
+                    int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
+                    int startY = Math.max(localMinY, secMinY);
+                    int endY = Math.min(localMaxY, secMinY + 15);
+
+                    for (int absY = startY; absY <= endY; absY++) {
+                        BlockState state = section.getBlockState(absX & 15, absY & 15, absZ & 15);
+                        if (state.isAir()) continue;
+                        if (isFire(state)) {
+                            firePositions.add(new BlockPos(absX, absY, absZ));
+                        } else if (isSmolderingPlank(state)) {
+                            plankPositions.add(new BlockPos(absX, absY, absZ));
                         }
                     }
                 }
@@ -520,22 +618,16 @@ public class DimensionDefenseProcedure {
             }
         }
 
-        List<BlockPos> frontier = new ArrayList<>();
+        ArrayDeque<BlockPos> frontier = new ArrayDeque<>();
         frontier.add(seed);
         remaining.remove(seed);
         ordered.add(seed);
 
         while (!frontier.isEmpty() && !remaining.isEmpty()) {
-            BlockPos current = frontier.remove(0);
-            List<BlockPos> neighbors = new ArrayList<>();
+            BlockPos current = frontier.removeFirst();
             for (Direction d : Direction.values()) {
-                BlockPos nPos = current.relative(d);
-                if (remaining.contains(nPos)) {
-                    neighbors.add(nPos);
-                }
-            }
-            for (BlockPos n : neighbors) {
-                remaining.remove(n);
+                BlockPos n = current.relative(d);
+                if (!remaining.remove(n)) continue;
                 ordered.add(n);
                 frontier.add(n);
             }
@@ -674,12 +766,19 @@ public class DimensionDefenseProcedure {
     private static boolean isSmolderingPlank(BlockState state) {
         if (state == null || state.isAir()) return false;
         Block block = state.getBlock();
+        Boolean cached = SMOLDERING_PLANK_CACHE.get(block);
+        if (cached != null) return cached;
+
+        boolean result = false;
         ResourceLocation reg = BuiltInRegistries.BLOCK.getKey(block);
         if (reg != null) {
             String path = reg.getPath().toLowerCase();
-            return path.contains("smoldering") && path.contains("plank");
+            if (path.contains("smoldering") && path.contains("plank")) {
+                result = true;
+            }
         }
-        return false;
+        SMOLDERING_PLANK_CACHE.put(block, result);
+        return result;
     }
 
     private static BlockState getRestoredPlankState(BlockState burntState, net.minecraft.util.RandomSource random) {
@@ -720,17 +819,24 @@ public class DimensionDefenseProcedure {
     private static boolean isFire(BlockState state) {
         if (state == null || state.isAir()) return false;
         Block block = state.getBlock();
-        ResourceLocation reg = BuiltInRegistries.BLOCK.getKey(block);
-        if (reg != null) {
-            String namespace = reg.getNamespace();
-            String path = reg.getPath().toLowerCase();
-            if (namespace.equals("burnt") && (path.equals("wood_fire") || path.matches("wood_fire_[2-9]"))) {
-                return true;
+        Boolean cached = FIRE_CACHE.get(block);
+        if (cached != null) return cached;
+
+        boolean result = false;
+        if (block instanceof BaseFireBlock || block == Blocks.FIRE || block == Blocks.SOUL_FIRE) {
+            result = true;
+        } else {
+            ResourceLocation reg = BuiltInRegistries.BLOCK.getKey(block);
+            if (reg != null) {
+                String namespace = reg.getNamespace();
+                String path = reg.getPath().toLowerCase();
+                if (namespace.equals("burnt") && (path.equals("wood_fire") || path.matches("wood_fire_[2-9]"))) {
+                    result = true;
+                }
             }
         }
-        return state.getBlock() instanceof BaseFireBlock
-                || state.is(Blocks.FIRE)
-                || state.is(Blocks.SOUL_FIRE);
+        FIRE_CACHE.put(block, result);
+        return result;
     }
 
     // =========================================================================
@@ -760,12 +866,65 @@ public class DimensionDefenseProcedure {
     }
 
     private static int countLavaInRadius(Level level, BlockPos center) {
+        if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return 0;
+        net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
+
         int count = 0;
+        int cx = center.getX();
+        int cy = center.getY();
+        int cz = center.getZ();
+
+        int minY = cy - LAVA_SCAN_RADIUS_Y;
+        int maxY = cy + LAVA_SCAN_RADIUS_Y;
+
         for (int dx = -LAVA_SCAN_RADIUS_XZ; dx <= LAVA_SCAN_RADIUS_XZ; dx += 2) {
+            int absX = cx + dx;
+            int cxChunk = absX >> 4;
+            int lastChunkZ = -999;
+            net.minecraft.world.level.chunk.LevelChunk currentChunk = null;
+
             for (int dz = -LAVA_SCAN_RADIUS_XZ; dz <= LAVA_SCAN_RADIUS_XZ; dz += 2) {
-                for (int dy = -LAVA_SCAN_RADIUS_Y; dy <= LAVA_SCAN_RADIUS_Y; dy += 2) {
-                    BlockPos p = center.offset(dx, dy, dz);
-                    if (isLava(level.getBlockState(p))) count += 8;
+                int absZ = cz + dz;
+                int czChunk = absZ >> 4;
+
+                if (currentChunk == null || czChunk != lastChunkZ) {
+                    lastChunkZ = czChunk;
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
+                }
+
+                if (currentChunk == null) continue;
+
+                int localMinY = Math.max(currentChunk.getMinBuildHeight(), minY);
+                int localMaxY = Math.min(currentChunk.getMaxBuildHeight() - 1, maxY);
+
+                int minSection = (localMinY - currentChunk.getMinBuildHeight()) >> 4;
+                int maxSection = (localMaxY - currentChunk.getMinBuildHeight()) >> 4;
+
+                net.minecraft.world.level.chunk.LevelChunkSection[] sections = currentChunk.getSections();
+
+                for (int secIndex = minSection; secIndex <= maxSection; secIndex++) {
+                    if (secIndex < 0 || secIndex >= sections.length) continue;
+                    net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
+                    if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(DimensionDefenseProcedure::isLava)) continue;
+
+                    int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
+                    int startY = Math.max(localMinY, secMinY);
+                    int endY = Math.min(localMaxY, secMinY + 15);
+
+                    for (int dy = -LAVA_SCAN_RADIUS_Y; dy <= LAVA_SCAN_RADIUS_Y; dy += 2) {
+                        int absY = cy + dy;
+                        if (absY >= startY && absY <= endY) {
+                            BlockState state = section.getBlockState(absX & 15, absY & 15, absZ & 15);
+                            if (isLava(state)) count += 8;
+                        }
+                    }
                 }
             }
         }
@@ -773,14 +932,63 @@ public class DimensionDefenseProcedure {
     }
 
     private static void purgeLavaInRadius(Level level, BlockPos center) {
-        ServerLevel serverLevel = level instanceof ServerLevel sl ? sl : null;
+        if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
+
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+        int cx = center.getX();
+        int cy = center.getY();
+        int cz = center.getZ();
+
+        int minY = cy - LAVA_SCAN_RADIUS_Y;
+        int maxY = cy + LAVA_SCAN_RADIUS_Y;
+
         for (int dx = -LAVA_SCAN_RADIUS_XZ; dx <= LAVA_SCAN_RADIUS_XZ; dx++) {
+            int absX = cx + dx;
+            int cxChunk = absX >> 4;
+            int lastChunkZ = -999;
+            net.minecraft.world.level.chunk.LevelChunk currentChunk = null;
+
             for (int dz = -LAVA_SCAN_RADIUS_XZ; dz <= LAVA_SCAN_RADIUS_XZ; dz++) {
-                for (int dy = -LAVA_SCAN_RADIUS_Y; dy <= LAVA_SCAN_RADIUS_Y; dy++) {
-                    BlockPos p = center.offset(dx, dy, dz);
-                    if (isLava(level.getBlockState(p))) {
-                        level.setBlock(p, Blocks.AIR.defaultBlockState(), 3);
-                        if (serverLevel != null) {
+                int absZ = cz + dz;
+                int czChunk = absZ >> 4;
+
+                if (currentChunk == null || czChunk != lastChunkZ) {
+                    lastChunkZ = czChunk;
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
+                }
+
+                if (currentChunk == null) continue;
+
+                int localMinY = Math.max(currentChunk.getMinBuildHeight(), minY);
+                int localMaxY = Math.min(currentChunk.getMaxBuildHeight() - 1, maxY);
+
+                int minSection = (localMinY - currentChunk.getMinBuildHeight()) >> 4;
+                int maxSection = (localMaxY - currentChunk.getMinBuildHeight()) >> 4;
+
+                net.minecraft.world.level.chunk.LevelChunkSection[] sections = currentChunk.getSections();
+
+                for (int secIndex = minSection; secIndex <= maxSection; secIndex++) {
+                    if (secIndex < 0 || secIndex >= sections.length) continue;
+                    net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
+                    if (section == null || section.hasOnlyAir()) continue;
+                    if (!section.getStates().maybeHas(DimensionDefenseProcedure::isLava)) continue;
+
+                    int secMinY = currentChunk.getMinBuildHeight() + (secIndex << 4);
+                    int startY = Math.max(localMinY, secMinY);
+                    int endY = Math.min(localMaxY, secMinY + 15);
+
+                    for (int absY = startY; absY <= endY; absY++) {
+                        BlockState state = section.getBlockState(absX & 15, absY & 15, absZ & 15);
+                        if (isLava(state)) {
+                            p.set(absX, absY, absZ);
+                            level.setBlock(p, Blocks.AIR.defaultBlockState(), 3);
                             serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5, 3, 0.2, 0.2, 0.2, 0.05);
                         }
                     }
@@ -790,9 +998,136 @@ public class DimensionDefenseProcedure {
     }
 
     private static boolean isLava(BlockState state) {
-        return state.getFluidState().is(Fluids.LAVA)
-                || state.getFluidState().is(Fluids.FLOWING_LAVA)
-                || state.is(Blocks.LAVA);
+        if (state == null || state.isAir()) return false;
+        if (state.is(Blocks.LAVA)) return true;
+        net.minecraft.world.level.material.FluidState fluid = state.getFluidState();
+        return !fluid.isEmpty() && (fluid.is(Fluids.LAVA) || fluid.is(Fluids.FLOWING_LAVA));
+    }
+
+    // =========================================================================
+    // LAVA SUPPRESSION LOGIC
+    // =========================================================================
+    private static void tickLavaSuppression(Level level, Player player, ResourceKey<Level> dim) {
+        if (!(level instanceof net.minecraft.server.level.ServerLevel serverLevel)) return;
+        if (player.tickCount % SUPPRESSION_CHECK_INTERVAL_TICKS != 0) return;
+
+        if (!isTargetDimension(dim)) return;
+
+        // Trigger scan only when the player is deep underground where underground pools exist (-30 and below)
+        if (player.getY() > -30) return;
+
+        cleanupOldPlayerPlacedLava(level);
+
+        net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
+        Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
+        BlockPos center = player.blockPosition();
+
+        // Slicing to distribute performance budget over multiple ticks
+        int totalSlices = 12;
+        int currentSlice = (int) ((player.tickCount / SUPPRESSION_CHECK_INTERVAL_TICKS) % totalSlices);
+
+        int range = SUPPRESSION_SCAN_RADIUS_XZ;
+        int sliceWidth = (range * 2 + 1 + totalSlices - 1) / totalSlices;
+        int startDx = -range + currentSlice * sliceWidth;
+        int endDx = Math.min(range, startDx + sliceWidth - 1);
+
+        // OPTIMIZATION: Reusable pos pointers prevent billions of temporary object allocations
+        BlockPos.MutableBlockPos mutablePos = new BlockPos.MutableBlockPos();
+        BlockPos.MutableBlockPos neighborPos = new BlockPos.MutableBlockPos();
+
+        int checked = 0;
+        int removed = 0;
+
+        for (int dx = startDx; dx <= endDx; dx++) {
+            int absX = center.getX() + dx;
+            int cxChunk = absX >> 4;
+            int lastChunkZ = -999;
+            net.minecraft.world.level.chunk.LevelChunk currentChunk = null;
+
+            for (int dz = -SUPPRESSION_SCAN_RADIUS_XZ; dz <= SUPPRESSION_SCAN_RADIUS_XZ; dz++) {
+                int absZ = center.getZ() + dz;
+                int czChunk = absZ >> 4;
+
+                if (currentChunk == null || czChunk != lastChunkZ) {
+                    lastChunkZ = czChunk;
+                    long chunkKey = ChunkPos.asLong(cxChunk, czChunk);
+                    currentChunk = loadedChunks.get(chunkKey);
+                    if (currentChunk == null) {
+                        currentChunk = cache.getChunkNow(cxChunk, czChunk);
+                        if (currentChunk != null) loadedChunks.put(chunkKey, currentChunk);
+                    }
+                }
+
+                if (currentChunk == null) continue;
+
+                int minBuildY = currentChunk.getMinBuildHeight();
+                if (-64 < minBuildY) continue;
+                int secIndex = (-64 - minBuildY) >> 4;
+                net.minecraft.world.level.chunk.LevelChunkSection[] sections = currentChunk.getSections();
+                if (secIndex < 0 || secIndex >= sections.length) continue;
+                net.minecraft.world.level.chunk.LevelChunkSection section = sections[secIndex];
+                if (section == null || section.hasOnlyAir()) continue;
+                if (!section.getStates().maybeHas(state -> isLava(state) || state.getBlock() instanceof BaseFireBlock || state.is(Blocks.FIRE) || state.is(Blocks.SOUL_FIRE))) continue;
+
+                for (int absY = -64; absY <= -49; absY++) {
+                    checked++;
+                    if (checked > MAX_CHECKS_PER_PLAYER_SCAN) return;
+
+                    BlockState state = section.getBlockState(absX & 15, absY & 15, absZ & 15);
+                    if (state.isAir()) continue;
+
+                    if (absY <= Y_THRESHOLD) {
+                        // --- LAVA PLACEMENT ZONE (-64 to -54) ---
+                        if (state.is(Blocks.LAVA) || state.getFluidState().is(Fluids.LAVA)) {
+                            mutablePos.set(absX, absY, absZ);
+                            // Skip any coordinates protected by player placement actions
+                            if (PLAYER_PLACED_LAVA.containsKey(mutablePos.asLong())) continue;
+
+                            level.setBlock(mutablePos, Blocks.OAK_PLANKS.defaultBlockState(), 2);
+                            removed++;
+
+                            // Extinguish adjacent fire blocks immediately around the newly converted wood
+                            for (net.minecraft.core.Direction dir : net.minecraft.core.Direction.values()) {
+                                if (dir == net.minecraft.core.Direction.DOWN) continue;
+                                neighborPos.set(absX + dir.getStepX(), absY + dir.getStepY(), absZ + dir.getStepZ());
+                                if (level.hasChunkAt(neighborPos)) {
+                                    BlockState neighborState = level.getBlockState(neighborPos);
+                                    if (neighborState.getBlock() instanceof net.minecraft.world.level.block.BaseFireBlock
+                                        || neighborState.is(Blocks.FIRE)
+                                        || neighborState.is(Blocks.SOUL_FIRE)) {
+                                        level.setBlock(neighborPos, Blocks.AIR.defaultBlockState(), 3);
+                                    }
+                                }
+                            }
+
+                            if (removed >= MAX_REMOVALS_PER_PLAYER_SCAN) {
+                                return;
+                            }
+                        }
+                    } else {
+                        // --- THE ACTIVE FIRE CEILING ZONE (-53 to -49) ---
+                        // Extinguish any fire blocks in the air layers sitting directly on top of the suppression threshold
+                        if (state.getBlock() instanceof net.minecraft.world.level.block.BaseFireBlock
+                            || state.is(Blocks.FIRE)
+                            || state.is(Blocks.SOUL_FIRE)) {
+                            mutablePos.set(absX, absY, absZ);
+                            level.setBlock(mutablePos, Blocks.AIR.defaultBlockState(), 3);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void cleanupOldPlayerPlacedLava(Level level) {
+        if (level.getGameTime() % PROTECTION_CLEANUP_INTERVAL_TICKS != 0) return;
+
+        long now = level.getGameTime();
+        PLAYER_PLACED_LAVA.entrySet().removeIf(entry -> now - entry.getValue() > PLAYER_LAVA_PROTECTION_TICKS);
+    }
+
+    private static boolean isTargetDimension(ResourceKey<Level> dim) {
+        return dim.equals(BACKWOODS) || dim.equals(THE_GRAIN) || dim.equals(THE_SUB_STRATA);
     }
 
     // =========================================================================

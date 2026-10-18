@@ -49,6 +49,7 @@ export default function App() {
 
   // Notifications
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [liveSyncStatus, setLiveSyncStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
 
   const addToast = useCallback((title: string, description: string, type: 'success' | 'info' | 'error' = 'info') => {
     const id = Date.now().toString() + Math.random().toString(36).substring(2, 6);
@@ -150,12 +151,60 @@ export default function App() {
     }
   }, [addToast]);
 
+  // Initial load, window focus sync, and SSE real-time stream
   useEffect(() => {
     fetchFiles(false, false);
     const handleFocus = () => fetchFiles(false, true);
     window.addEventListener('focus', handleFocus);
+
+    let es: EventSource | null = null;
+    let reconnectTimer: NodeJS.Timeout | null = null;
+
+    const connectSSE = () => {
+      setLiveSyncStatus('connecting');
+      try {
+        es = new EventSource('/api/files/stream');
+
+        es.onopen = () => {
+          setLiveSyncStatus('connected');
+        };
+
+        es.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'files_changed') {
+              // Silent immediate refresh on disk change
+              fetchFiles(false, true);
+            }
+          } catch {
+            // keepalive or non-json message
+          }
+        };
+
+        es.onerror = () => {
+          setLiveSyncStatus('disconnected');
+          if (es) {
+            es.close();
+            es = null;
+          }
+          if (!reconnectTimer) {
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+              connectSSE();
+            }, 3000);
+          }
+        };
+      } catch {
+        setLiveSyncStatus('disconnected');
+      }
+    };
+
+    connectSSE();
+
     return () => {
       window.removeEventListener('focus', handleFocus);
+      if (es) es.close();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   }, [fetchFiles]);
 
@@ -227,7 +276,16 @@ export default function App() {
       }));
   }, [files]);
 
-  // Enriched files with isEdited (clears when current version has been copied)
+  /**
+   * ============================================================================
+   * STRICT RULE / CONSTANT REMINDER:
+   * The updated indicator will ONLY appear if the file is updated, and will ONLY
+   * disappear through the "Mark as Read" button or when the file content is copied.
+   * Selecting or viewing a file MUST NOT clear the updated indicator.
+   * ============================================================================
+   */
+
+  // Enriched files with isEdited (strictly preserved until copied or marked as read)
   const enrichedFiles = useMemo(() => {
     return files.map((f) => {
       const sig = `${f.updatedAt}:${f.size}`;
@@ -239,6 +297,7 @@ export default function App() {
     });
   }, [files, editedFileNames, copiedSignatures]);
 
+  // Clears the updated indicator strictly when marked as read or copied
   const clearUpdatedIndicator = useCallback((filename: string) => {
     setEditedFileNames((prev) => {
       if (!prev.has(filename)) return prev;
@@ -259,6 +318,13 @@ export default function App() {
       return next;
     });
   }, [files]);
+
+  // Dedicated Mark as Read handler conforming to the strict rule
+  const handleMarkAsRead = useCallback((filename: string) => {
+    markAsRead(filename);
+    clearUpdatedIndicator(filename);
+    addToast('Marked as Read', `Cleared updated indicator for ${filename}`, 'info');
+  }, [markAsRead, clearUpdatedIndicator, addToast]);
 
   const editedCount = useMemo(() => {
     return enrichedFiles.filter((f) => f.isEdited).length;
@@ -345,8 +411,9 @@ export default function App() {
   // View file in right panel
   const handleSelectFile = useCallback((file: FileItem) => {
     setSelectedFileName(file.name);
-    markAsRead(file.name);
-  }, [markAsRead]);
+    // STRICT RULE REMINDER: Selecting or viewing a file MUST NOT clear the updated indicator.
+    // The updated indicator ONLY disappears through the "Mark as Read" button or when copied.
+  }, []);
 
   // Copy file content directly
   const handleCopyContent = useCallback(async (filename: string): Promise<boolean> => {
@@ -511,6 +578,7 @@ export default function App() {
         totalSizeFormatted={totalSizeFormatted}
         isRefreshing={isRefreshing}
         editedCount={editedCount}
+        liveSyncStatus={liveSyncStatus}
         onRefresh={() => fetchFiles(true, false)}
       />
 
@@ -562,6 +630,7 @@ export default function App() {
                 onToggleSelectFile={handleToggleSelectFile}
                 onSelectFile={handleSelectFile}
                 onCopyContent={handleCopyContent}
+                onMarkAsRead={handleMarkAsRead}
               />
             )}
           </div>
@@ -576,6 +645,7 @@ export default function App() {
             onSaveContent={handleSaveContent}
             onDeleteFile={handleDeleteFile}
             onCopyContent={handleCopyContent}
+            onMarkAsRead={handleMarkAsRead}
           />
         </main>
       </div>

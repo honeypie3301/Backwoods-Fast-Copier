@@ -1,0 +1,257 @@
+package net.mcreator.thebackwoods.procedures;
+
+import net.neoforged.neoforge.event.ServerChatEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.bus.api.SubscribeEvent;
+
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.ChatFormatting;
+import net.minecraft.world.entity.Entity;
+import net.mcreator.thebackwoods.entity.AshWeaverEntity;
+
+import java.util.Locale;
+
+@EventBusSubscriber
+public class AshWeaverChatCommandProcedure {
+	private static final String KEY_CHAT_STAY = "ashWeaverChatStay";
+	private static final String KEY_STATE = "ashWeaverState";
+	private static final String KEY_STATE_STARTED = "ashWeaverStateStarted";
+	private static final String KEY_STATE_UNTIL = "ashWeaverStateUntil";
+	private static final String KEY_NEXT_WARNING = "ashWeaverNextWarning";
+
+
+	// BEGIN TYPO MATCHER: pure, bounded parsing; never searches for commands inside a sentence.
+	private static final class ChatCommandMatcher {
+		private static final String[][] PHRASES = {
+			{"follow", "follow"}, {"follow me", "follow"}, {"come here", "follow"},
+			{"stay", "stay"}, {"stay here", "stay"}, {"wait here", "stay"},
+			{"watch", "watch"}, {"watch my back", "watch"},
+			{"help me", "help me"}, {"protect me", "help me"}, {"status", "status"},
+			{"this is home", "this is home"}, {"this is our home", "this is home"},
+			{"remember this place", "this is home"},
+			{"this is also home", "this is also home"}, {"remember this area too", "this is also home"},
+			{"stay home", "stay home"}, {"stay at home", "stay home"},
+			{"forget home", "forget home"}, {"forget this home", "forget home"},
+			{"home status", "home status"}
+		};
+		private static final String[][] WORDS = new String[PHRASES.length][];
+		static {
+			for (int i = 0; i < PHRASES.length; i++) WORDS[i] = PHRASES[i][0].split(" ");
+		}
+
+		static String match(String rawText) {
+			if (rawText == null || rawText.length() > 96) return null;
+			String text = rawText.trim().toLowerCase(Locale.ROOT);
+			int end = text.length();
+			while (end > 0 && ".!?".indexOf(text.charAt(end - 1)) >= 0) end--;
+			StringBuilder normalized = new StringBuilder(end);
+			boolean space = true;
+			for (int i = 0; i < end; i++) {
+				char ch = text.charAt(i);
+				if (ch >= 'a' && ch <= 'z') { normalized.append(ch); space = false; }
+				else if (ch == ' ' || ch == '\t' || ch == ',' || ch == ':') {
+					if (!space) { normalized.append(' '); space = true; }
+				} else return null; // Quotes, hidden characters, slash commands and other scripts are not guessed.
+			}
+			String command = normalized.toString().trim();
+			if (command.isEmpty()) return null;
+			String[] tokens = command.split(" ");
+			int skip = 0;
+			if (tokens.length > 2 && tokens[0].equals("ash") && isAddress(tokens[1])) skip = 2;
+			else if (tokens.length > 1 && (isAddress(tokens[0]) || tokens[0].equals("ashweaver"))) skip = 1;
+			if (skip > 0) command = String.join(" ", java.util.Arrays.copyOfRange(tokens, skip, tokens.length));
+			for (String[] phrase : PHRASES) if (phrase[0].equals(command)) return phrase[1];
+			// Exact unaddressed commands remain compatible; typo correction requires a clear addressee.
+			if (skip == 0) return null;
+			String[] input = java.util.Arrays.copyOfRange(tokens, skip, tokens.length);
+			int best = Integer.MAX_VALUE;
+			String winner = null;
+			boolean ambiguous = false;
+			for (int i = 0; i < PHRASES.length; i++) {
+				String[] expected = WORDS[i];
+				if (input.length != expected.length) continue;
+				String action = PHRASES[i][1];
+				boolean home = action.contains("home");
+				int allowance = home || PHRASES[i][0].length() < 14 ? 1 : 2;
+				int score = 0;
+				for (int word = 0; word < input.length; word++) {
+					String wanted = expected[word];
+					String actual = input[word];
+					if (wanted.equals(actual)) continue;
+					// Short words carry meaning: never turn "say" into "stay" or "some" into "home".
+					if (wanted.length() <= 3 || wanted.length() == 4 && !shortTypo(actual, wanted)) {
+						score = allowance + 1; break;
+					}
+					int limit = wanted.length() >= 8 && !home ? 2 : 1;
+					int edits = distance(actual, wanted, limit);
+					if (edits > limit) { score = allowance + 1; break; }
+					score += edits;
+					if (score > allowance) break;
+				}
+				if (score > allowance) continue;
+				if (score < best) { best = score; winner = action; ambiguous = false; }
+				else if (score == best && !action.equals(winner)) ambiguous = true;
+			}
+			return ambiguous ? null : winner;
+		}
+
+		private static boolean isAddress(String word) {
+			return word.equals("weaver") || word.length() >= 5 && word.length() <= 7
+					&& distance(word, "weaver", 1) == 1;
+		}
+
+		private static boolean shortTypo(String actual, String wanted) {
+			if (actual.length() == wanted.length()) {
+				for (int i = 0; i + 1 < actual.length(); i++)
+					if (actual.charAt(i) == wanted.charAt(i + 1) && actual.charAt(i + 1) == wanted.charAt(i)
+							&& actual.substring(0, i).equals(wanted.substring(0, i))
+							&& actual.substring(i + 2).equals(wanted.substring(i + 2))) return true;
+			} else if (actual.length() == wanted.length() + 1) {
+				for (int i = 1; i < actual.length(); i++)
+					if (actual.charAt(i) == actual.charAt(i - 1)
+							&& (actual.substring(0, i) + actual.substring(i + 1)).equals(wanted)) return true;
+			}
+			return false;
+		}
+
+		// Bounded edit distance with adjacent-key transpositions treated as one typo.
+		private static int distance(String actual, String wanted, int limit) {
+			if (actual.length() > 16 || Math.abs(actual.length() - wanted.length()) > limit) return limit + 1;
+			int[] before = new int[wanted.length() + 1];
+			int[] previous = new int[wanted.length() + 1];
+			int[] current = new int[wanted.length() + 1];
+			for (int j = 0; j <= wanted.length(); j++) previous[j] = j;
+			for (int i = 1; i <= actual.length(); i++) {
+				current[0] = i;
+				for (int j = 1; j <= wanted.length(); j++) {
+					int change = actual.charAt(i - 1) == wanted.charAt(j - 1) ? 0 : 1;
+					current[j] = Math.min(previous[j] + 1, Math.min(current[j - 1] + 1, previous[j - 1] + change));
+					if (i > 1 && j > 1 && actual.charAt(i - 1) == wanted.charAt(j - 2)
+							&& actual.charAt(i - 2) == wanted.charAt(j - 1))
+						current[j] = Math.min(current[j], before[j - 2] + 1);
+				}
+				int[] reuse = before; before = previous; previous = current; current = reuse;
+			}
+			return previous[wanted.length()];
+		}
+	}
+	// END TYPO MATCHER
+
+	@SubscribeEvent
+	public static void onChat(ServerChatEvent event) {
+		if (event == null || event.getPlayer() == null) return;
+		ServerPlayer player = event.getPlayer();
+		handleChat(player, player.serverLevel(), event.getRawText());
+	}
+
+	public static void execute() {
+		// MCreator procedure entry point; chat handling is performed by onChat.
+	}
+
+	private static void handleChat(ServerPlayer player, ServerLevel level, String rawText) {
+		String command = ChatCommandMatcher.match(rawText);
+		if (command == null) return;
+
+		boolean follow = command.equals("follow") || command.equals("follow me") || command.equals("come here");
+		boolean stay = command.equals("stay") || command.equals("stay here") || command.equals("wait here");
+		boolean watch = command.equals("watch") || command.equals("watch my back");
+		boolean help = command.equals("help me") || command.equals("protect me");
+		boolean status = command.equals("status");
+		String homeAction = switch (command) {
+			case "this is home", "this is our home", "remember this place" -> "set";
+			case "this is also home", "remember this area too" -> "extend";
+			case "stay home", "stay at home" -> "stay";
+			case "forget home", "forget this home" -> "forget";
+			case "home status" -> "status";
+			default -> "";
+		};
+		if (!follow && !stay && !watch && !help && !status && homeAction.isEmpty()) return;
+
+		AshWeaverEntity weaver = findOwnedWeaver(player);
+		if (weaver == null) return;
+
+		var data = weaver.getPersistentData();
+		if (weaver.level() != level || weaver.distanceToSqr(player) > 32.0 * 32.0) return;
+		long gameTime = level.getGameTime();
+		AshWeaverOnEntityTickUpdateProcedure.noteConversation(weaver, gameTime);
+		if (data.getBoolean("ashWeaverAvoidOwner") || AshWeaverOnEntityTickUpdateProcedure.relationship(weaver) <= -25.0) {
+			if (stay) data.putBoolean(KEY_CHAT_STAY, true);
+			reply(player, weaver, "Keep your distance.");
+			return;
+		}
+		if (!homeAction.isEmpty()) {
+			reply(player, weaver, AshWeaverOnEntityTickUpdateProcedure.homeCommand(weaver, player, homeAction));
+			return;
+		}
+		if (follow) {
+			data.remove("ashWeaverHomeStay");
+			data.remove(KEY_CHAT_STAY);
+			if (data.getInt(KEY_STATE) == 0) setState(data, 1, gameTime, 0L);
+			reply(player, weaver, "Following.");
+		} else if (stay) {
+			data.remove("ashWeaverHomeStay");
+			data.putBoolean(KEY_CHAT_STAY, true);
+			reply(player, weaver, "Waiting here.");
+		} else if (watch || help) {
+			data.remove("ashWeaverHomeStay");
+			data.remove(KEY_CHAT_STAY);
+			data.putLong(KEY_NEXT_WARNING, 0L);
+			if (data.getInt(KEY_STATE) == 0) setState(data, 1, gameTime, 0L);
+			reply(player, weaver, watch ? "Watching for threats." : "I'll protect you.");
+		} else {
+			reply(player, weaver, data.getBoolean("ashWeaverHomeStay") ? "Staying home."
+					: data.getBoolean(KEY_CHAT_STAY) ? "Waiting here." : "Following.");
+		}
+	}
+
+
+	private static void reply(ServerPlayer player, AshWeaverEntity weaver, String text) {
+		if (weaver.getPersistentData().getInt("ashWeaverState") == 10) text = "Taking cover.";
+		double fraction = AshWeaverOnEntityTickUpdateProcedure.speechObfuscation(weaver);
+		int letters = 0;
+		for (int i = 0; i < text.length(); i++) if (Character.isLetterOrDigit(text.charAt(i))) letters++;
+		int hidden = (int) Math.round(letters * fraction);
+		MutableComponent message = Component.empty();
+		for (int i = 0; i < text.length(); i++) {
+			char ch = text.charAt(i);
+			boolean obscure = false;
+			if (Character.isLetterOrDigit(ch)) {
+				obscure = letters > 0 && weaver.getRandom().nextInt(letters) < hidden;
+				letters--;
+				if (obscure) hidden--;
+			}
+			MutableComponent part = Component.literal(String.valueOf(ch));
+			if (obscure) part.withStyle(ChatFormatting.OBFUSCATED);
+			message.append(part);
+		}
+		player.sendSystemMessage(message, true);
+	}
+
+	private static AshWeaverEntity findOwnedWeaver(ServerPlayer player) {
+		MinecraftServer server = player.getServer();
+		if (server == null) return null;
+		String ownerId = player.getUUID().toString();
+		AshWeaverEntity otherDimensionMatch = null;
+		for (ServerLevel dimension : server.getAllLevels()) {
+			for (Entity entity : dimension.getAllEntities()) {
+				if (entity instanceof AshWeaverEntity candidate && candidate.isAlive()
+						&& ownerId.equals(candidate.getEntityData().get(AshWeaverEntity.DATA_assignedPlayer))) {
+					if (candidate.level() == player.level()) return candidate;
+					if (otherDimensionMatch == null) otherDimensionMatch = candidate;
+				}
+			}
+		}
+		return otherDimensionMatch;
+	}
+
+	private static void setState(net.minecraft.nbt.CompoundTag data, int state, long gameTime, long until) {
+		data.putInt(KEY_STATE, state);
+		data.putLong(KEY_STATE_STARTED, gameTime);
+		data.putLong(KEY_STATE_UNTIL, until);
+	}
+}
+// 1.21.1

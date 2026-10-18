@@ -5,6 +5,7 @@ interface HeaderProps {
   totalSizeFormatted: string;
   isRefreshing: boolean;
   editedCount: number;
+  liveSyncStatus?: 'connected' | 'connecting' | 'disconnected';
   onRefresh: () => void;
 }
 
@@ -13,6 +14,7 @@ export const Header: React.FC<HeaderProps> = ({
   totalSizeFormatted,
   isRefreshing,
   editedCount,
+  liveSyncStatus = 'connected',
   onRefresh,
 }) => {
   return (
@@ -32,14 +34,35 @@ export const Header: React.FC<HeaderProps> = ({
         )}
       </div>
 
-      {/* Minimal Refresh Button */}
-      <button
-        onClick={onRefresh}
-        disabled={isRefreshing}
-        className="text-[11px] font-mono text-[#6c8271] hover:text-emerald-400 transition-colors disabled:opacity-50 flex items-center gap-1"
-      >
-        <span>{isRefreshing ? 'syncing...' : 'refresh'}</span>
-      </button>
+      {/* Right Controls: Live Sync Indicator & Refresh Button */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5 text-[10px]" title={`Live Filesystem Sync: ${liveSyncStatus}`}>
+          <span
+            className={`w-1.5 h-1.5 rounded-full transition-colors ${
+              liveSyncStatus === 'connected'
+                ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)] animate-pulse'
+                : liveSyncStatus === 'connecting'
+                ? 'bg-amber-400 animate-ping'
+                : 'bg-zinc-600'
+            }`}
+          />
+          <span className="text-[#455b4b]">
+            {liveSyncStatus === 'connected'
+              ? 'live sync'
+              : liveSyncStatus === 'connecting'
+              ? 'connecting...'
+              : 'offline'}
+          </span>
+        </div>
+
+        <button
+          onClick={onRefresh}
+          disabled={isRefreshing}
+          className="text-[11px] font-mono text-[#6c8271] hover:text-emerald-400 transition-colors disabled:opacity-50 flex items-center gap-1"
+        >
+          <span>{isRefreshing ? 'syncing...' : 'refresh'}</span>
+        </button>
+      </div>
 
     </header>
   );

@@ -1,7 +1,16 @@
+/**
+ * ============================================================================
+ * STRICT RULE / CONSTANT REMINDER:
+ * The updated indicator will ONLY appear if the file is updated, and will ONLY
+ * disappear through the "Mark as Read" button or when the file content is copied.
+ * Selecting or viewing a file MUST NOT clear the updated indicator.
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { FileItem } from '../types';
 import { shortenFileName } from '../utils/shortenFileName';
-import { CheckSquare, Square } from 'lucide-react';
+import { CheckSquare, Square, CheckCheck } from 'lucide-react';
 
 interface SidebarFileListProps {
   files: FileItem[];
@@ -12,6 +21,7 @@ interface SidebarFileListProps {
   onToggleSelectFile: (filename: string, e: React.MouseEvent) => void;
   onSelectFile: (file: FileItem) => void;
   onCopyContent: (filename: string) => Promise<boolean>;
+  onMarkAsRead?: (filename: string) => void;
 }
 
 export const SidebarFileList: React.FC<SidebarFileListProps> = ({
@@ -23,6 +33,7 @@ export const SidebarFileList: React.FC<SidebarFileListProps> = ({
   onToggleSelectFile,
   onSelectFile,
   onCopyContent,
+  onMarkAsRead,
 }) => {
   const [copyingFile, setCopyingFile] = useState<string | null>(null);
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
@@ -112,11 +123,26 @@ export const SidebarFileList: React.FC<SidebarFileListProps> = ({
             {/* Right: Version Badge + Copy Button */}
             <div className="flex items-center gap-1 shrink-0">
               
-              {/* Updated Status Tag */}
+              {/* Updated Status Tag & Mark Read button */}
               {file.isEdited && (
-                <span className="text-[9px] font-black px-1.5 py-0.5 rounded text-amber-300 bg-[#2b1704] border border-amber-500/80 shadow-[0_0_8px_rgba(245,158,11,0.4)] animate-pulse">
-                  UPDATED
-                </span>
+                <div className="flex items-center gap-1">
+                  <span className="text-[9px] font-black px-1.5 py-0.5 rounded text-amber-300 bg-[#2b1704] border border-amber-500/80 shadow-[0_0_8px_rgba(245,158,11,0.4)] animate-pulse">
+                    UPDATED
+                  </span>
+                  {onMarkAsRead && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onMarkAsRead(file.name);
+                      }}
+                      title="Mark as read (clears updated indicator)"
+                      className="p-1 rounded bg-[#211506] hover:bg-[#342109] text-amber-400 border border-amber-600/80 hover:border-amber-400 transition-colors"
+                    >
+                      <CheckCheck className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
               )}
 
               {/* Version Tag */}

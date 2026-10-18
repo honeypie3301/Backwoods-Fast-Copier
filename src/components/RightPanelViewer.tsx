@@ -1,6 +1,15 @@
+/**
+ * ============================================================================
+ * STRICT RULE / CONSTANT REMINDER:
+ * The updated indicator will ONLY appear if the file is updated, and will ONLY
+ * disappear through the "Mark as Read" button or when the file content is copied.
+ * Selecting or viewing a file MUST NOT clear the updated indicator.
+ * ============================================================================
+ */
+
 import React, { useState, useEffect } from 'react';
+import { Copy, Check, CheckCheck } from 'lucide-react';
 import { FileItem } from '../types';
-import { copyToClipboard } from '../utils/copyToClipboard';
 
 interface RightPanelViewerProps {
   file: FileItem | null;
@@ -9,14 +18,19 @@ interface RightPanelViewerProps {
   onSaveContent?: (filename: string, content: string) => Promise<boolean>;
   onDeleteFile?: (filename: string) => void;
   onCopyContent?: (filename: string) => Promise<boolean>;
+  onMarkAsRead?: (filename: string) => void;
 }
 
 export const RightPanelViewer: React.FC<RightPanelViewerProps> = ({
   file,
   cachedContent,
+  onCopyContent,
+  onMarkAsRead,
 }) => {
   const [content, setContent] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
+  const [copying, setCopying] = useState<boolean>(false);
 
   const fileName = file?.name;
 
@@ -61,7 +75,21 @@ export const RightPanelViewer: React.FC<RightPanelViewerProps> = ({
     return () => {
       isCancelled = true;
     };
-  }, [fileName, cachedContent]);
+  }, [fileName, cachedContent, file?.updatedAt]);
+
+  const handleCopy = async () => {
+    if (!file || copying) return;
+    setCopying(true);
+    let ok = false;
+    if (onCopyContent) {
+      ok = await onCopyContent(file.name);
+    }
+    setCopying(false);
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  };
 
   if (!file) {
     return (
@@ -93,9 +121,48 @@ export const RightPanelViewer: React.FC<RightPanelViewerProps> = ({
           }`}>
             v{file.version}
           </span>
-          <span className="text-[#4e6153] text-[10px] shrink-0">
+          <span className="text-[#4e6153] text-[10px] shrink-0 hidden sm:inline">
             ({lines.length} lines · {file.sizeFormatted})
           </span>
+        </div>
+
+        {/* Action Buttons: Mark as Read & Copy */}
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Mark as Read button - strictly clears the updated indicator */}
+          {file.isEdited && onMarkAsRead && (
+            <button
+              onClick={() => onMarkAsRead(file.name)}
+              title="Mark file as read (clears updated indicator)"
+              className="flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded bg-[#1e1507] hover:bg-[#2b1f0c] text-amber-300 border border-amber-500/80 hover:border-amber-400 transition-all active:scale-95 shadow-[0_0_6px_rgba(245,158,11,0.25)]"
+            >
+              <CheckCheck className="w-3.5 h-3.5 text-amber-400" />
+              <span>Mark as Read</span>
+            </button>
+          )}
+
+          {/* Copy Button - also clears updated indicator on copy */}
+          <button
+            onClick={handleCopy}
+            disabled={copying}
+            title={`Copy content of ${file.name}`}
+            className={`flex items-center gap-1.5 px-3 py-1 text-xs font-bold rounded transition-all active:scale-95 shrink-0 ${
+              copied
+                ? 'bg-[#152e1d] text-emerald-300 border border-[#224b2f] shadow-[0_0_8px_rgba(16,185,129,0.3)]'
+                : 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-md'
+            }`}
+          >
+            {copied ? (
+              <>
+                <Check className="w-3.5 h-3.5 stroke-[2.5]" />
+                <span>Copied!</span>
+              </>
+            ) : (
+              <>
+                <Copy className="w-3.5 h-3.5" />
+                <span>Copy</span>
+              </>
+            )}
+          </button>
         </div>
 
       </div>
