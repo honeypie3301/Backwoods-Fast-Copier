@@ -1,4 +1,6 @@
 package net.mcreator.thebackwoods.procedures;
+
+import net.mcreator.thebackwoods.procedures.SplinterOnEntityTickUpdateProcedure.SplinterHivemind;
 // 26.1.2 neoforge
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.mcreator.thebackwoods.entity.BlindspotSplinterEntity;
@@ -33,6 +35,16 @@ import net.minecraft.commands.arguments.EntityAnchorArgument;
 
 import javax.annotation.Nullable;
 import java.util.List;
+
+import net.mcreator.thebackwoods.entity.LogSplinterEntity;
+import net.mcreator.thebackwoods.entity.PetrifiedLogSplinterEntity;
+import net.mcreator.thebackwoods.entity.SplinterEntity;
+import net.minecraft.server.level.ServerLevel;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.UUID;
+
+import net.minecraft.world.item.Items;
 
 @EventBusSubscriber
 public class BlindspotSplinterOnEntityTickUpdateProcedure {
@@ -109,6 +121,143 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 	private static final int AGE_SECOND_TO_LAST = 576000;
 	private static final int AGE_LAST = 648000;
 
+
+
+	// Read-only contract for the afterimage: respect whichever controller currently owns this mob.
+	public static boolean isAfterimageFlankActive(BlindspotSplinterEntity splinter, Player player) {
+		if (!(splinter.level() instanceof ServerLevel level) || player == null
+				|| splinter.getTarget() != player || !splinter.isAlive() || !player.isAlive()
+				|| player.level() != level || player.isCreative() || player.isSpectator()
+				|| splinter.getEntityData().get(BlindspotSplinterEntity.DATA_frozenByRose) != 0
+				|| splinter.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress) != 0
+				|| player.getMainHandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()
+				|| player.getOffhandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()) return false;
+		net.minecraft.nbt.CompoundTag data = splinter.getPersistentData();
+		long now = level.getServer().overworld().getGameTime();
+		if (data.getLongOr("ahPlacePose", 0L) > now) return false;
+		String owner = player.getUUID().toString();
+		int tactic = data.getIntOr("htState", 0);
+		if (tactic != 0) {
+			long lastTick = data.getLongOr("htLastTick", 0L);
+			return (tactic == 2 || tactic == 5 || tactic == 6 || tactic == 9 || tactic == 12) && data.getLongOr("htUntil", 0L) > now
+					&& now >= lastTick && now - lastTick <= 2
+					&& data.getLongOr("htPost", 0L) == level.getGameTime()
+					&& owner.equals(data.getStringOr("htOwner", ""))
+					&& level.dimension().identifier().toString().equals(data.getStringOr("htDimension", ""));
+		}
+		int bowState = data.getIntOr("hive_bow_state", 0);
+		if (bowState != 0)
+			return bowState == 3 && owner.equals(data.getStringOr("hive_bow_target", ""));
+		return data.getIntOr(K_PERSONALITY, 0) == PERSONALITY_STALK_HUNT
+				&& data.getIntOr(K_HM_PHASE, 0) == PHASE_STALK
+				&& data.getIntOr(K_STALK_WATCH_TICKS, 0) <= 0 && data.getIntOr(K_FLANK_TICKS, 0) > 0
+				&& data.getIntOr(K_FORCED_HUNT_TICKS, 0) <= 0
+				&& splinter.getEntityData().get(BlindspotSplinterEntity.DATA_isEnraged) == 0;
+	}
+
+
+	// Install once per live entity; weak keys do not retain unloaded mobs.
+	private static final java.util.Set<BlindspotSplinterEntity> FLANK_GOALS =
+			java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
+	private static void installFlankGoal(BlindspotSplinterEntity splinter) {
+		if (!(splinter.level() instanceof ServerLevel) || FLANK_GOALS.contains(splinter)) return;
+		for (var wrapped : new java.util.ArrayList<>(splinter.goalSelector.getAvailableGoals())) {
+			if (wrapped.getGoal() instanceof net.minecraft.world.entity.ai.goal.MeleeAttackGoal original) {
+				int priority = wrapped.getPriority();
+				splinter.goalSelector.removeGoal(original);
+				splinter.goalSelector.addGoal(priority, new FlankAwareMeleeGoal(splinter, original));
+			}
+		}
+		FLANK_GOALS.add(splinter);
+	}
+
+	private static boolean localFlankOwnsNavigation(BlindspotSplinterEntity splinter) {
+		return splinter.level() instanceof ServerLevel level
+				&& splinter.getPersistentData().contains("blindspot_flank_post")
+				&& splinter.getPersistentData().getLongOr("blindspot_flank_post", 0L) == level.getGameTime();
+	}
+
+	private static boolean customNavigationOwned(BlindspotSplinterEntity splinter) {
+		if (!(splinter.level() instanceof ServerLevel level) || !splinter.isAlive()
+				|| !(splinter.getTarget() instanceof Player player) || !player.isAlive()
+				|| player.isCreative() || player.isSpectator()
+				|| splinter.getEntityData().get(BlindspotSplinterEntity.DATA_frozenByRose) != 0
+				|| splinter.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress) != 0) return false;
+		net.minecraft.nbt.CompoundTag data = splinter.getPersistentData();
+		long tick = level.getGameTime();
+		return SplinterOnEntityTickUpdateProcedure.AdaptiveHive.coverDetourActive(splinter)
+                || level.getServer().overworld().getGameTime() < data.getLongOr("ahPlacePose", 0L)
+				|| localFlankOwnsNavigation(splinter)
+				|| data.getIntOr("htState", 0) != 0 && data.getIntOr("htState", 0) != 11 && data.contains("htPost") && data.getLongOr("htPost", 0L) == tick
+				|| data.getIntOr("hive_bow_state", 0) != 0 && data.contains("hive_bow_post_time") && data.getLongOr("hive_bow_post_time", 0L) == tick
+				|| data.contains("hive_post_time") && data.getLongOr("hive_post_time", 0L) == tick;
+	}
+
+	private static double customNavigationSpeed(BlindspotSplinterEntity splinter) {
+		if (localFlankOwnsNavigation(splinter)) return 0.9;
+		net.minecraft.nbt.CompoundTag data = splinter.getPersistentData();
+		if (data.getIntOr("htState", 0) != 0) return data.getIntOr("htState", 0) == 2 ? 0.9 : 1.0;
+		return data.getIntOr("hive_bow_state", 0) != 0 ? 1.0 : 1.05;
+	}
+
+	// Preserve vanilla melee rules, cooldowns and priority; only yield its MOVE/LOOK ownership.
+	private static final class FlankAwareMeleeGoal extends net.minecraft.world.entity.ai.goal.Goal {
+		private final BlindspotSplinterEntity splinter;
+		private final net.minecraft.world.entity.ai.goal.MeleeAttackGoal original;
+
+		FlankAwareMeleeGoal(BlindspotSplinterEntity splinter, net.minecraft.world.entity.ai.goal.MeleeAttackGoal original) {
+			this.splinter = splinter;
+			this.original = original;
+			setFlags(original.getFlags().clone());
+		}
+
+		@Override public boolean canUse() { return !SplinterOnEntityTickUpdateProcedure.AdaptiveHive.mirrorAttackBlocked(splinter)
+                && !customNavigationOwned(splinter) && original.canUse(); }
+		@Override public boolean canContinueToUse() { return !SplinterOnEntityTickUpdateProcedure.AdaptiveHive.mirrorAttackBlocked(splinter)
+                && !customNavigationOwned(splinter) && original.canContinueToUse(); }
+		@Override public boolean isInterruptable() { return original.isInterruptable(); }
+		@Override public boolean requiresUpdateEveryTick() { return original.requiresUpdateEveryTick(); }
+		@Override public void start() { original.start(); }
+		@Override public void tick() { if (!customNavigationOwned(splinter)) original.tick(); }
+		@Override public void stop() {
+			boolean preserve = customNavigationOwned(splinter);
+			net.minecraft.world.level.pathfinder.Path path = preserve ? splinter.getNavigation().getPath() : null;
+			original.stop();
+			// MeleeAttackGoal.stop() clears navigation; restore the path selected by this tick's owner.
+			if (path != null && !path.isDone()) splinter.getNavigation().moveTo(path, customNavigationSpeed(splinter));
+		}
+	}
+
+	private static void lookAlongFlank(BlindspotSplinterEntity splinter, double x, double y, double z) {
+		net.minecraft.world.level.pathfinder.Path path = splinter.getNavigation().getPath();
+		Vec3 point = path != null && !path.isDone() ? path.getNextEntityPos(splinter) : new Vec3(x, y, z);
+		if (path != null && !path.isDone() && point.subtract(splinter.position()).multiply(1, 0, 1).lengthSqr() <= 0.04
+				&& path.getNextNodeIndex() + 1 < path.getNodeCount())
+			point = path.getEntityPosAtNode(splinter, path.getNextNodeIndex() + 1);
+		if (point.subtract(splinter.position()).multiply(1, 0, 1).lengthSqr() > 0.04)
+			splinter.getLookControl().setLookAt(point.x, splinter.getEyeY(), point.z, 20.0F, 15.0F);
+	}
+
+	@SubscribeEvent
+	public static void onEntityTickAfterGoals(EntityTickEvent.Post event) {
+		if (event.getEntity() instanceof BlindspotSplinterEntity member) {
+			if (!member.level().isClientSide() && Math.floorMod(member.tickCount + member.getId(), 5) == 0)
+				member.getEntityData().set(BlindspotSplinterEntity.DATA_frozenByRose,
+						checkNearbyRoseBlocks(member.level(), member) ? 1 : 0);
+			if (member.getEntityData().get(BlindspotSplinterEntity.DATA_frozenByRose) == 1) {
+				setSpeed(member, 0);
+				stopNav(member);
+				Vec3 motion = member.getDeltaMovement();
+				member.setDeltaMovement(0.0, motion.y, 0.0);
+				return;
+			}
+			if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.finishAction(member, member.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress))) return;
+			if (localFlankOwnsNavigation(member)) return;
+			SplinterHivemind.followFormationPost(member, member.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress));
+		}
+	}
+
 	@SubscribeEvent
 	public static void onEntityTick(EntityTickEvent.Pre event) {
 		execute(event, event.getEntity().level(), event.getEntity().getX(), event.getEntity().getY(), event.getEntity().getZ(), event.getEntity());
@@ -123,6 +272,7 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 
 	private static void execute(@Nullable Event event, LevelAccessor world, double x, double y, double z, Entity entity) {
 		if (!(entity instanceof BlindspotSplinterEntity splinter)) return;
+		installFlankGoal(splinter);
 
 		updatePlacedBlockCleanup(world, splinter, TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get().defaultBlockState());
 
@@ -140,12 +290,12 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 			splinter.setLastHurtByMob(null);
 		}
 
-		if (!splinter.getPersistentData().getBoolean(K_PERSONALITY_INIT).orElse(false)) {
+		if (!splinter.getPersistentData().getBooleanOr(K_PERSONALITY_INIT, false)) {
 			int p = (splinter.getRandom().nextInt(100) < ANGEL_CHANCE_PERCENT) ? PERSONALITY_ANGEL : PERSONALITY_STALK_HUNT;
 			splinter.getPersistentData().putInt(K_PERSONALITY, p);
 			splinter.getPersistentData().putBoolean(K_PERSONALITY_INIT, true);
 		}
-		int personality = splinter.getPersistentData().getInt(K_PERSONALITY).orElse(PERSONALITY_STALK_HUNT);
+		int personality = splinter.getPersistentData().getIntOr(K_PERSONALITY, PERSONALITY_STALK_HUNT);
 
 		if (splinter.isPassenger()) {
 			Entity vehicle = splinter.getVehicle();
@@ -167,14 +317,20 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		Player foundPlayerDirect = findNearestPlayerInRange(world, splinter.getX(), splinter.getY(), splinter.getZ(), TARGET_RANGE);
 		if (world instanceof Level level && level.isClientSide()) {
 			if (foundPlayerDirect != null) {
-				splinter.setInvisible(isThirdPersonFrontForLocalPlayer(foundPlayerDirect));
+				splinter.setInvisible(net.mcreator.thebackwoods.BlindspotAfterimage.Client.isConcealed(splinter)
+                        || splinter.hasEffect(net.minecraft.world.effect.MobEffects.INVISIBILITY)
+                        || isThirdPersonFrontForLocalPlayer(foundPlayerDirect));
 			}
 			return;
 		}
+		if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.handleMirrorPhase(splinter,
+                splinter.getTarget() instanceof Player p ? p : null,
+                splinter.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress),
+                isDegraded ? DEGRADED_MOVE_SPEED : ACTIVE_MOVE_SPEED)) return;
 		LivingEntity foundPlayer = foundPlayerDirect;
 
 		LivingEntity prioritizedMob = null;
-		String attackerUUIDStr = splinter.getPersistentData().getString("splinter_attacker_uuid").orElse("");
+		String attackerUUIDStr = splinter.getPersistentData().getStringOr("splinter_attacker_uuid", "");
 		if (!attackerUUIDStr.isEmpty() && world instanceof net.minecraft.server.level.ServerLevel serverLevel) {
 			try {
 				java.util.UUID attackerUUID = java.util.UUID.fromString(attackerUUIDStr);
@@ -251,7 +407,8 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		}
 
 		if (foundPlayer == null) {
-			int remainingForcedHunt = splinter.getPersistentData().getInt(K_FORCED_HUNT_TICKS).orElse(0);
+			if (SplinterHivemind.search(splinter)) return;
+			int remainingForcedHunt = splinter.getPersistentData().getIntOr(K_FORCED_HUNT_TICKS, 0);
 
 			if (remainingForcedHunt <= 0) {
 				splinter.getEntityData().set(BlindspotSplinterEntity.DATA_watchTimer, 0);
@@ -279,7 +436,7 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		int isEnraged = splinter.getEntityData().get(BlindspotSplinterEntity.DATA_isEnraged);
 		int watchTimer = splinter.getEntityData().get(BlindspotSplinterEntity.DATA_watchTimer);
 
-		int forcedHuntTicks = splinter.getPersistentData().getInt(K_FORCED_HUNT_TICKS).orElse(0);
+		int forcedHuntTicks = splinter.getPersistentData().getIntOr(K_FORCED_HUNT_TICKS, 0);
 		if (forcedHuntTicks > 0) {
 			splinter.getPersistentData().putInt(K_FORCED_HUNT_TICKS, forcedHuntTicks - 1);
 			splinter.getEntityData().set(BlindspotSplinterEntity.DATA_isEnraged, 1);
@@ -289,17 +446,17 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		if (splinter.getLastHurtByMob() != null) {
 			boolean isWoodbound = splinter.getLastHurtByMob().is(net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, net.minecraft.resources.Identifier.parse("the_backwoods:woodbound_entities")));
 			if (!isWoodbound) {
-				int lastSeenHurtTime = splinter.getPersistentData().getInt(K_LAST_HURT_TIME).orElse(0);
+				int lastSeenHurtTime = splinter.getPersistentData().getIntOr(K_LAST_HURT_TIME, 0);
 				int currentHurtTime = splinter.hurtTime;
 				if (currentHurtTime > 0 && currentHurtTime != lastSeenHurtTime) {
-					int bonus = splinter.getPersistentData().getInt(K_RAGE_BONUS).orElse(0) + RAGE_THRESHOLD_HIT_BONUS;
+					int bonus = splinter.getPersistentData().getIntOr(K_RAGE_BONUS, 0) + RAGE_THRESHOLD_HIT_BONUS;
 					splinter.getPersistentData().putInt(K_RAGE_BONUS, bonus);
 					splinter.getPersistentData().putInt(K_LAST_HURT_TIME, currentHurtTime);
 				}
 			}
 		}
 
-		int effectiveRageThreshold = Math.max(1, RAGE_WATCH_THRESHOLD - splinter.getPersistentData().getInt(K_RAGE_BONUS).orElse(0));
+		int effectiveRageThreshold = Math.max(1, RAGE_WATCH_THRESHOLD - splinter.getPersistentData().getIntOr(K_RAGE_BONUS, 0));
 
 		boolean isWatched = false;
 		if (foundPlayerDirect != null) {
@@ -311,7 +468,7 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 
 		double distToPlayer = foundPlayerDirect != null ? splinter.position().distanceTo(foundPlayerDirect.position()) : Double.MAX_VALUE;
 		if (isEnraged == 1 && distToPlayer > RAGE_ESCAPE_RANGE) {
-			if (splinter.getPersistentData().getInt(K_FORCED_HUNT_TICKS).orElse(0) <= 0) {
+			if (splinter.getPersistentData().getIntOr(K_FORCED_HUNT_TICKS, 0) <= 0) {
 				splinter.getEntityData().set(BlindspotSplinterEntity.DATA_isEnraged, 0);
 				splinter.getEntityData().set(BlindspotSplinterEntity.DATA_watchTimer, 0);
 				isEnraged = 0;
@@ -334,9 +491,6 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		if (foundPlayerDirect != null) {
 			foundRose = checkHeldRose(foundPlayerDirect, splinter, world, foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
 		}
-		if (!foundRose && splinter.tickCount % 5 == 0) {
-			foundRose = checkNearbyRoseBlocks(world, splinter);
-		}
 		if (foundRose || frozenByRose == 1) {
 			setSpeed(splinter, 0);
 			splinter.getEntityData().set(BlindspotSplinterEntity.DATA_isEnraged, 0);
@@ -351,29 +505,44 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 		}
 
 		// Angel personality behavior: freeze while watched, otherwise direct hunt-like pursuit.
+		SplinterHivemind.observe(splinter, foundPlayerDirect, splinter.getLastHurtByMob());
+        if (personality == PERSONALITY_STALK_HUNT && SplinterHivemind.beginGroupHunt(splinter, foundPlayerDirect)) {
+            splinter.getPersistentData().putInt(K_HM_PHASE, PHASE_HUNT);
+            splinter.getPersistentData().putInt(K_HM_PHASE_TIMER, 160);
+            splinter.getPersistentData().putInt(K_STALK_WATCH_TICKS, 0);
+            splinter.getPersistentData().putInt(K_FLANK_TICKS, 0);
+        }
+
+		// One bounded cover move owns navigation while the archer is drawing.
+		if (foundPlayerDirect != null && splinter.getTarget() == foundPlayerDirect
+				&& SplinterHivemind.handleBowThreat(splinter, foundPlayerDirect,
+					splinter.getEntityData().get(BlindspotSplinterEntity.DATA_mineProgress),
+					isDegraded ? DEGRADED_MOVE_SPEED : ACTIVE_MOVE_SPEED)) return;
+		if (personality == PERSONALITY_STALK_HUNT
+				&& SplinterHivemind.bowCommitActive(splinter, foundPlayerDirect)
+				&& splinter.getPersistentData().getIntOr(K_HM_PHASE, 0) != PHASE_HUNT) {
+			splinter.getPersistentData().putInt(K_HM_PHASE, PHASE_HUNT);
+			splinter.getPersistentData().putInt(K_HM_PHASE_TIMER, 90);
+		}
+
 		if (personality == PERSONALITY_ANGEL) {
-			if (isWatched && isEnraged == 0) {
+			if (isWatched && isEnraged == 0 && !SplinterHivemind.bowCommitActive(splinter, foundPlayerDirect)) {
 				setSpeed(splinter, 0);
 				stopNav(splinter);
 				splinter.getEntityData().set(BlindspotSplinterEntity.DATA_mineProgress, 0);
 				return;
 			}
 
-			if (splinter.tickCount % 3 == 0) {
-				splinter.lookAt(EntityAnchorArgument.Anchor.EYES, new Vec3(foundPlayer.getX(), foundPlayer.getEyeY(), foundPlayer.getZ()));
-			}
-			if (splinter instanceof Mob mobLook) {
-				mobLook.getLookControl().setLookAt(foundPlayer, 25.0F, 20.0F);
-			}
+			splinter.getLookControl().setLookAt(foundPlayer, 25.0F, 20.0F);
 
 			setSpeed(splinter, isDegraded ? DEGRADED_MOVE_SPEED : ACTIVE_MOVE_SPEED);
 			if (splinter instanceof Mob angelMob) {
 				navMoveToEntityThrottled(splinter, angelMob, foundPlayer, 1.05, 3);
 			}
 		} else {
-			int phase = splinter.getPersistentData().getInt(K_HM_PHASE).orElse(0);
-			int phaseTimer = splinter.getPersistentData().getInt(K_HM_PHASE_TIMER).orElse(0);
-			int silentCd = splinter.getPersistentData().getInt(K_HM_SILENT_CD).orElse(0);
+			int phase = splinter.getPersistentData().getIntOr(K_HM_PHASE, 0);
+			int phaseTimer = splinter.getPersistentData().getIntOr(K_HM_PHASE_TIMER, 0);
+			int silentCd = splinter.getPersistentData().getIntOr(K_HM_SILENT_CD, 0);
 
 			if (phase == PHASE_SILENT && isEnraged == 0 && forcedHuntTicks <= 0) {
 				phase = PHASE_STALK;
@@ -390,7 +559,7 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 				splinter.getPersistentData().putInt(K_HM_SILENT_CD, silentCd);
 			}
 
-			if (isEnraged == 1 || splinter.getPersistentData().getInt(K_FORCED_HUNT_TICKS).orElse(0) > 0) {
+			if (isEnraged == 1 || splinter.getPersistentData().getIntOr(K_FORCED_HUNT_TICKS, 0) > 0) {
 				phase = PHASE_HUNT;
 				phaseTimer = HUNT_TICKS + 40;
 				splinter.getPersistentData().putInt(K_HM_PHASE, phase);
@@ -434,17 +603,14 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 				return;
 			}
 
-			if (splinter.tickCount % 3 == 0) {
-				splinter.lookAt(EntityAnchorArgument.Anchor.EYES, new Vec3(foundPlayer.getX(), foundPlayer.getEyeY(), foundPlayer.getZ()));
-			}
-			if (splinter instanceof Mob mobLook) {
-				mobLook.getLookControl().setLookAt(foundPlayer, 25.0F, 20.0F);
-			}
+			if (phase != PHASE_STALK || splinter.getPersistentData().getIntOr(K_FLANK_TICKS, 0) <= 0
+					|| splinter.getPersistentData().getIntOr(K_STALK_WATCH_TICKS, 0) > 0)
+				splinter.getLookControl().setLookAt(foundPlayer, 25.0F, 20.0F);
 
 			if (phase == PHASE_STALK) {
 				setSpeed(splinter, STALK_SPEED);
 
-				int watchTicks = splinter.getPersistentData().getInt(K_STALK_WATCH_TICKS).orElse(0);
+				int watchTicks = splinter.getPersistentData().getIntOr(K_STALK_WATCH_TICKS, 0);
 				if (watchTicks > 0) {
 					splinter.getPersistentData().putInt(K_STALK_WATCH_TICKS, watchTicks - 1);
 					stopNav(splinter);
@@ -452,20 +618,22 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 					return;
 				}
 
-				int flankTicks = splinter.getPersistentData().getInt(K_FLANK_TICKS).orElse(0);
+				int flankTicks = splinter.getPersistentData().getIntOr(K_FLANK_TICKS, 0);
 				if (flankTicks > 0) {
+					splinter.getPersistentData().putLong("blindspot_flank_post", splinter.level().getGameTime());
 					splinter.getPersistentData().putInt(K_FLANK_TICKS, flankTicks - 1);
 					if (splinter instanceof net.minecraft.world.entity.Mob mob2) {
-						double fx = splinter.getPersistentData().getDouble(K_FLANK_X).orElse(0.0);
-						double fy = splinter.getPersistentData().getDouble(K_FLANK_Y).orElse(0.0);
-						double fz = splinter.getPersistentData().getDouble(K_FLANK_Z).orElse(0.0);
+						double fx = splinter.getPersistentData().getDoubleOr(K_FLANK_X, 0.0);
+						double fy = splinter.getPersistentData().getDoubleOr(K_FLANK_Y, 0.0);
+						double fz = splinter.getPersistentData().getDoubleOr(K_FLANK_Z, 0.0);
 						navMoveToPosThrottled(splinter, mob2, fx, fy, fz, 0.9, 1);
+						lookAlongFlank(splinter, fx, fy, fz);
 					}
 					splinter.getEntityData().set(BlindspotSplinterEntity.DATA_mineProgress, 0);
 					return;
 				}
 				if (splinter.getRandom().nextInt(STALK_WATCH_CHANCE) == 0) {
-					int flankStreak = splinter.getPersistentData().getInt(K_FLANK_STREAK).orElse(0);
+					int flankStreak = splinter.getPersistentData().getIntOr(K_FLANK_STREAK, 0);
 					boolean doFlank = !isWatched && flankStreak < 2 && splinter.getRandom().nextBoolean();
 					if (doFlank) {
 						splinter.getPersistentData().putInt(K_FLANK_STREAK, flankStreak + 1);
@@ -479,6 +647,9 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 						splinter.getPersistentData().putDouble(K_FLANK_X, fx);
 						splinter.getPersistentData().putDouble(K_FLANK_Y, fy);
 						splinter.getPersistentData().putDouble(K_FLANK_Z, fz);
+						splinter.getPersistentData().putLong("blindspot_flank_post", splinter.level().getGameTime());
+						navMoveToPosThrottled(splinter, splinter, fx, fy, fz, 0.9, 1);
+						lookAlongFlank(splinter, fx, fy, fz);
 					} else {
 						splinter.getPersistentData().putInt(K_FLANK_STREAK, 0);
 						splinter.getPersistentData().putInt(K_STALK_WATCH_TICKS, randomBetween(splinter, STALK_WATCH_MIN, STALK_WATCH_MAX));
@@ -489,7 +660,11 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 				}
 
 				if (splinter instanceof Mob mob) {
-					if (distToPlayer > STALK_FOLLOW_DIST) {
+					Vec3 hiveStalkPoint = SplinterHivemind.stalkPoint(mob, foundPlayer);
+					if (hiveStalkPoint != null) {
+						SplinterHivemind.allowPost(splinter);
+						navMoveToPosThrottled(splinter, mob, hiveStalkPoint.x, hiveStalkPoint.y, hiveStalkPoint.z, 0.9, 1);
+					} else if (distToPlayer > STALK_FOLLOW_DIST) {
 						navMoveToEntityThrottled(splinter, mob, foundPlayer, 0.9, 1);
 					} else {
 						if (!mob.getNavigation().isDone() && splinter.tickCount % 10 == 0) {
@@ -527,6 +702,11 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 			feetPos = new BlockPos(fx, Mth.floor(splinter.getY()), fz);
 			facePos = new BlockPos(fx, Mth.floor(splinter.getEyeY()), fz);
 		}
+
+		if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.detourAroundCover(world, splinter, foundPlayer, feetPos, facePos)) {
+                splinter.getEntityData().set(BlindspotSplinterEntity.DATA_mineProgress, 0);
+                return;
+            }
 
 		boolean canMineFeet = canMine(world, feetPos, foundPlayer);
 		boolean canMineFace = canMine(world, facePos, foundPlayer);
@@ -585,6 +765,8 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 					? speedRef * DEGRADED_MINE_SPEED_MULTIPLIER + DEGRADED_MINE_SPEED_BASE
 					: speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE;
 
+			SplinterOnEntityTickUpdateProcedure.AdaptiveHive.showMiningCracks(splinter, mineProgress, mineThreshold,
+					canMineDown ? downPos : null, canMineFeet ? feetPos : null, canMineFace ? facePos : null);
 			if (mineProgress > mineThreshold) {
 				if (canMineDown) world.destroyBlock(downPos, false);
 				if (canMineFeet) world.destroyBlock(feetPos, false);
@@ -602,8 +784,10 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 					BlockPos bodyUp = body.above();
 
 					if (world.getBlockState(under).isAir()) {
-						world.setBlock(under, TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get().defaultBlockState(), 3);
-						trackPlacedBlock(splinter, under);
+						if (world.setBlock(under, TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get().defaultBlockState(), 3)) {
+							SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
+							trackPlacedBlock(splinter, under);
+						}
 					}
 					if (world.getBlockState(body).is(TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get())) world.setBlock(body, Blocks.AIR.defaultBlockState(), 3);
 					if (world.getBlockState(bodyUp).is(TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get())) world.setBlock(bodyUp, Blocks.AIR.defaultBlockState(), 3);
@@ -619,8 +803,10 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 					Vec3 look = splinter.getLookAngle();
 					BlockPos bridgePos = BlockPos.containing(splinter.getX() + look.x, splinter.getY() - 1, splinter.getZ() + look.z);
 					if (!(world.getBlockFloorHeight(bridgePos) > 0)) {
-						world.setBlock(bridgePos, TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get().defaultBlockState(), 3);
-						trackPlacedBlock(splinter, bridgePos);
+						if (world.setBlock(bridgePos, TheBackwoodsModBlocks.SPLINTERED_OAK_PLANKS.get().defaultBlockState(), 3)) {
+							SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
+							trackPlacedBlock(splinter, bridgePos);
+						}
 					}
 				}
 			}
@@ -633,7 +819,7 @@ public class BlindspotSplinterOnEntityTickUpdateProcedure {
 			double increasedReach = reach * 1.5;
 			double distSqr = splinter.distanceToSqr(target);
 			if (distSqr <= increasedReach * increasedReach) {
-				int lastAttackTick = splinter.getPersistentData().getInt("last_melee_attack_tick").orElse(0);
+				int lastAttackTick = splinter.getPersistentData().getIntOr("last_melee_attack_tick", 0);
 				if (splinter.tickCount - lastAttackTick >= 20) {
 					splinter.doHurtTarget((net.minecraft.server.level.ServerLevel) splinter.level(), target);
 					splinter.swing(InteractionHand.MAIN_HAND);
@@ -718,7 +904,7 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 	}
 
 	private static void tickRoseItem(ItemStack rose, LevelAccessor world, double x, double y, double z) {
-		double wiltTimer = rose.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag().getDouble("wilt_timer").orElse(0.0) + 1.0;
+		double wiltTimer = rose.getOrDefault(DataComponents.CUSTOM_DATA, CustomData.EMPTY).copyTag().getDoubleOr("wilt_timer", 0.0) + 1.0;
 		CustomData.update(DataComponents.CUSTOM_DATA, rose, tag -> tag.putDouble("wilt_timer", wiltTimer));
 
 		if (wiltTimer > ROSE_WILT_TICKS) {
@@ -736,11 +922,16 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 
 	private static boolean checkNearbyRoseBlocks(LevelAccessor world, BlindspotSplinterEntity splinter) {
 		BlockPos base = splinter.blockPosition();
+		BlockPos.MutableBlockPos check = new BlockPos.MutableBlockPos();
 		for (int sx = -ROSE_SCAN_XZ; sx < ROSE_SCAN_XZ; sx++) {
-			for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
-				for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
-					BlockPos check = base.offset(sx, sy, sz);
-					if (world.getBlockState(check).getBlock() == TheBackwoodsModBlocks.ASH_ROSE.get()) return true;
+			for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
+				check.set(base.getX() + sx, base.getY(), base.getZ() + sz);
+				if (world instanceof Level level && !level.hasChunkAt(check)) continue;
+				for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
+					check.set(base.getX() + sx, base.getY() + sy, base.getZ() + sz);
+					BlockState roseState = world.getBlockState(check);
+					if (roseState.is(TheBackwoodsModBlocks.ASH_ROSE.get())
+							|| roseState.is(TheBackwoodsModBlocks.POTTED_ASH_ROSE.get())) return true;
 				}
 			}
 		}
@@ -771,35 +962,44 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 	}
 
 	private static void navMoveToEntityThrottled(BlindspotSplinterEntity splinter, Mob mob, Entity target, double speed, int mode) {
-		navMoveToPosThrottled(splinter, mob, target.getX(), target.getY(), target.getZ(), speed, mode);
+		Vec3 hiveApproach = SplinterHivemind.approach(mob, target);
+		if (target instanceof Player && hiveApproach.distanceToSqr(target.position()) > 1.0) SplinterHivemind.allowPost(mob);
+		navMoveToPosThrottled(splinter, mob, hiveApproach.x, hiveApproach.y, hiveApproach.z, speed, mode);
 	}
 
 	private static void navMoveToPosThrottled(Entity entity, Mob mob, double x, double y, double z, double speed, int throttle) {
 		double dx = entity.getX() - x;
 		double dy = entity.getY() - y;
 		double dz = entity.getZ() - z;
-		if (dx * dx + dy * dy + dz * dz < 4.0) {
+		boolean closingForMelee = mob.getTarget() instanceof LivingEntity target && target.isAlive()
+				&& target.position().distanceToSqr(new Vec3(x, y, z)) < 1.0
+				&& !mob.isWithinMeleeAttackRange(target);
+		if (!closingForMelee && dx * dx + dy * dy + dz * dz < 4.0) {
 			mob.getNavigation().stop();
 			return;
 		}
 
 		int currentTick = entity.tickCount;
-		int lastTick = entity.getPersistentData().getInt(K_NAV_LAST_TICK).orElse(0);
-		int lastMode = entity.getPersistentData().getInt(K_NAV_MODE).orElse(0);
+		int lastTick = entity.getPersistentData().getIntOr(K_NAV_LAST_TICK, 0);
+		int lastMode = entity.getPersistentData().getIntOr(K_NAV_MODE, 0);
 
-		double lastTx = entity.getPersistentData().getDouble(K_NAV_TX).orElse(0.0);
-		double lastTy = entity.getPersistentData().getDouble(K_NAV_TY).orElse(0.0);
-		double lastTz = entity.getPersistentData().getDouble(K_NAV_TZ).orElse(0.0);
+		double lastTx = entity.getPersistentData().getDoubleOr(K_NAV_TX, 0.0);
+		double lastTy = entity.getPersistentData().getDoubleOr(K_NAV_TY, 0.0);
+		double lastTz = entity.getPersistentData().getDoubleOr(K_NAV_TZ, 0.0);
 
-		if (currentTick - lastTick < throttle && lastMode == 2 && Math.abs(lastTx - x) < 0.1 && Math.abs(lastTy - y) < 0.1 && Math.abs(lastTz - z) < 0.1) {
-			return;
-		}
+		int interval = Math.max(PATH_RECALC_INTERVAL_TICKS, throttle);
+		double goalShift = (lastTx - x) * (lastTx - x) + (lastTy - y) * (lastTy - y) + (lastTz - z) * (lastTz - z);
+		if (currentTick >= lastTick && currentTick - lastTick < interval && lastMode == 2
+				&& goalShift < TARGET_MOVE_REPATH_DIST_SQR) return;
 		entity.getPersistentData().putInt(K_NAV_LAST_TICK, currentTick);
 		entity.getPersistentData().putInt(K_NAV_MODE, 2);
 		entity.getPersistentData().putDouble(K_NAV_TX, x);
 		entity.getPersistentData().putDouble(K_NAV_TY, y);
 		entity.getPersistentData().putDouble(K_NAV_TZ, z);
 
+		if (mob.getPersistentData().contains("hive_post_time")
+				&& mob.getPersistentData().getLongOr("hive_post_time", 0L) == mob.level().getGameTime()
+				&& !localFlankOwnsNavigation((BlindspotSplinterEntity) mob)) speed = 1.05;
 		mob.getNavigation().moveTo(x, y, z, speed);
 	}
 
@@ -809,12 +1009,12 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 
 	private static void trackPlacedBlock(Entity splinter, BlockPos pos) {
 		net.minecraft.nbt.CompoundTag tag = splinter.getPersistentData();
-		int size = tag.getInt("pb_size").orElse(0);
+		int size = tag.getIntOr("pb_size", 0);
 
 		for (int i = 0; i < size; i++) {
-			int x = tag.getInt("pb_x_" + i).orElse(0);
-			int y = tag.getInt("pb_y_" + i).orElse(0);
-			int z = tag.getInt("pb_z_" + i).orElse(0);
+			int x = tag.getIntOr("pb_x_" + i, 0);
+			int y = tag.getIntOr("pb_y_" + i, 0);
+			int z = tag.getIntOr("pb_z_" + i, 0);
 			if (x == pos.getX() && y == pos.getY() && z == pos.getZ()) {
 				return;
 			}
@@ -830,14 +1030,14 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 
 	private static void updatePlacedBlockCleanup(LevelAccessor world, Entity splinter, BlockState targetBlockState) {
 		net.minecraft.nbt.CompoundTag tag = splinter.getPersistentData();
-		int size = tag.getInt("pb_size").orElse(0);
+		int size = tag.getIntOr("pb_size", 0);
 		if (size == 0) return;
 
 		boolean standingOnAny = false;
 		for (int i = 0; i < size; i++) {
-			int x = tag.getInt("pb_x_" + i).orElse(0);
-			int y = tag.getInt("pb_y_" + i).orElse(0);
-			int z = tag.getInt("pb_z_" + i).orElse(0);
+			int x = tag.getIntOr("pb_x_" + i, 0);
+			int y = tag.getIntOr("pb_y_" + i, 0);
+			int z = tag.getIntOr("pb_z_" + i, 0);
 
 			double dx = Math.abs(splinter.getX() - (x + 0.5));
 			double dz = Math.abs(splinter.getZ() - (z + 0.5));
@@ -852,13 +1052,13 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 		if (standingOnAny) {
 			tag.putInt("pb_delay", 0);
 		} else {
-			int delay = tag.getInt("pb_delay").orElse(0) + 1;
+			int delay = tag.getIntOr("pb_delay", 0) + 1;
 			tag.putInt("pb_delay", delay);
 
 			if (delay % 2 == 0) {
-				int x0 = tag.getInt("pb_x_0").orElse(0);
-				int y0 = tag.getInt("pb_y_0").orElse(0);
-				int z0 = tag.getInt("pb_z_0").orElse(0);
+				int x0 = tag.getIntOr("pb_x_0", 0);
+				int y0 = tag.getIntOr("pb_y_0", 0);
+				int z0 = tag.getIntOr("pb_z_0", 0);
 				BlockPos pos0 = new BlockPos(x0, y0, z0);
 
 				BlockState state = world.getBlockState(pos0);
@@ -867,9 +1067,9 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 				}
 
 				for (int i = 0; i < size - 1; i++) {
-					tag.putInt("pb_x_" + i, tag.getInt("pb_x_" + (i + 1)).orElse(0));
-					tag.putInt("pb_y_" + i, tag.getInt("pb_y_" + (i + 1)).orElse(0));
-					tag.putInt("pb_z_" + i, tag.getInt("pb_z_" + (i + 1)).orElse(0));
+					tag.putInt("pb_x_" + i, tag.getIntOr("pb_x_" + (i + 1), 0));
+					tag.putInt("pb_y_" + i, tag.getIntOr("pb_y_" + (i + 1), 0));
+					tag.putInt("pb_z_" + i, tag.getIntOr("pb_z_" + (i + 1), 0));
 				}
 				size--;
 				tag.putInt("pb_size", size);
@@ -879,5 +1079,9 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, Blin
 			}
 		}
 	}
+
+	/** Short-lived, local coordination across the four Splinter variants. Server side only. */
+
+
 }
 // 26.1.2

@@ -1,5 +1,7 @@
 package net.mcreator.thebackwoods.procedures;
 
+import net.mcreator.thebackwoods.procedures.SplinterOnEntityTickUpdateProcedure.SplinterHivemind;
+
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.mcreator.thebackwoods.entity.PetrifiedLogSplinterEntity;
 import net.mcreator.thebackwoods.init.TheBackwoodsModBlocks;
@@ -39,6 +41,16 @@ import net.minecraft.commands.CommandSource;
 import javax.annotation.Nullable;
 import java.util.Comparator;
 
+import net.mcreator.thebackwoods.entity.BlindspotSplinterEntity;
+import net.mcreator.thebackwoods.entity.LogSplinterEntity;
+import net.mcreator.thebackwoods.entity.SplinterEntity;
+import net.minecraft.sounds.SoundEvents;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+
+import net.minecraft.world.item.Items;
+
 @EventBusSubscriber
 public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 
@@ -61,6 +73,24 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 
     public static void execute() {
     }
+
+	@SubscribeEvent
+	public static void onEntityTickAfterGoals(EntityTickEvent.Post event) {
+		if (event.getEntity() instanceof PetrifiedLogSplinterEntity member) {
+			if (!member.level().isClientSide() && Math.floorMod(member.tickCount + member.getId(), 5) == 0)
+				member.getEntityData().set(PetrifiedLogSplinterEntity.DATA_frozenByRose,
+						checkNearbyRoseBlocks(member.level(), member) ? 1 : 0);
+			if (member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
+				setSpeed(member, 0);
+				member.getNavigation().stop();
+				Vec3 motion = member.getDeltaMovement();
+				member.setDeltaMovement(0.0, motion.y, 0.0);
+				return;
+			}
+			if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.finishAction(member, member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress))) return;
+			SplinterHivemind.followFormationPost(member, member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress));
+		}
+	}
 
     @SubscribeEvent
     public static void onEntityTick(EntityTickEvent.Pre event) {
@@ -171,11 +201,20 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
         }
 
         if (foundPlayer == null) {
+            if (SplinterHivemind.search(petrified)) return;
             resetState(petrified);
             petrified.getPersistentData().putInt(K_RAGE_BONUS, 0);
             return;
         }
 
+        boolean retaliating = attacker != null && attacker.isAlive()
+                && petrified.getTarget() == attacker
+                && petrified.tickCount - petrified.getLastHurtByMobTimestamp() >= 0
+                && petrified.tickCount - petrified.getLastHurtByMobTimestamp() <= 200;
+        if (retaliating) {
+            petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_isEnraged, 1);
+            petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_watchTimer, 0);
+        }
         int isEnraged = petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_isEnraged);
         int watchTimer = petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_watchTimer);
 
@@ -200,8 +239,8 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             isWatched = foundPlayerDirect.getLookAngle().normalize().dot(toSplinter) > WATCH_DOT_THRESHOLD && foundPlayerDirect.hasLineOfSight(petrified);
         }
 
-        double distToPlayer = foundPlayerDirect != null ? petrified.position().distanceTo(foundPlayerDirect.position()) : Double.MAX_VALUE;
-        if (isEnraged == 1 && distToPlayer > RAGE_ESCAPE_RANGE) {
+        double distToPlayer = petrified.distanceTo(foundPlayer);
+        if (isEnraged == 1 && !retaliating && distToPlayer > RAGE_ESCAPE_RANGE) {
             resetState(petrified);
             isEnraged = 0;
         }
@@ -218,7 +257,21 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_watchTimer, 0);
         }
 
-        if ((isWatched && isEnraged == 0) || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
+        SplinterHivemind.observe(petrified, foundPlayerDirect, petrified.getLastHurtByMob());
+
+        boolean heldRoseBeforeMove = foundPlayerDirect != null && checkHeldRose(foundPlayerDirect, petrified, world,
+                foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
+        if (heldRoseBeforeMove || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
+            setSpeed(petrified, 0); petrified.getNavigation().stop(); resetState(petrified); return;
+        }
+
+        // Enraged Petrified members pursue in melee; projectile immunity excludes bow evasions and cover.
+        if (foundPlayerDirect != null && petrified.getTarget() == foundPlayerDirect
+                && petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) != 1
+                && SplinterHivemind.handleBowThreat(petrified, foundPlayerDirect,
+                    petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress), ACTIVE_MOVE_SPEED)) return;
+
+        if ((isWatched && isEnraged == 0 && !SplinterHivemind.bowCommitActive(petrified, foundPlayerDirect)) || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
             setSpeed(petrified, 0);
             if (petrified instanceof Mob mob) mob.getNavigation().stop();
             return;
@@ -237,6 +290,11 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
         if (hit.getType() == HitResult.Type.BLOCK) {
             BlockPos facePos = ((BlockHitResult) hit).getBlockPos();
             BlockPos feetPos = new BlockPos(facePos.getX(), Mth.floor(petrified.getY()), facePos.getZ());
+
+            if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.detourAroundCover(world, petrified, foundPlayer, feetPos, facePos)) {
+                petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_mineProgress, 0);
+                return;
+            }
 
             boolean canMineFeet = canMine(world, feetPos, foundPlayer);
             boolean canMineFace = canMine(world, facePos, foundPlayer);
@@ -263,6 +321,8 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
                     speedRef = world.getBlockState(facePos).getDestroySpeed(world, facePos);
                 }
 
+                SplinterOnEntityTickUpdateProcedure.AdaptiveHive.showMiningCracks(petrified, mineProgress,
+                        speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE, canMineDown ? downPos : null, canMineFeet ? feetPos : null, canMineFace ? facePos : null);
                 if (mineProgress > (speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE)) {
                     if (canMineDown) world.destroyBlock(downPos, false);
                     if (canMineFeet) world.destroyBlock(feetPos, false);
@@ -281,12 +341,17 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 
         boolean foundRose = false;
         if (foundPlayerDirect != null) {
-            foundRose = checkHeldRose(foundPlayerDirect, petrified, world, foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
+            foundRose = heldRoseBeforeMove;
         }
-        if (foundRose || (petrified.tickCount % 5 == 0 && checkNearbyRoseBlocks(world, petrified))) {
+		if (foundRose || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
             setSpeed(petrified, 0);
             resetState(petrified);
             petrified.getPersistentData().putInt(K_RAGE_BONUS, 0);
+			return;
+        }
+
+        if (!foundRose && petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) != 1) {
+            SplinterHivemind.allowPost(petrified);
         }
 
         // Melee reach range increase for non-players only (by 50%)
@@ -314,9 +379,14 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
         double horizontalDist = splinter.position().distanceTo(foundPlayer.position());
         if (heightDiff >= 1.4 && horizontalDist < 12) {
             if (world instanceof ServerLevel serverLevel) {
+                BlockPos under = BlockPos.containing(splinter.getX(), splinter.getY() - 1, splinter.getZ());
+                boolean placing = serverLevel.getBlockState(under).isAir();
                 CommandSourceStack src = new CommandSourceStack(CommandSource.NULL, new Vec3(splinter.getX(), splinter.getY(), splinter.getZ()), Vec2.ZERO, serverLevel, 4, "", Component.literal(""), serverLevel.getServer(), null).withSuppressedOutput();
                 serverLevel.getServer().getCommands().performPrefixedCommand(src, "fill ~ ~-1 ~ ~ ~-1 ~ the_backwoods:petrified_splintered_oak_wood replace minecraft:air");
-                trackPlacedBlock(splinter, BlockPos.containing(splinter.getX(), splinter.getY() - 1, splinter.getZ()));
+                if (placing && serverLevel.getBlockState(under).is(TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get())) {
+                    SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
+                    trackPlacedBlock(splinter, under);
+                }
             }
             if (splinter.onGround()) splinter.setDeltaMovement(new Vec3(splinter.getDeltaMovement().x(), 0.4, splinter.getDeltaMovement().z()));
             splinter.fallDistance = 0;
@@ -324,8 +394,10 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             Vec3 look = splinter.getLookAngle();
             BlockPos bridgePos = BlockPos.containing(splinter.getX() + look.x, splinter.getY() - 1, splinter.getZ() + look.z);
             if (!(world.getBlockFloorHeight(bridgePos) > 0)) {
-                world.setBlock(bridgePos, TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3);
-                trackPlacedBlock(splinter, bridgePos);
+                if (world.setBlock(bridgePos, TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3)) {
+                    SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
+                    trackPlacedBlock(splinter, bridgePos);
+                }
             }
         }
     }
@@ -391,10 +463,17 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
     }
 
     private static boolean checkNearbyRoseBlocks(LevelAccessor world, PetrifiedLogSplinterEntity splinter) {
+        BlockPos base = splinter.blockPosition();
+        BlockPos.MutableBlockPos check = new BlockPos.MutableBlockPos();
         for (int sx = -ROSE_SCAN_XZ; sx < ROSE_SCAN_XZ; sx++) {
-            for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
-                for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
-                    if (world.getBlockState(BlockPos.containing(splinter.getX() + sx, splinter.getY() + sy, splinter.getZ() + sz)).getBlock() == TheBackwoodsModBlocks.ASH_ROSE.get()) return true;
+            for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
+                check.set(base.getX() + sx, base.getY(), base.getZ() + sz);
+                if (world instanceof Level level && !level.hasChunkAt(check)) continue;
+                for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
+                    check.set(base.getX() + sx, base.getY() + sy, base.getZ() + sz);
+					BlockState roseState = world.getBlockState(check);
+					if (roseState.is(TheBackwoodsModBlocks.ASH_ROSE.get())
+							|| roseState.is(TheBackwoodsModBlocks.POTTED_ASH_ROSE.get())) return true;
                 }
             }
         }
@@ -482,4 +561,8 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             }
         }
     }
+
+	/** Short-lived, local coordination across the four Splinter variants. Server side only. */
+
+
 }

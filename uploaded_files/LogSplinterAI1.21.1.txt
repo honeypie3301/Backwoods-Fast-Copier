@@ -1,5 +1,7 @@
 package net.mcreator.thebackwoods.procedures;
 
+import net.mcreator.thebackwoods.procedures.SplinterOnEntityTickUpdateProcedure.SplinterHivemind;
+
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.mcreator.thebackwoods.entity.LogSplinterEntity;
 import net.mcreator.thebackwoods.init.TheBackwoodsModBlocks;
@@ -33,6 +35,16 @@ import net.minecraft.commands.arguments.EntityAnchorArgument;
 
 import javax.annotation.Nullable;
 import java.util.List;
+
+import net.mcreator.thebackwoods.entity.BlindspotSplinterEntity;
+import net.mcreator.thebackwoods.entity.PetrifiedLogSplinterEntity;
+import net.mcreator.thebackwoods.entity.SplinterEntity;
+import net.minecraft.server.level.ServerLevel;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.UUID;
+
+import net.minecraft.world.item.Items;
 
 @EventBusSubscriber
 public class LogSplinterOnEntityTickUpdateProcedure {
@@ -105,6 +117,24 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 	private static final int AGE_THIRD_TO_LAST = 360000;
 	private static final int AGE_SECOND_TO_LAST = 420000;
 	private static final int AGE_LAST = 480000;
+
+	@SubscribeEvent
+	public static void onEntityTickAfterGoals(EntityTickEvent.Post event) {
+		if (event.getEntity() instanceof LogSplinterEntity member) {
+			if (!member.level().isClientSide() && Math.floorMod(member.tickCount + member.getId(), 5) == 0)
+				member.getEntityData().set(LogSplinterEntity.DATA_frozenByRose,
+						checkNearbyRoseBlocks(member.level(), member) ? 1 : 0);
+			if (member.getEntityData().get(LogSplinterEntity.DATA_frozenByRose) == 1) {
+				setSpeed(member, 0);
+				stopNav(member);
+				Vec3 motion = member.getDeltaMovement();
+				member.setDeltaMovement(0.0, motion.y, 0.0);
+				return;
+			}
+			if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.finishAction(member, member.getEntityData().get(LogSplinterEntity.DATA_mineProgress))) return;
+			SplinterHivemind.followFormationPost(member, member.getEntityData().get(LogSplinterEntity.DATA_mineProgress));
+		}
+	}
 
 	@SubscribeEvent
 	public static void onEntityTick(EntityTickEvent.Pre event) {
@@ -242,6 +272,7 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 		}
 
 		if (foundPlayer == null) {
+			if (SplinterHivemind.search(logSplinter)) return;
 			int remainingForcedHunt = logSplinter.getPersistentData().getInt(K_FORCED_HUNT_TICKS);
 
 			if (remainingForcedHunt <= 0) {
@@ -323,9 +354,6 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 		if (foundPlayerDirect != null) {
 			foundRose = checkHeldRose(foundPlayerDirect, logSplinter, world, foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
 		}
-		if (!foundRose && logSplinter.tickCount % 5 == 0) {
-			foundRose = checkNearbyRoseBlocks(world, logSplinter);
-		}
 		if (foundRose || frozenByRose == 1) {
 			setSpeed(logSplinter, 0);
 			logSplinter.getEntityData().set(LogSplinterEntity.DATA_isEnraged, 0);
@@ -339,12 +367,32 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 			return;
 		}
 
+		SplinterHivemind.observe(logSplinter, foundPlayerDirect, logSplinter.getLastHurtByMob());
+        if (personality == PERSONALITY_STALK_HUNT && SplinterHivemind.beginGroupHunt(logSplinter, foundPlayerDirect)) {
+            logSplinter.getPersistentData().putInt(K_HM_PHASE, PHASE_HUNT);
+            logSplinter.getPersistentData().putInt(K_HM_PHASE_TIMER, 160);
+            logSplinter.getPersistentData().putInt(K_STALK_WATCH_TICKS, 0);
+            logSplinter.getPersistentData().putInt(K_FLANK_TICKS, 0);
+        }
+
 		double heightDiff = foundPlayer.getY() - logSplinter.getY();
 		double horizontalDist = logSplinter.position().distanceTo(foundPlayer.position());
 		boolean isTowering = !isCritical && (heightDiff >= 1.4 && horizontalDist < 12);
 
+		// One bounded cover move owns navigation while the archer is drawing.
+		if (foundPlayerDirect != null && logSplinter.getTarget() == foundPlayerDirect
+				&& SplinterHivemind.handleBowThreat(logSplinter, foundPlayerDirect,
+					logSplinter.getEntityData().get(LogSplinterEntity.DATA_mineProgress),
+					isDegraded ? DEGRADED_MOVE_SPEED : ACTIVE_MOVE_SPEED)) return;
+		if (personality == PERSONALITY_STALK_HUNT
+				&& SplinterHivemind.bowCommitActive(logSplinter, foundPlayerDirect)
+				&& logSplinter.getPersistentData().getInt(K_HM_PHASE) != PHASE_HUNT) {
+			logSplinter.getPersistentData().putInt(K_HM_PHASE, PHASE_HUNT);
+			logSplinter.getPersistentData().putInt(K_HM_PHASE_TIMER, 90);
+		}
+
 		if (personality == PERSONALITY_ANGEL) {
-			if (isWatched && isEnraged == 0) {
+			if (isWatched && isEnraged == 0 && !SplinterHivemind.bowCommitActive(logSplinter, foundPlayerDirect)) {
 				setSpeed(logSplinter, 0);
 				stopNav(logSplinter);
 				logSplinter.getEntityData().set(LogSplinterEntity.DATA_mineProgress, 0);
@@ -477,7 +525,11 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 				}
 
 				if (logSplinter instanceof Mob mob) {
-					if (distToPlayer > STALK_FOLLOW_DIST) {
+					Vec3 hiveStalkPoint = SplinterHivemind.stalkPoint(mob, foundPlayer);
+					if (hiveStalkPoint != null) {
+						SplinterHivemind.allowPost(logSplinter);
+						navMoveToPosThrottled(logSplinter, mob, hiveStalkPoint.x, hiveStalkPoint.y, hiveStalkPoint.z, 0.8, 1);
+					} else if (distToPlayer > STALK_FOLLOW_DIST) {
 						navMoveToEntityThrottled(logSplinter, mob, foundPlayer, 0.8, 1);
 					} else {
 						if (!mob.getNavigation().isDone() && logSplinter.tickCount % 10 == 0) {
@@ -514,6 +566,11 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 			feetPos = new BlockPos(fx, Mth.floor(logSplinter.getY()), fz);
 			facePos = new BlockPos(fx, Mth.floor(logSplinter.getEyeY()), fz);
 		}
+
+		if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.detourAroundCover(world, logSplinter, foundPlayer, feetPos, facePos)) {
+                logSplinter.getEntityData().set(LogSplinterEntity.DATA_mineProgress, 0);
+                return;
+            }
 
 		boolean canMineFeet = canMine(world, feetPos, foundPlayer);
 		boolean canMineFace = canMine(world, facePos, foundPlayer);
@@ -573,6 +630,8 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 					? speedRef * DEGRADED_MINE_SPEED_MULTIPLIER + DEGRADED_MINE_SPEED_BASE
 					: speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE;
 
+			SplinterOnEntityTickUpdateProcedure.AdaptiveHive.showMiningCracks(logSplinter, mineProgress, mineThreshold,
+					canMineDown ? downPos : null, canMineFeet ? feetPos : null, canMineFace ? facePos : null);
 			if (mineProgress > mineThreshold) {
 				if (canMineDown) world.destroyBlock(downPos, false);
 				if (canMineFeet) world.destroyBlock(feetPos, false);
@@ -586,17 +645,16 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 			if (!isCritical && !logSplinter.isSwimming() && !logSplinter.isInWater()) {
 				if (heightDiff >= 1.4 && horizontalDist < 12) {
 					logSplinter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get()));
-					if (logSplinter.tickCount % 6 == 0) {
-						logSplinter.swing(InteractionHand.MAIN_HAND);
-					}
 
 					BlockPos under = BlockPos.containing(logSplinter.getX(), logSplinter.getY() - 1, logSplinter.getZ());
 					BlockPos body = BlockPos.containing(logSplinter.getX(), logSplinter.getY(), logSplinter.getZ());
 					BlockPos bodyUp = body.above();
 
 					if (world.getBlockState(under).isAir()) {
-						world.setBlock(under, TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3);
-						trackPlacedBlock(logSplinter, under);
+						if (world.setBlock(under, TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3)) {
+							SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(logSplinter);
+							trackPlacedBlock(logSplinter, under);
+						}
 					}
 					if (world.getBlockState(body).is(TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get())) {
 						world.setBlock(body, Blocks.AIR.defaultBlockState(), 3);
@@ -621,11 +679,10 @@ public class LogSplinterOnEntityTickUpdateProcedure {
 					if (isNearGap) {
 						logSplinter.setItemInHand(InteractionHand.MAIN_HAND, new ItemStack(TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get()));
 						if (!(world.getBlockFloorHeight(bridgePos) > 0)) {
-							if (logSplinter.tickCount % 6 == 0) {
-								logSplinter.swing(InteractionHand.MAIN_HAND);
+							if (world.setBlock(bridgePos, TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3)) {
+								SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(logSplinter);
+								trackPlacedBlock(logSplinter, bridgePos);
 							}
-							world.setBlock(bridgePos, TheBackwoodsModBlocks.SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3);
-							trackPlacedBlock(logSplinter, bridgePos);
 						}
 					} else {
 						logSplinter.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
@@ -734,11 +791,16 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, LogS
 
 	private static boolean checkNearbyRoseBlocks(LevelAccessor world, LogSplinterEntity logSplinter) {
 		BlockPos base = logSplinter.blockPosition();
+		BlockPos.MutableBlockPos check = new BlockPos.MutableBlockPos();
 		for (int sx = -ROSE_SCAN_XZ; sx < ROSE_SCAN_XZ; sx++) {
-			for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
-				for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
-					BlockPos check = base.offset(sx, sy, sz);
-					if (world.getBlockState(check).getBlock() == TheBackwoodsModBlocks.ASH_ROSE.get()) {
+			for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
+				check.set(base.getX() + sx, base.getY(), base.getZ() + sz);
+				if (world instanceof Level level && !level.hasChunkAt(check)) continue;
+				for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
+					check.set(base.getX() + sx, base.getY() + sy, base.getZ() + sz);
+					BlockState roseState = world.getBlockState(check);
+					if (roseState.is(TheBackwoodsModBlocks.ASH_ROSE.get())
+							|| roseState.is(TheBackwoodsModBlocks.POTTED_ASH_ROSE.get())) {
 						return true;
 					}
 				}
@@ -771,7 +833,9 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, LogS
 	}
 
 	private static void navMoveToEntityThrottled(LogSplinterEntity logSplinter, Mob mob, Entity target, double speed, int mode) {
-		navMoveToPosThrottled(logSplinter, mob, target.getX(), target.getY(), target.getZ(), speed, mode);
+		Vec3 hiveApproach = SplinterHivemind.approach(mob, target);
+		if (target instanceof Player && hiveApproach.distanceToSqr(target.position()) > 1.0) SplinterHivemind.allowPost(mob);
+		navMoveToPosThrottled(logSplinter, mob, hiveApproach.x, hiveApproach.y, hiveApproach.z, speed, mode);
 	}
 
 	private static void navMoveToPosThrottled(LogSplinterEntity logSplinter, Mob mob, double tx, double ty, double tz, double speed, int mode) {
@@ -876,4 +940,8 @@ private static boolean isPositionClaimed(LevelAccessor world, BlockPos pos, LogS
 			}
 		}
 	}
+
+	/** Short-lived, local coordination across the four Splinter variants. Server side only. */
+
+
 } // 1.21.1

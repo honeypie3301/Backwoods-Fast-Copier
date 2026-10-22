@@ -27,6 +27,76 @@ public class AshWeaverChatCommandProcedure {
 
 	// BEGIN TYPO MATCHER: pure, bounded parsing; never searches for commands inside a sentence.
 	private static final class ChatCommandMatcher {
+		private static final String[][] APOLOGIES = {
+			"sorry".split(" "),
+			"im sorry".split(" "),
+			"i am sorry".split(" "),
+			"so sorry".split(" "),
+			"really sorry".split(" "),
+			"very sorry".split(" "),
+			"im so sorry".split(" "),
+			"i am so sorry".split(" "),
+			"im really sorry".split(" "),
+			"i am really sorry".split(" "),
+			"my bad".split(" "),
+			"my fault".split(" "),
+			"my mistake".split(" "),
+			"oops".split(" "),
+			"oops sorry".split(" "),
+			"oops my bad".split(" "),
+			"sry".split(" "),
+			"soz".split(" "),
+			"forgive me".split(" "),
+			"i apologize".split(" "),
+			"i apologise".split(" "),
+			"sorry about that".split(" "),
+			"sorry for that".split(" "),
+			"sorry for hitting you".split(" "),
+			"sorry for hurting you".split(" "),
+			"sorry i hit you".split(" "),
+			"sorry i hurt you".split(" "),
+			"im sorry for hitting you".split(" "),
+			"im sorry for hurting you".split(" "),
+			"im sorry i hit you".split(" "),
+			"i am sorry for hitting you".split(" "),
+			"i am sorry for hurting you".split(" "),
+			"i didnt mean it".split(" "),
+			"i did not mean it".split(" "),
+			"didnt mean it".split(" "),
+			"i didnt mean to hit you".split(" "),
+			"i did not mean to hit you".split(" "),
+			"i didnt mean to hurt you".split(" "),
+			"i did not mean to hurt you".split(" "),
+			"it was an accident".split(" "),
+			"that was an accident".split(" "),
+			"it was accidental".split(" "),
+			"that was accidental".split(" "),
+			"i hit you by accident".split(" "),
+			"i hurt you by accident".split(" "),
+			"i accidentally hit you".split(" "),
+			"i accidentally hurt you".split(" "),
+			"sorry that was an accident".split(" "),
+			"sorry it was an accident".split(" "),
+			"sorry i didnt mean it".split(" "),
+			"sorry i didnt mean to hit you".split(" "),
+			"sorry i didnt mean to hurt you".split(" "),
+			"sorry i did not mean to hit you".split(" "),
+			"sorry i did not mean to hurt you".split(" "),
+			"i apologize for hitting you".split(" "),
+			"i apologise for hitting you".split(" "),
+			"i apologize for hurting you".split(" "),
+			"i apologise for hurting you".split(" "),
+			"i apologize for that".split(" "),
+			"i apologise for that".split(" "),
+			"im sorry about that".split(" "),
+			"i am sorry about that".split(" "),
+			"sorry for the friendly fire".split(" "),
+			"friendly fire sorry".split(" "),
+			"apologies".split(" "), "my apologies".split(" "), "apologize".split(" "), "apologise".split(" "),
+			"it was a mistake".split(" "), "that was a mistake".split(" "), "that was my fault".split(" "),
+			"sorry about hitting you".split(" "), "sorry about hurting you".split(" "),
+			"didnt mean to hit you".split(" "), "didnt mean to hurt you".split(" ")
+		};
 		private static final String[][] PHRASES = {
 			{"follow", "follow"}, {"follow me", "follow"}, {"come here", "follow"},
 			{"stay", "stay"}, {"stay here", "stay"}, {"wait here", "stay"},
@@ -34,10 +104,12 @@ public class AshWeaverChatCommandProcedure {
 			{"help me", "help me"}, {"protect me", "help me"}, {"status", "status"},
 			{"this is home", "this is home"}, {"this is our home", "this is home"},
 			{"remember this place", "this is home"},
+			{"this is our camp", "this is home"}, {"this is our base", "this is home"},
+			{"this is a watchtower", "this is home"},
 			{"this is also home", "this is also home"}, {"remember this area too", "this is also home"},
 			{"stay home", "stay home"}, {"stay at home", "stay home"},
 			{"forget home", "forget home"}, {"forget this home", "forget home"},
-			{"home status", "home status"}
+			{"home status", "home status"}, {"restore home", "restore home"}
 		};
 		private static final String[][] WORDS = new String[PHRASES.length][];
 		static {
@@ -54,9 +126,12 @@ public class AshWeaverChatCommandProcedure {
 			for (int i = 0; i < end; i++) {
 				char ch = text.charAt(i);
 				if (ch >= 'a' && ch <= 'z') { normalized.append(ch); space = false; }
+				else if ((ch == '\'' || ch == '\u2019') && i > 0 && i + 1 < end
+						&& text.charAt(i - 1) >= 'a' && text.charAt(i - 1) <= 'z'
+						&& text.charAt(i + 1) >= 'a' && text.charAt(i + 1) <= 'z') { /* I'm -> im */ }
 				else if (ch == ' ' || ch == '\t' || ch == ',' || ch == ':') {
 					if (!space) { normalized.append(' '); space = true; }
-				} else return null; // Quotes, hidden characters, slash commands and other scripts are not guessed.
+				} else return null; // Quoted commands, hidden characters, slash commands and other scripts are not guessed.
 			}
 			String command = normalized.toString().trim();
 			if (command.isEmpty()) return null;
@@ -65,6 +140,7 @@ public class AshWeaverChatCommandProcedure {
 			if (tokens.length > 2 && tokens[0].equals("ash") && isAddress(tokens[1])) skip = 2;
 			else if (tokens.length > 1 && (isAddress(tokens[0]) || tokens[0].equals("ashweaver"))) skip = 1;
 			if (skip > 0) command = String.join(" ", java.util.Arrays.copyOfRange(tokens, skip, tokens.length));
+			if (isApology(command, skip > 0)) return "apologize";
 			for (String[] phrase : PHRASES) if (phrase[0].equals(command)) return phrase[1];
 			// Exact unaddressed commands remain compatible; typo correction requires a clear addressee.
 			if (skip == 0) return null;
@@ -76,6 +152,7 @@ public class AshWeaverChatCommandProcedure {
 				String[] expected = WORDS[i];
 				if (input.length != expected.length) continue;
 				String action = PHRASES[i][1];
+				if (action.equals("forget home") || action.equals("restore home")) continue; // Memory changes must be exact.
 				boolean home = action.contains("home");
 				int allowance = home || PHRASES[i][0].length() < 14 ? 1 : 2;
 				int score = 0;
@@ -98,6 +175,54 @@ public class AshWeaverChatCommandProcedure {
 				else if (score == best && !action.equals(winner)) ambiguous = true;
 			}
 			return ambiguous ? null : winner;
+		}
+
+
+		private static boolean isApology(String command, boolean addressed) {
+			String[] input = command.split(" ");
+			int first = 0, last = input.length;
+			if (first < last && (input[first].equals("hey") || input[first].equals("hi"))) first++;
+			if (last - first >= 3 && input[first].equals("ash") && isAddress(input[first + 1])) {
+				first += 2; addressed = true;
+			} else if (last - first >= 2 && (isAddress(input[first]) || input[first].equals("ashweaver"))) {
+				first++; addressed = true;
+			}
+			if (last - first >= 3 && input[last - 2].equals("ash") && isAddress(input[last - 1])) {
+				last -= 2; addressed = true;
+			} else if (last - first >= 2 && (isAddress(input[last - 1]) || input[last - 1].equals("ashweaver"))) {
+				last--; addressed = true;
+			}
+			if (first < last && input[first].equals("please")) first++;
+			if (first < last && input[last - 1].equals("please")) last--;
+			if (first < last && (input[last - 1].equals("buddy") || input[last - 1].equals("friend")
+					|| input[last - 1].equals("dude"))) last--;
+			if (last - first <= 0 || last - first > 10) return false;
+			// Whole phrases only: "not sorry", quotes and unrelated sentences cannot become apologies.
+			if (addressed && last - first == 1 && input[first].equals("mb")) return true;
+			for (String[] phrase : APOLOGIES) {
+				if (last - first != phrase.length) continue;
+				int budget = phrase.length >= 3 ? 2 : 1, score = 0;
+				boolean matches = true;
+				for (int i = 0; i < phrase.length; i++) {
+					String actual = input[first + i], wanted = phrase[i];
+					if (actual.equals(wanted)) continue;
+					if (wanted.length() <= 3) {
+						if (wanted.length() == 3 && shortTypo(actual, wanted)) score++;
+						else { matches = false; break; }
+					} else {
+						// Unaddressed one-word typos need an apology-like initial, not e.g. "worry".
+						if (!addressed && phrase.length == 1 && (actual.isEmpty()
+								|| actual.charAt(0) != wanted.charAt(0))) { matches = false; break; }
+						int limit = wanted.length() >= 8 ? 2 : 1;
+						int edits = distance(actual, wanted, limit);
+						if (edits > limit) { matches = false; break; }
+						score += edits;
+					}
+					if (score > budget) { matches = false; break; }
+				}
+				if (matches) return true;
+			}
+			return false;
 		}
 
 		private static boolean isAddress(String word) {
@@ -142,6 +267,101 @@ public class AshWeaverChatCommandProcedure {
 	}
 	// END TYPO MATCHER
 
+
+	// One transient reply per Weaver; weak keys and UUID-only values avoid retaining unloaded entities.
+	private static final java.util.Map<AshWeaverEntity, Conversation> CONVERSATIONS =
+			java.util.Collections.synchronizedMap(new java.util.WeakHashMap<>());
+
+	private static final class Conversation {
+		java.util.UUID playerId;
+		String dimension;
+		String text;
+		long due;
+		long expires;
+		long noticeAt;
+		long lookUntil;
+		long nextSpeechAt;
+		boolean urgent;
+		boolean silent;
+	}
+
+	private static boolean speechBusy(AshWeaverEntity weaver, boolean urgent) {
+		var data = weaver.getPersistentData();
+		int state = chatInt(data, KEY_STATE, 0);
+		long now = weaver.level().getGameTime();
+		boolean usingDoor = data.contains("ashWeaverDoorPending")
+				&& now - chatLong(data, "ashWeaverDoorFaceAt", now) <= 20L
+				|| data.contains("ashWeaverDoorPos") && data.contains("ashWeaverDoorCloseAt")
+					&& now - chatLong(data, "ashWeaverDoorCloseAt", now) <= 20L;
+		return !weaver.onGround() || weaver.isInWater() || weaver.hurtTime > 0
+				|| state == 4 || state == 8 || state == 9 || state == 12
+				|| usingDoor
+				|| !urgent && (state == 2 || state == 7 || state == 10);
+	}
+
+	public static void processPendingReply(AshWeaverEntity weaver) {
+		Conversation conversation = CONVERSATIONS.get(weaver);
+		if (conversation == null) return;
+		if (!(weaver.level() instanceof ServerLevel level) || !weaver.isAlive()) {
+			CONVERSATIONS.remove(weaver);
+			return;
+		}
+		long now = level.getGameTime();
+		String owner = weaver.getEntityData().get(AshWeaverEntity.DATA_assignedPlayer);
+		ServerPlayer player = level.getServer().getPlayerList().getPlayer(conversation.playerId);
+		if (player == null || !player.isAlive() || player.level() != level
+				|| !owner.equals(conversation.playerId.toString())
+				|| !level.dimension().toString().equals(conversation.dimension)
+				|| weaver.distanceToSqr(player) > 32.0 * 32.0
+				|| now > conversation.expires) {
+			CONVERSATIONS.remove(weaver);
+			return;
+		}
+		if (conversation.text == null || now < conversation.due || now < conversation.nextSpeechAt) return;
+		if (conversation.silent) {
+			conversation.text = null;
+			conversation.lookUntil = 0L;
+			return;
+		}
+		if (speechBusy(weaver, conversation.urgent)) return;
+		String text = currentFeedback(weaver, conversation.text);
+		conversation.text = null;
+		conversation.nextSpeechAt = now + 8L;
+		conversation.lookUntil = now + 6L;
+		sendReply(player, weaver, text);
+	}
+
+	private static String currentFeedback(AshWeaverEntity weaver, String text) {
+		var data = weaver.getPersistentData();
+		boolean movementReply = text.equals("Following.") || text.equals("Waiting here.")
+				|| text.equals("Staying home.") || text.equals("Watching for threats.") || text.equals("I'll protect you.");
+		if (!movementReply) return text;
+		if (chatBoolean(data, "ashWeaverAvoidOwner", false)
+				|| AshWeaverOnEntityTickUpdateProcedure.relationship(weaver) <= -25.0) return "Keep your distance.";
+		if (chatBoolean(data, "ashWeaverHomeStay", false)) return "Staying home.";
+		if (chatBoolean(data, KEY_CHAT_STAY, false)) return "Waiting here.";
+		return text.equals("Waiting here.") || text.equals("Staying home.") ? "Following." : text;
+	}
+
+	// Invoked after movement/look arbitration; never steals attention from an action or danger.
+	public static void updateConversationLook(AshWeaverEntity weaver) {
+		Conversation conversation = CONVERSATIONS.get(weaver);
+		if (conversation == null || !(weaver.level() instanceof ServerLevel level)) return;
+		long now = level.getGameTime();
+		if (now < conversation.noticeAt || now > conversation.lookUntil || now > conversation.expires) return;
+		var data = weaver.getPersistentData();
+		int state = chatInt(data, KEY_STATE, 0);
+		if (state != 0 && state != 1 && state != 11 || speechBusy(weaver, false)
+				|| chatBoolean(data, "ashWeaverAvoidOwner", false) || conversation.silent
+				|| weaver.swinging
+				|| !weaver.getNavigation().isDone() || weaver.getDeltaMovement().horizontalDistanceSqr() > 0.01) return;
+		ServerPlayer player = level.getServer().getPlayerList().getPlayer(conversation.playerId);
+		if (player == null || player.level() != level || !player.isAlive()
+				|| !player.getUUID().toString().equals(weaver.getEntityData().get(AshWeaverEntity.DATA_assignedPlayer))
+				|| weaver.distanceToSqr(player) > 8.0 * 8.0 || !weaver.hasLineOfSight(player)) return;
+		weaver.getLookControl().setLookAt(player, 14.0F, 10.0F);
+	}
+
 	@SubscribeEvent
 	public static void onChat(ServerChatEvent event) {
 		if (event == null || event.getPlayer() == null) return;
@@ -153,24 +373,36 @@ public class AshWeaverChatCommandProcedure {
 		// MCreator procedure entry point; chat handling is performed by onChat.
 	}
 
+	public static void cancelConversation(AshWeaverEntity weaver) {
+		CONVERSATIONS.remove(weaver);
+	}
+
 	private static void handleChat(ServerPlayer player, ServerLevel level, String rawText) {
 		String command = ChatCommandMatcher.match(rawText);
 		if (command == null) return;
+		if (!player.isAlive() || player.isSpectator()) return;
+		long chatTime = level.getGameTime();
+		var playerData = player.getPersistentData();
+		if (chatTime < chatLong(playerData, "ashWeaverCommandAt", 0L)) return;
+		playerData.putLong("ashWeaverCommandAt", chatTime
+				+ (command.equals("help me") || command.equals("watch") ? 4L : 10L));
 
 		boolean follow = command.equals("follow") || command.equals("follow me") || command.equals("come here");
 		boolean stay = command.equals("stay") || command.equals("stay here") || command.equals("wait here");
 		boolean watch = command.equals("watch") || command.equals("watch my back");
 		boolean help = command.equals("help me") || command.equals("protect me");
 		boolean status = command.equals("status");
+		boolean apology = command.equals("apologize");
 		String homeAction = switch (command) {
 			case "this is home", "this is our home", "remember this place" -> "set";
 			case "this is also home", "remember this area too" -> "extend";
 			case "stay home", "stay at home" -> "stay";
 			case "forget home", "forget this home" -> "forget";
 			case "home status" -> "status";
+			case "restore home" -> "restore";
 			default -> "";
 		};
-		if (!follow && !stay && !watch && !help && !status && homeAction.isEmpty()) return;
+		if (!follow && !stay && !watch && !help && !status && !apology && homeAction.isEmpty()) return;
 
 		AshWeaverEntity weaver = findOwnedWeaver(player);
 		if (weaver == null) return;
@@ -178,6 +410,11 @@ public class AshWeaverChatCommandProcedure {
 		CompoundTag data = weaver.getPersistentData();
 		if (weaver.level() != level || weaver.distanceToSqr(player) > 32.0 * 32.0) return;
 		long gameTime = level.getGameTime();
+		if (apology) {
+			// Reconciliation is heard even when wary; it never earns normal chat rewards or changes an order.
+			reply(player, weaver, AshWeaverOnEntityTickUpdateProcedure.apologize(weaver, player));
+			return;
+		}
 		AshWeaverOnEntityTickUpdateProcedure.noteConversation(weaver, gameTime);
 		if (data.getBooleanOr("ashWeaverAvoidOwner", false) || AshWeaverOnEntityTickUpdateProcedure.relationship(weaver) <= -25.0) {
 			if (stay) data.putBoolean(KEY_CHAT_STAY, true);
@@ -188,6 +425,7 @@ public class AshWeaverChatCommandProcedure {
 			reply(player, weaver, AshWeaverOnEntityTickUpdateProcedure.homeCommand(weaver, player, homeAction));
 			return;
 		}
+		if (follow || stay || watch || help) AshWeaverOnEntityTickUpdateProcedure.acceptMovementOrder(weaver);
 		if (follow) {
 			data.remove("ashWeaverHomeStay");
 			data.remove(KEY_CHAT_STAY);
@@ -210,7 +448,41 @@ public class AshWeaverChatCommandProcedure {
 	}
 
 
+
 	private static void reply(ServerPlayer player, AshWeaverEntity weaver, String text) {
+		if (text == null || text.isBlank() || !(weaver.level() instanceof ServerLevel level)) return;
+		long now = level.getGameTime();
+		var data = weaver.getPersistentData();
+		double bond = AshWeaverOnEntityTickUpdateProcedure.relationship(weaver);
+		boolean urgent = text.equals("I'll protect you.");
+		int state = chatInt(data, KEY_STATE, 0);
+		boolean wary = bond < -10.0 || chatBoolean(data, "ashWeaverAvoidOwner", false)
+				|| state == 2 || state == 7 || state == 8 || state == 9 || state == 10
+				|| weaver.getHealth() <= weaver.getMaxHealth() * 0.4F
+				|| now < chatLong(data, "ashWeaverDistractionUntil", 0L);
+		boolean unfamiliar = AshWeaverOnEntityTickUpdateProcedure.speechObfuscation(weaver) > 0.55;
+		int min = urgent ? 4 : wary ? 20 : unfamiliar ? 18 : 8;
+		int max = urgent ? 8 : wary ? 50 : unfamiliar ? 36 : 18;
+		// Averaging two draws favors a natural middle rather than abrupt extreme delays.
+		int delay = min + (weaver.getRandom().nextInt(max - min + 1)
+				+ weaver.getRandom().nextInt(max - min + 1)) / 2;
+		Conversation conversation = CONVERSATIONS.get(weaver);
+		if (conversation == null) {
+			conversation = new Conversation();
+			CONVERSATIONS.put(weaver, conversation);
+		}
+		conversation.playerId = player.getUUID();
+		conversation.dimension = level.dimension().toString();
+		conversation.text = text; // A newer recognized request replaces, rather than queues behind, this reply.
+		conversation.due = Math.max(now + delay, conversation.nextSpeechAt);
+		conversation.expires = now + 120L;
+		conversation.noticeAt = now + 2L + weaver.getRandom().nextInt(3);
+		conversation.lookUntil = conversation.due + 6L;
+		conversation.urgent = urgent;
+		conversation.silent = !urgent && bond < -25.0 && weaver.getRandom().nextFloat() < 0.2F;
+	}
+
+	private static void sendReply(ServerPlayer player, AshWeaverEntity weaver, String text) {
 		if (weaver.getPersistentData().getIntOr("ashWeaverState", 0) == 10) text = "Taking cover.";
 		double fraction = AshWeaverOnEntityTickUpdateProcedure.speechObfuscation(weaver);
 		int letters = 0;
@@ -232,6 +504,19 @@ public class AshWeaverChatCommandProcedure {
 		player.sendSystemMessage(message, true);
 	}
 
+
+	private static int chatInt(net.minecraft.nbt.CompoundTag data, String key, int fallback) {
+		return data.getIntOr(key, fallback);
+	}
+
+	private static long chatLong(net.minecraft.nbt.CompoundTag data, String key, long fallback) {
+		return data.getLongOr(key, fallback);
+	}
+
+	private static boolean chatBoolean(net.minecraft.nbt.CompoundTag data, String key, boolean fallback) {
+		return data.getBooleanOr(key, fallback);
+	}
+
 	private static AshWeaverEntity findOwnedWeaver(ServerPlayer player) {
 		MinecraftServer server = ((ServerLevel) player.level()).getServer();
 		if (server == null) return null;
@@ -240,7 +525,8 @@ public class AshWeaverChatCommandProcedure {
 		for (ServerLevel dimension : server.getAllLevels()) {
 			for (Entity entity : dimension.getAllEntities()) {
 				if (entity instanceof AshWeaverEntity candidate && candidate.isAlive()
-						&& ownerId.equals(candidate.getEntityData().get(AshWeaverEntity.DATA_assignedPlayer))) {
+						&& ownerId.equals(candidate.getEntityData().get(AshWeaverEntity.DATA_assignedPlayer))
+						&& AshWeaverOnEntityTickUpdateProcedure.isCanonicalCompanion(candidate, ownerId)) {
 					if (candidate.level() == player.level()) return candidate;
 					if (otherDimensionMatch == null) otherDimensionMatch = candidate;
 				}
