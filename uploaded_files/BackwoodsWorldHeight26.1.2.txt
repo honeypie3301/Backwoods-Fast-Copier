@@ -1,0 +1,155 @@
+/*
+ * The code of this mod element is always locked.
+ *
+ * You can register new events in this class too.
+ *
+ * If you want to make a plain independent class, create it using
+ * Project Browser -> New... and make sure to make the class
+ * outside net.mcreator.thebackwoods as this package is managed by MCreator.
+ *
+ * If you change workspace package, modid or prefix, you will need
+ * to manually adapt this file to these changes or remake it.
+ *
+ * This class will be added in the mod root package.
+*/
+package net.mcreator.thebackwoods;
+
+import net.neoforged.neoforge.event.server.ServerStartingEvent;
+import net.neoforged.fml.event.lifecycle.FMLCommonSetupEvent;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.api.distmarker.OnlyIn;
+import net.neoforged.api.distmarker.Dist;
+
+@EventBusSubscriber(modid="the_backwoods")
+public class BackwoodsWorldHeight {
+    public static boolean ENABLE_AUTO_WORLD_HEIGHT_GEN = true; // Development data generation; new worlds only.
+    public static boolean DRY_RUN = false;
+    public static boolean BACKUP_ORIGINAL_FILES = true;
+    public static boolean ENABLE_BACKWOODS = false;
+    public static int BACKWOODS_HEIGHT = 384;
+    public static boolean ENABLE_LOSS = false;
+    public static int LOSS_HEIGHT = 384;
+    public static boolean ENABLE_ROTTING = false;
+    public static int ROTTING_HEIGHT = 384;
+    public static boolean ENABLE_CROSSWORKS = false;
+    public static int CROSSWORKS_HEIGHT = 768;
+    public static boolean ENABLE_FAMILIAR = false;
+    public static int FAMILIAR_HEIGHT = 384;
+    public static boolean ENABLE_GRAIN = false;
+    public static int GRAIN_HEIGHT = 384;
+    public static boolean ENABLE_PETRIFIED_WEALD = false;
+    public static int PETRIFIED_WEALD_HEIGHT = 384;
+    public static boolean ENABLE_STILL = false;
+    public static int STILL_HEIGHT = 384;
+    public static boolean ENABLE_SUB_STRATA = false;
+    public static int SUB_STRATA_HEIGHT = 768;
+    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
+    private record HeightRule(String dimension,boolean enabled,int height) {}
+    private static HeightRule[] rules() {
+        return new HeightRule[] {
+            new HeightRule("backwoods",ENABLE_BACKWOODS,BACKWOODS_HEIGHT),
+            new HeightRule("loss",ENABLE_LOSS,LOSS_HEIGHT),
+            new HeightRule("rotting",ENABLE_ROTTING,ROTTING_HEIGHT),
+            new HeightRule("the_crossworks",ENABLE_CROSSWORKS,CROSSWORKS_HEIGHT),
+            new HeightRule("the_familiar",ENABLE_FAMILIAR,FAMILIAR_HEIGHT),
+            new HeightRule("the_grain",ENABLE_GRAIN,GRAIN_HEIGHT),
+            new HeightRule("the_petrified_weald",ENABLE_PETRIFIED_WEALD,PETRIFIED_WEALD_HEIGHT),
+            new HeightRule("the_still",ENABLE_STILL,STILL_HEIGHT),
+            new HeightRule("the_sub_strata",ENABLE_SUB_STRATA,SUB_STRATA_HEIGHT)
+        };
+    }
+    public static void autoGenerateWorldHeight() {
+        if(!ENABLE_AUTO_WORLD_HEIGHT_GEN) return;
+        java.nio.file.Path current=java.nio.file.Path.of("").toAbsolutePath().normalize(),project=null;
+        for(int up=0;up<3&&current!=null;up++,current=current.getParent()) {
+            if((java.nio.file.Files.isRegularFile(current.resolve("build.gradle"))||java.nio.file.Files.isRegularFile(current.resolve("build.gradle.kts")))
+                    &&java.nio.file.Files.isDirectory(current.resolve("src/main/resources"))) {project=current;break;}
+        }
+        if(project==null) return;
+        for(HeightRule rule:rules()) if(rule.enabled) {
+            try {generate(project,rule);}
+            catch(java.io.IOException|RuntimeException error) {LOGGER.error("World-height generation failed for {}",rule.dimension,error);}
+        }
+    }
+    private static void generate(java.nio.file.Path project,HeightRule rule) throws java.io.IOException {
+        var source=project.resolve("src/main/resources");
+        String id="the_backwoods:"+rule.dimension;
+        String dimensionPath="data/the_backwoods/dimension/"+rule.dimension+".json";
+        String typePath="data/the_backwoods/dimension_type/"+rule.dimension+".json";
+        var dimensionFile=source.resolve(dimensionPath);var typeFile=source.resolve(typePath);
+        String dimensionText=java.nio.file.Files.readString(dimensionFile),typeText=java.nio.file.Files.readString(typeFile);
+        var dimension=com.google.gson.JsonParser.parseString(dimensionText).getAsJsonObject();
+        var type=com.google.gson.JsonParser.parseString(typeText).getAsJsonObject();
+        if(!dimension.get("type").isJsonPrimitive()||!dimension.get("type").getAsString().equals(id))
+            throw new IllegalStateException("Refusing to edit a shared or inline dimension type: "+id);
+        int min=type.get("min_y").getAsInt(),height=rule.height,oldHeight=type.get("height").getAsInt();
+        if(min%16!=0||min< -2032||height<16||height>4064||height%16!=0||(long)min+height>2032)
+            throw new IllegalArgumentException("Unsupported build range for "+id+": min_y="+min+", height="+height);
+        var generator=dimension.getAsJsonObject("generator");
+        if(!generator.get("type").getAsString().equals("minecraft:noise")||!generator.get("settings").isJsonObject())
+            throw new IllegalStateException("A private inline noise generator is required for "+id);
+        var settings=generator.getAsJsonObject("settings");var noise=settings.getAsJsonObject("noise");
+        boolean changeType=oldHeight!=height;
+        boolean changeNoise=noise.get("height").getAsInt()!=height||noise.get("min_y").getAsInt()!=min;
+        if(changeType) {
+            int logical=type.has("logical_height")?type.get("logical_height").getAsInt():oldHeight;
+            type.addProperty("height",height);
+            type.addProperty("logical_height",logical==oldHeight?height:Math.min(logical,height));
+            typeText=new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(type)+"\n";
+        }
+        if(changeNoise) {
+            noise.addProperty("height",height);noise.addProperty("min_y",min);
+            dimensionText=new com.google.gson.GsonBuilder().setPrettyPrinting().create().toJson(dimension)+"\n";
+        }
+        if(DRY_RUN) {LOGGER.info("World-height preview {}: min_y={}, height={}, changed={}",id,min,height,changeType||changeNoise);return;}
+        if(BACKUP_ORIGINAL_FILES) {
+            if(changeType) backup(project,typeFile,typePath);
+            if(changeNoise) backup(project,dimensionFile,dimensionPath);
+        }
+        boolean changed=false;
+        for(var root:java.util.List.of(source,project.resolve("build/resources/main"))) {
+            if(!java.nio.file.Files.isDirectory(root)) continue;
+            changed|=write(root.resolve(typePath),typeText);
+            changed|=write(root.resolve(dimensionPath),dimensionText);
+        }
+        if(changed) LOGGER.info("Prepared {} build range [{}, {}); create a new world to use it; terrain gradients and fixed-height features are unchanged",id,min,min+height);
+    }
+    private static void backup(java.nio.file.Path project,java.nio.file.Path source,String relative) throws java.io.IOException {
+        var target=project.resolve(".backwoods-world-height-backups").resolve(relative);
+        if(java.nio.file.Files.exists(target)) return;
+        java.nio.file.Files.createDirectories(target.getParent());java.nio.file.Files.copy(source,target);
+    }
+    private static boolean write(java.nio.file.Path path,String content) throws java.io.IOException {
+        if(java.nio.file.Files.isRegularFile(path)&&java.nio.file.Files.readString(path).equals(content)) return false;
+        java.nio.file.Files.createDirectories(path.getParent());var temporary=java.nio.file.Files.createTempFile(path.getParent(),"world-height-",".tmp");
+        try {
+            java.nio.file.Files.writeString(temporary,content);
+            try {java.nio.file.Files.move(temporary,path,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING);}
+            catch(java.nio.file.AtomicMoveNotSupportedException ignored) {java.nio.file.Files.move(temporary,path,java.nio.file.StandardCopyOption.REPLACE_EXISTING);}
+        } finally {java.nio.file.Files.deleteIfExists(temporary);}
+        return true;
+    }
+	public BackwoodsWorldHeight() {
+	}
+
+	@SubscribeEvent
+	public static void init(FMLCommonSetupEvent event) {
+		new BackwoodsWorldHeight();
+        autoGenerateWorldHeight();
+	}
+
+	@OnlyIn(Dist.CLIENT)
+	@SubscribeEvent
+	public static void clientLoad(FMLClientSetupEvent event) {
+	}
+
+	@EventBusSubscriber
+	private static class BackwoodsWorldHeightForgeBusEvents {
+		@SubscribeEvent
+		public static void serverLoad(ServerStartingEvent event) {
+		}
+	}
+}
+// 26.1.2

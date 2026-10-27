@@ -24,10 +24,24 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.core.registries.Registries;
+import java.util.Set;
+
 import net.mcreator.thebackwoods.entity.RotEntity;
 
 @EventBusSubscriber
 public class TrackBackwoodsTransgressionProcedure {
+
+	private static final Set<ResourceKey<Level>> TRANSGRESSION_DIMENSIONS = Set.of(
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:backwoods")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_crossworks")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_grain")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_sub_strata")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_petrified_weald")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:rotting"))
+	);
 
 	public static boolean TEST_MODE = false; // set true to test quickly / set false for normal gameplay
 	public static double MASTER_TRIGGER_MULTIPLIER = 1.0; // lower to trigger faster / increase to require larger towns
@@ -237,7 +251,9 @@ public class TrackBackwoodsTransgressionProcedure {
 		long lastExitTime = getLong(tag, "backwoods_dim_exit_time", 0L);
 
 		if (!dimId.equals(lastDimId)) {
-			if (lastDimId.contains("backwood") && !dimId.contains("backwood")) {
+			boolean wasTransgressionDim = isTransgressionDimensionId(lastDimId);
+			boolean isTransgressionDim = isBackwoodsDimension(level);
+			if (wasTransgressionDim && !isTransgressionDim) {
 				tag.putLong("backwoods_dim_exit_time", level.getGameTime());
 				lastExitTime = level.getGameTime();
 			}
@@ -249,7 +265,7 @@ public class TrackBackwoodsTransgressionProcedure {
 			return;
 		}
 
-		if (!dimId.contains("the_backwoods") && !dimId.contains("backwood")) {
+		if (!isBackwoodsDimension(level)) {
 			VerdantEngineNaturalEntitySpawningConditionProcedure.execute(level, player.getX(), player.getY(), player.getZ());
 		}
 	}
@@ -599,10 +615,33 @@ public class TrackBackwoodsTransgressionProcedure {
 		return null;
 	}
 
-	private static boolean isBackwoodsDimension(ServerLevel level) {
+	public static boolean isBackwoodsDimension(ServerLevel level) {
 		if (level == null) return false;
-		String dimId = level.dimension().identifier().toString().toLowerCase();
-		return dimId.contains("the_backwoods") || dimId.contains("backwood");
+		return isBackwoodsDimension(level.dimension());
+	}
+
+	public static boolean isBackwoodsDimension(ResourceKey<Level> dim) {
+		if (dim == null) return false;
+		if (TRANSGRESSION_DIMENSIONS.contains(dim)) return true;
+		String id = dim.identifier().toString().toLowerCase();
+		String path = dim.identifier().getPath().toLowerCase();
+		return id.equals("the_backwoods:backwoods") || path.equals("backwoods")
+			|| id.equals("the_backwoods:the_crossworks") || path.equals("the_crossworks") || path.equals("crossworks")
+			|| id.equals("the_backwoods:the_grain") || path.equals("the_grain") || path.equals("grain")
+			|| id.equals("the_backwoods:the_sub_strata") || path.equals("the_sub_strata") || path.equals("sub_strata")
+			|| id.equals("the_backwoods:the_petrified_weald") || path.equals("the_petrified_weald") || path.equals("petrified_weald")
+			|| id.equals("the_backwoods:rotting") || path.equals("rotting");
+	}
+
+	public static boolean isTransgressionDimensionId(String dimId) {
+		if (dimId == null || dimId.isEmpty()) return false;
+		String lower = dimId.toLowerCase();
+		return lower.equals("the_backwoods:backwoods") || lower.contains("backwoods")
+			|| lower.equals("the_backwoods:the_crossworks") || lower.contains("crossworks")
+			|| lower.equals("the_backwoods:the_grain") || lower.contains("grain")
+			|| lower.equals("the_backwoods:the_sub_strata") || lower.contains("sub_strata")
+			|| lower.equals("the_backwoods:the_petrified_weald") || lower.contains("petrified_weald")
+			|| lower.equals("the_backwoods:rotting") || lower.contains("rotting");
 	}
 
 	private static boolean isRotEntity(Entity entity) {

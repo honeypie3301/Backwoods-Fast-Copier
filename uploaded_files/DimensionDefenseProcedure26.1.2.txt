@@ -74,8 +74,13 @@ public final class DimensionDefenseProcedure {
             Identifier.parse("the_backwoods:the_petrified_weald")
     );
 
-    private static final Set<ResourceKey<Level>> FIRE_VALID_DIMENSIONS = Set.of(THE_GRAIN, BACKWOODS, THE_SUB_STRATA, THE_PETRIFIED_WEALD);
-    private static final Set<ResourceKey<Level>> LAVA_AND_TNT_VALID_DIMENSIONS = Set.of(THE_GRAIN, BACKWOODS, THE_SUB_STRATA);
+    private static final ResourceKey<Level> THE_CROSSWORKS = ResourceKey.create(
+            Registries.DIMENSION,
+            Identifier.parse("the_backwoods:the_crossworks")
+    );
+
+    private static final Set<ResourceKey<Level>> FIRE_VALID_DIMENSIONS = Set.of(THE_GRAIN, BACKWOODS, THE_SUB_STRATA, THE_PETRIFIED_WEALD, THE_CROSSWORKS);
+    private static final Set<ResourceKey<Level>> LAVA_AND_TNT_VALID_DIMENSIONS = Set.of(THE_GRAIN, BACKWOODS, THE_SUB_STRATA, THE_CROSSWORKS);
 
     // ==========================================
     // FIRE DEFENSE CONSTANTS
@@ -168,7 +173,7 @@ public final class DimensionDefenseProcedure {
         // Process active domino purge queue every tick
         processDominoPurge(level, player);
 
-        boolean isStrongDim = dim == THE_GRAIN || dim == THE_SUB_STRATA;
+        boolean isStrongDim = dim == THE_GRAIN || dim == THE_SUB_STRATA || dim == THE_CROSSWORKS;
         int interval = isStrongDim ? 4 : FIRE_CHECK_INTERVAL_TICKS;
         if (player.tickCount % interval != 0) return;
 
@@ -205,7 +210,7 @@ public final class DimensionDefenseProcedure {
         net.minecraft.server.level.ServerChunkCache cache = serverLevel.getChunkSource();
         Map<Long, net.minecraft.world.level.chunk.LevelChunk> loadedChunks = new HashMap<>();
 
-        boolean isStrongDim = level.dimension() == THE_GRAIN || level.dimension() == THE_SUB_STRATA;
+        boolean isStrongDim = level.dimension() == THE_GRAIN || level.dimension() == THE_SUB_STRATA || level.dimension() == THE_CROSSWORKS;
         int totalSlices = isStrongDim ? 3 : 12;
         int interval = isStrongDim ? 4 : FIRE_CHECK_INTERVAL_TICKS;
         int currentSlice = (int) ((tickCount / interval) % totalSlices);
@@ -1129,7 +1134,7 @@ public final class DimensionDefenseProcedure {
     }
 
     private static boolean isTargetDimension(ResourceKey<Level> dim) {
-        return dim.equals(BACKWOODS) || dim.equals(THE_GRAIN) || dim.equals(THE_SUB_STRATA);
+        return dim.equals(BACKWOODS) || dim.equals(THE_GRAIN) || dim.equals(THE_SUB_STRATA) || dim.equals(THE_CROSSWORKS);
     }
 
     // =========================================================================

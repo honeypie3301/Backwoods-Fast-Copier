@@ -1,0 +1,1170 @@
+package net.mcreator.thebackwoods;
+
+/**
+ * Standalone client visual policy: no generated dimension element needs to be locked.
+ * Config: config/backwoods-dimension-visuals.json (created on the first client tick).
+ * Rules match actual dimension IDs, not shared dimension-effects IDs; first matching rule wins.
+ * INHERIT keeps existing dimension/biome/fog-event colors, including data-pack changes.
+ * sky=NONE suppresses the whole native sky, including sun, moon, stars and sunrise.
+ * A post-world depth mask replaces empty sky pixels after shader lighting, before hand/HUD rendering.
+ * This removes background sun/cloud imagery without disabling the pack or changing dimension colors.
+ * Packs with nonstandard depth, translucent foreground effects or reflected skies may need extra support.
+ * Set postSkyFilter=false to retain native-only controls when a pack is incompatible.
+ * BYPASS_IRIS is optional and disables the entire pack; it also requires ALLOW_SHADER_PACK_BYPASS.
+ * Iris preferences are restored on leaving the controlled dimensions or disconnecting;
+ * a process crash cannot run restoration. Other shader loaders remain best-effort.
+ * Solar adaptation generates a cached pack-specific compatible copy; original archives and workspace elements stay untouched.
+ * The generated copy is selected at runtime and uses dimension-specific programs; other dimensions keep normal lighting.
+ * Direct celestial light (including moonlight) is removed; ambient uses the live dimension factor and skylight flag.
+ * Traced block lighting is preserved; client-generated adapter ZIPs also work in release builds.
+ * Generated packs retain the original pack resources/settings, have readable names, and obsolete verified copies are removed after switching.
+ * All matching server dimensions are prepared at login; ordinary portal trips reuse the same generated archive.
+ * Generated archives are self-contained; the original is needed only for generation, updates or restoring the original pack.
+ * Native fog is captured before vanilla resets its uniforms and applied after pack compositing; no fixed colors/density.
+ * Unsupported packs are logged and left unchanged; this is not a universal lighting override.
+ */
+public class BackwoodsDimensionVisuals {
+    public static boolean ENABLED = true;
+    public static boolean ENABLE_AUTO_CONFIG_GEN = true;
+    public static boolean ENABLE_AUTO_SUNLIGHT_ADAPTER = true; // Nine source-validated pack adapters; unknown layouts remain unchanged.
+    public static boolean ALLOW_SHADER_PACK_BYPASS = false; // Explicit opt-in; also guards older BYPASS_IRIS JSON configs.
+    private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
+    private static final com.google.gson.Gson JSON = new com.google.gson.GsonBuilder().setPrettyPrinting().create();
+
+    public BackwoodsDimensionVisuals() {}
+
+    public static final class Configuration {
+        public boolean enabled = true;
+        public int reloadSeconds = 2;
+        public boolean preserveVanillaFog = true; // Native terrain-fog event range/color; applied after shader compositing.
+        public boolean postSkyFilter = true; // Runs only when the matched rule requests sky=NONE and hideClouds=true.
+        public String[] exclude = { "the_backwoods:the_still" };
+        public java.util.List<Rule> rules = new java.util.ArrayList<>(java.util.List.of(new Rule()));
+    }
+
+    public static final class Rule {
+        public String dimension = "the_backwoods:*";
+        public boolean enabled = true;
+        public String sky = "NONE"; // NONE or INHERIT; NONE includes sun, moon and stars.
+        public boolean hideClouds = true;
+        public boolean disableSunlight = true; // Pack-aware: RV direct/indirect celestial light; ambient/block lights stay enabled.
+        public String fogColor = "INHERIT"; // INHERIT or #RRGGBB; also colors the sky background when sky=NONE.
+        public String shaderPolicy = "NATIVE_ONLY"; // Preserves the pack; BYPASS_IRIS additionally requires the global opt-in.
+        private transient int rgb = -1;
+    }
+
+    private static boolean matches(String selector, String dimension) {
+        if (selector.equals("*")) return true;
+        if (selector.endsWith(":*")) return dimension.startsWith(selector.substring(0, selector.length() - 1));
+        return selector.equals(dimension);
+    }
+
+    private static void validateSelector(String selector) {
+        if (selector == null || !selector.matches("(?:\\*|[a-z0-9_.-]+:(?:\\*|[a-z0-9_./-]+))"))
+            throw new IllegalArgumentException("Expected namespace:dimension, namespace:* or *: " + selector);
+    }
+
+    private static Configuration validate(Configuration config) {
+        if (config == null || config.exclude == null || config.rules == null || config.rules.size() > 256
+                || config.exclude.length > 256 || config.reloadSeconds < 1 || config.reloadSeconds > 3600)
+            throw new IllegalArgumentException("Invalid dimension visual configuration");
+        for (String selector : config.exclude) validateSelector(selector);
+        for (Rule rule : config.rules) {
+            if (rule == null) throw new IllegalArgumentException("Null dimension rule");
+            validateSelector(rule.dimension);
+            if (!"NONE".equals(rule.sky) && !"INHERIT".equals(rule.sky)) throw new IllegalArgumentException("sky must be NONE or INHERIT");
+            if (!"BYPASS_IRIS".equals(rule.shaderPolicy) && !"NATIVE_ONLY".equals(rule.shaderPolicy))
+                throw new IllegalArgumentException("shaderPolicy must be BYPASS_IRIS or NATIVE_ONLY");
+            if ("INHERIT".equals(rule.fogColor)) rule.rgb = -1;
+            else if (rule.fogColor != null && rule.fogColor.matches("#[0-9a-fA-F]{6}")) rule.rgb = Integer.parseInt(rule.fogColor.substring(1), 16);
+            else throw new IllegalArgumentException("fogColor must be INHERIT or #RRGGBB");
+        }
+        return config;
+    }
+
+    private static Rule select(Configuration config, String dimension) {
+        if (!ENABLED || !config.enabled || dimension == null) return null;
+        for (String selector : config.exclude) if (matches(selector, dimension)) return null;
+        for (Rule rule : config.rules) if (matches(rule.dimension, dimension)) return rule.enabled ? rule : null;
+        return null;
+    }
+
+    @net.neoforged.fml.common.EventBusSubscriber(modid = "the_backwoods", value = net.neoforged.api.distmarker.Dist.CLIENT)
+    public static final class Client {
+        private static Configuration config = validate(new Configuration());
+        private static long nextConfigCheck;
+        private static java.nio.file.attribute.FileTime configTime;
+        private static long configSize = -1;
+        private static Rule active;
+        private static final IrisBridge IRIS = new IrisBridge();
+        private static final SunlightAdapter SUNLIGHT = new SunlightAdapter();
+
+        private static void refreshConfig() {
+            long now = System.nanoTime();
+            if (nextConfigCheck != 0 && now - nextConfigCheck < 0) return;
+            nextConfigCheck = now + config.reloadSeconds * 1_000_000_000L;
+            var file = net.neoforged.fml.loading.FMLPaths.CONFIGDIR.get().resolve("backwoods-dimension-visuals.json");
+            try {
+                if (!java.nio.file.Files.exists(file)) {
+                    if (!ENABLE_AUTO_CONFIG_GEN) return;
+                    java.nio.file.Files.createDirectories(file.getParent());
+                    try {
+                        java.nio.file.Files.writeString(file, JSON.toJson(new Configuration()) + "\n", java.nio.charset.StandardCharsets.UTF_8,
+                            java.nio.file.StandardOpenOption.CREATE_NEW, java.nio.file.StandardOpenOption.WRITE);
+                    } catch (java.nio.file.FileAlreadyExistsException ignored) { /* Another writer won; read its file. */ }
+                }
+                var stamp = java.nio.file.Files.getLastModifiedTime(file);
+                long size = java.nio.file.Files.size(file);
+                if (stamp.equals(configTime) && size == configSize) return;
+                configTime = stamp;
+                configSize = size;
+                if (size > 131072) throw new IllegalArgumentException("Dimension visual config exceeds 128 KiB");
+                Configuration candidate = validate(JSON.fromJson(java.nio.file.Files.readString(file), Configuration.class));
+                config = candidate; // Publish only a fully validated snapshot; malformed edits keep the previous rules.
+                LOGGER.info("Loaded dimension visual policy from {}", file);
+            } catch (java.io.IOException | RuntimeException exception) {
+                LOGGER.warn("Dimension visual config unavailable/invalid; retaining previous rules: {}", file, exception);
+            }
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+        public static void tick(net.neoforged.neoforge.client.event.ClientTickEvent.Pre event) {
+            refreshConfig();
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            active = select(config, minecraft.level == null ? null : minecraft.level.dimension().identifier().toString());
+            IRIS.update(ALLOW_SHADER_PACK_BYPASS && active != null && "BYPASS_IRIS".equals(active.shaderPolicy));
+            SUNLIGHT.update(minecraft.level == null ? null : minecraft.level.dimension().identifier().toString());
+            // Modern renderer policy is applied to each extracted frame below.
+            if (minecraft.level == null) { releaseSkyBuffers(); skyColorDimension = nativeFogDimension = null; NativeFogPass.close(); }
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent
+        public static void login(net.neoforged.neoforge.client.event.ClientPlayerNetworkEvent.LoggingIn event) {
+            refreshConfig();
+            SUNLIGHT.nextCheck = 0;
+            var level = net.minecraft.client.Minecraft.getInstance().level;
+            SUNLIGHT.update(level == null ? null : level.dimension().identifier().toString());
+        }
+
+        private static float nativeFogStart, nativeFogEnd, nativeRenderStart, nativeRenderEnd;
+        private static int nativeFogShape;
+        private static String nativeFogDimension;
+        private static boolean nativeFogFailed;
+
+        private static void filterFog(org.joml.Matrix4fc projection, org.joml.Matrix4fc view) {
+            if (!config.preserveVanillaFog || nativeFogFailed || !IRIS.packActive()) return;
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft.level == null || minecraft.gameRenderer.getMainCamera().getFluidInCamera() != net.minecraft.world.level.material.FogType.NONE) return;
+            String dimension = minecraft.level.dimension().identifier().toString();
+            if (select(config, dimension) == null || !dimension.equals(nativeFogDimension) || !dimension.equals(skyColorDimension)) return;
+            try {
+                var target = minecraft.getMainRenderTarget();
+                if (!(target.getColorTexture() instanceof com.mojang.blaze3d.opengl.GlTexture color)
+                        || !(target.getDepthTexture() instanceof com.mojang.blaze3d.opengl.GlTexture depth)) return;
+                NativeFogPass.draw(color.glId(), depth.glId(), target.width, target.height,
+                    projection, view, skyRed, skyGreen, skyBlue, nativeFogStart, nativeFogEnd, nativeRenderStart, nativeRenderEnd, nativeFogShape);
+            } catch (RuntimeException | LinkageError failure) {
+                nativeFogFailed = true;
+                LOGGER.warn("Native fog preservation unavailable on this renderer; leaving pack fog active", failure);
+            }
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+        public static void fogRange(net.neoforged.neoforge.client.event.ViewportEvent.RenderFog event) {
+
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft.level == null || event.getType() != net.minecraft.world.level.material.FogType.NONE) return;
+            String dimension = minecraft.level.dimension().identifier().toString();
+            if (select(config, dimension) == null) return;
+            nativeFogStart = event.getNearPlaneDistance(); nativeFogEnd = event.getFarPlaneDistance();
+            nativeRenderStart = event.getFogData().renderDistanceStart; nativeRenderEnd = event.getFogData().renderDistanceEnd;
+            nativeFogShape = 0; // Modern environmental fog is spherical; render-distance fog is cylindrical.
+            nativeFogDimension = dimension;
+        }
+
+        private static float skyRed, skyGreen, skyBlue;
+        private static String skyColorDimension;
+        private static boolean skyFilterFailed;
+
+        private static void filterSky() {
+            if (!config.postSkyFilter || skyFilterFailed) return;
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            if (minecraft.level == null || minecraft.gameRenderer.getMainCamera().getFluidInCamera() != net.minecraft.world.level.material.FogType.NONE) return;
+            String dimension = minecraft.level.dimension().identifier().toString();
+            Rule rule = select(config, dimension);
+            if (rule == null || !"NONE".equals(rule.sky) || !rule.hideClouds || !dimension.equals(skyColorDimension)) return;
+            try {
+                drawSkyBackground(skyRed, skyGreen, skyBlue);
+            } catch (RuntimeException | LinkageError exception) {
+                skyFilterFailed = true;
+                LOGGER.warn("Post-render sky filter unavailable on this renderer; native controls remain active", exception);
+            }
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+        public static void afterLevel(net.neoforged.neoforge.client.event.RenderLevelStageEvent.AfterLevel event) {
+            filterSky();
+            filterFog(event.getLevelRenderState().cameraRenderState.projectionMatrix, event.getModelViewMatrix());
+        }
+
+        private static final org.joml.Matrix4f SKY_IDENTITY = new org.joml.Matrix4f();
+        private static com.mojang.blaze3d.buffers.GpuBuffer skyVertices;
+        private static net.minecraft.client.renderer.ProjectionMatrixBuffer skyProjection;
+        private static final com.mojang.blaze3d.pipeline.RenderPipeline SKY_PIPELINE = com.mojang.blaze3d.pipeline.RenderPipeline
+            .builder(net.minecraft.client.renderer.RenderPipelines.DEBUG_FILLED_SNIPPET)
+            .withLocation(net.minecraft.resources.Identifier.parse("the_backwoods:pipeline/dimension_sky_background"))
+            .withVertexFormat(com.mojang.blaze3d.vertex.DefaultVertexFormat.POSITION_COLOR, com.mojang.blaze3d.vertex.VertexFormat.Mode.TRIANGLES)
+            .withColorTargetState(new com.mojang.blaze3d.pipeline.ColorTargetState(java.util.Optional.empty(), com.mojang.blaze3d.pipeline.ColorTargetState.WRITE_COLOR))
+            .withDepthStencilState(new com.mojang.blaze3d.pipeline.DepthStencilState(com.mojang.blaze3d.platform.CompareOp.EQUAL, false))
+            .withCull(false).build();
+
+        private static void releaseSkyBuffers() {
+            if (skyVertices != null) { skyVertices.close(); skyVertices = null; }
+            if (skyProjection != null) { skyProjection.close(); skyProjection = null; }
+        }
+
+        private static void drawSkyBackground(float red, float green, float blue) {
+            var target = net.minecraft.client.Minecraft.getInstance().getMainRenderTarget();
+            if (target.getColorTextureView() == null || target.getDepthTextureView() == null) return;
+            if (skyVertices == null) {
+                try (var stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                    var bytes = stack.malloc(48);
+                    bytes.putFloat(-1).putFloat(-1).putFloat(1).putInt(-1);
+                    bytes.putFloat(3).putFloat(-1).putFloat(1).putInt(-1);
+                    bytes.putFloat(-1).putFloat(3).putFloat(1).putInt(-1);
+                    bytes.flip();
+                    skyVertices = com.mojang.blaze3d.systems.RenderSystem.getDevice().createBuffer(
+                        () -> "Dimension sky background triangle", com.mojang.blaze3d.buffers.GpuBuffer.USAGE_VERTEX, bytes);
+                }
+            }
+            if (skyProjection == null) skyProjection = new net.minecraft.client.renderer.ProjectionMatrixBuffer("dimension sky background");
+            var transform = com.mojang.blaze3d.systems.RenderSystem.getDynamicUniforms().writeTransform(
+                SKY_IDENTITY, new org.joml.Vector4f(red, green, blue, 1), new org.joml.Vector3f(), SKY_IDENTITY);
+            var projection = skyProjection.getBuffer(SKY_IDENTITY);
+            try (var pass = com.mojang.blaze3d.systems.RenderSystem.getDevice().createCommandEncoder().createRenderPass(
+                    () -> "Dimension sky background", target.getColorTextureView(), java.util.OptionalInt.empty(),
+                    target.getDepthTextureView(), java.util.OptionalDouble.empty())) {
+                pass.setPipeline(SKY_PIPELINE);
+                pass.setUniform("Projection", projection);
+                pass.setUniform("DynamicTransforms", transform);
+                pass.setVertexBuffer(0, skyVertices);
+                pass.draw(0, 3);
+            }
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+        public static void fog(net.neoforged.neoforge.client.event.ViewportEvent.ComputeFogColor event) {
+            var minecraft = net.minecraft.client.Minecraft.getInstance();
+            Rule rule = select(config, minecraft.level == null ? null : minecraft.level.dimension().identifier().toString());
+            // Leave fluid fog and inherited colors alone; defaults never hardcode dimension colors.
+            if (rule == null || event.getCamera().getFluidInCamera() != net.minecraft.world.level.material.FogType.NONE) return;
+            if (rule.rgb >= 0) {
+                event.setRed(((rule.rgb >> 16) & 255) / 255.0f);
+                event.setGreen(((rule.rgb >> 8) & 255) / 255.0f);
+                event.setBlue((rule.rgb & 255) / 255.0f);
+            }
+            // Reuse the actual dimension/fog event colors; no per-dimension color table.
+            skyRed = event.getRed(); skyGreen = event.getGreen(); skyBlue = event.getBlue();
+            skyColorDimension = minecraft.level.dimension().identifier().toString();
+        }
+
+        @net.neoforged.bus.api.SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+        public static void extract(net.neoforged.neoforge.client.event.ExtractLevelRenderStateEvent event) {
+            Rule rule = select(config, event.getLevel().dimension().identifier().toString());
+            if (rule == null) return;
+            var state = event.getRenderState();
+            if ("NONE".equals(rule.sky)) {
+                state.skyRenderState.skybox = net.minecraft.world.level.dimension.DimensionType.Skybox.NONE;
+                state.skyRenderState.starBrightness = 0;
+                state.skyRenderState.sunriseAndSunsetColor = 0;
+                state.customSkyboxRenderer = null;
+            }
+            if (rule.hideClouds) {
+                state.cloudColor = 0;
+                state.customCloudsRenderer = null;
+            }
+        }
+    }
+
+    /** One cached OpenGL fog pass, after pack compositing; no changes to shader archives or Iris selection. */
+    private static final class NativeFogPass {
+        private static int program, vao, framebuffer, sampler;
+        private static int inverseProjectionLocation, inverseViewLocation, colorLocation, rangesLocation, shapeLocation, clipLocation, depthLocation;
+        private static final org.joml.Matrix4f inverseScratch = new org.joml.Matrix4f();
+        private static final String VERTEX = """
+#version 150
+out vec2 uv;
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    uv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+""";
+        private static final String FRAGMENT = """
+#version 150
+in vec2 uv;
+out vec4 result;
+uniform sampler2D SceneDepth;
+uniform mat4 InverseProjection;
+uniform mat4 InverseView;
+uniform vec3 NativeColor;
+uniform vec4 NativeRanges;
+uniform int NativeShape;
+uniform int ZeroToOne;
+float fogAmount(float distance, float start, float end) {
+    if (end <= start || end > 1e20) return 0.0;
+    return smoothstep(start, end, distance);
+}
+void main() {
+    float depth = texture(SceneDepth, uv).r;
+    float clipZ = ZeroToOne != 0 ? depth : depth * 2.0 - 1.0;
+    vec4 view = InverseProjection * vec4(uv * 2.0 - 1.0, clipZ, 1.0);
+    float amount = 1.0;
+    if (abs(view.w) > 1e-8) {
+        vec3 p = view.xyz / view.w;
+        // Range and shape are uniform across the draw: skip unused distance calculations.
+        bool renderFog = NativeRanges.w > NativeRanges.z && NativeRanges.w <= 1e20;
+        float cylindrical = 0.0;
+        if (NativeShape == 1 || renderFog) {
+            vec3 worldRelative = mat3(InverseView) * p;
+            cylindrical = max(length(worldRelative.xz), abs(worldRelative.y));
+        }
+        float terrainDistance = NativeShape == 1 ? cylindrical : length(p);
+        amount = fogAmount(terrainDistance, NativeRanges.x, NativeRanges.y);
+        if (renderFog) amount = max(amount, fogAmount(cylindrical, NativeRanges.z, NativeRanges.w));
+    }
+    if (amount <= 0.0) discard;
+    result = vec4(NativeColor, amount);
+}
+""";
+
+        private static int compile(int type, String source) {
+            int shader = org.lwjgl.opengl.GL20.glCreateShader(type);
+            org.lwjgl.opengl.GL20.glShaderSource(shader, source);
+            org.lwjgl.opengl.GL20.glCompileShader(shader);
+            if (org.lwjgl.opengl.GL20.glGetShaderi(shader, org.lwjgl.opengl.GL20.GL_COMPILE_STATUS) == 0) {
+                String log = org.lwjgl.opengl.GL20.glGetShaderInfoLog(shader);
+                org.lwjgl.opengl.GL20.glDeleteShader(shader);
+                throw new IllegalStateException("Native fog shader: " + log);
+            }
+            return shader;
+        }
+
+        private static void init() {
+            if (program != 0) return;
+            int vertex = compile(org.lwjgl.opengl.GL20.GL_VERTEX_SHADER, VERTEX), fragment = 0;
+            try {
+                fragment = compile(org.lwjgl.opengl.GL20.GL_FRAGMENT_SHADER, FRAGMENT);
+                program = org.lwjgl.opengl.GL20.glCreateProgram();
+                org.lwjgl.opengl.GL20.glAttachShader(program, vertex);
+                org.lwjgl.opengl.GL20.glAttachShader(program, fragment);
+                org.lwjgl.opengl.GL20.glLinkProgram(program);
+                if (org.lwjgl.opengl.GL20.glGetProgrami(program, org.lwjgl.opengl.GL20.GL_LINK_STATUS) == 0)
+                    throw new IllegalStateException("Native fog link: " + org.lwjgl.opengl.GL20.glGetProgramInfoLog(program));
+                depthLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "SceneDepth");
+                inverseProjectionLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "InverseProjection");
+                inverseViewLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "InverseView");
+                colorLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "NativeColor");
+                rangesLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "NativeRanges");
+                shapeLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "NativeShape");
+                clipLocation = org.lwjgl.opengl.GL20.glGetUniformLocation(program, "ZeroToOne");
+                vao = org.lwjgl.opengl.GL30.glGenVertexArrays();
+                framebuffer = org.lwjgl.opengl.GL30.glGenFramebuffers();
+                sampler = org.lwjgl.opengl.GL33.glGenSamplers();
+                org.lwjgl.opengl.GL33.glSamplerParameteri(sampler, org.lwjgl.opengl.GL11.GL_TEXTURE_MIN_FILTER, org.lwjgl.opengl.GL11.GL_NEAREST);
+                org.lwjgl.opengl.GL33.glSamplerParameteri(sampler, org.lwjgl.opengl.GL11.GL_TEXTURE_MAG_FILTER, org.lwjgl.opengl.GL11.GL_NEAREST);
+                org.lwjgl.opengl.GL33.glSamplerParameteri(sampler, org.lwjgl.opengl.GL11.GL_TEXTURE_WRAP_S, org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE);
+                org.lwjgl.opengl.GL33.glSamplerParameteri(sampler, org.lwjgl.opengl.GL11.GL_TEXTURE_WRAP_T, org.lwjgl.opengl.GL12.GL_CLAMP_TO_EDGE);
+                org.lwjgl.opengl.GL33.glSamplerParameteri(sampler, org.lwjgl.opengl.GL14.GL_TEXTURE_COMPARE_MODE, org.lwjgl.opengl.GL11.GL_NONE);
+            } catch (RuntimeException | LinkageError failure) {
+                close(); throw failure;
+            } finally {
+                org.lwjgl.opengl.GL20.glDeleteShader(vertex);
+                if (fragment != 0) org.lwjgl.opengl.GL20.glDeleteShader(fragment);
+            }
+        }
+
+        private static void close() {
+            if (program != 0) org.lwjgl.opengl.GL20.glDeleteProgram(program);
+            if (vao != 0) org.lwjgl.opengl.GL30.glDeleteVertexArrays(vao);
+            if (framebuffer != 0) org.lwjgl.opengl.GL30.glDeleteFramebuffers(framebuffer);
+            if (sampler != 0) org.lwjgl.opengl.GL33.glDeleteSamplers(sampler);
+            program = vao = framebuffer = sampler = 0;
+        }
+
+        private static void draw(int colorTexture, int depthTexture, int width, int height, org.joml.Matrix4fc projection,
+                org.joml.Matrix4fc view, float red, float green, float blue, float start, float end, float renderStart, float renderEnd, int shape) {
+            if (width <= 0 || height <= 0 || colorTexture <= 0 || depthTexture <= 0) return;
+            // Raw GL state is restored exactly so both legacy RenderSystem and modern device caches stay valid.
+            int previousProgram = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL20.GL_CURRENT_PROGRAM);
+            int previousVao = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL30.GL_VERTEX_ARRAY_BINDING);
+            int drawFbo = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL30.GL_DRAW_FRAMEBUFFER_BINDING);
+            int readFbo = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL30.GL_READ_FRAMEBUFFER_BINDING);
+            int activeTexture = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL13.GL_ACTIVE_TEXTURE);
+            boolean depth = org.lwjgl.opengl.GL11.glIsEnabled(org.lwjgl.opengl.GL11.GL_DEPTH_TEST);
+            boolean blend = org.lwjgl.opengl.GL11.glIsEnabled(org.lwjgl.opengl.GL11.GL_BLEND);
+            boolean cull = org.lwjgl.opengl.GL11.glIsEnabled(org.lwjgl.opengl.GL11.GL_CULL_FACE);
+            boolean scissor = org.lwjgl.opengl.GL11.glIsEnabled(org.lwjgl.opengl.GL11.GL_SCISSOR_TEST);
+            boolean stencil = org.lwjgl.opengl.GL11.glIsEnabled(org.lwjgl.opengl.GL11.GL_STENCIL_TEST);
+            int srcRgb = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL14.GL_BLEND_SRC_RGB);
+            int dstRgb = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL14.GL_BLEND_DST_RGB);
+            int srcAlpha = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL14.GL_BLEND_SRC_ALPHA);
+            int dstAlpha = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL14.GL_BLEND_DST_ALPHA);
+            int rgbEquation = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL20.GL_BLEND_EQUATION_RGB);
+            int alphaEquation = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL20.GL_BLEND_EQUATION_ALPHA);
+            org.lwjgl.opengl.GL13.glActiveTexture(org.lwjgl.opengl.GL13.GL_TEXTURE0);
+            int oldTexture = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL11.GL_TEXTURE_BINDING_2D);
+            int oldSampler = org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL33.GL_SAMPLER_BINDING);
+            try (var stack = org.lwjgl.system.MemoryStack.stackPush()) {
+                var viewport = stack.mallocInt(4); var mask = stack.malloc(4);
+                org.lwjgl.opengl.GL11.glGetIntegerv(org.lwjgl.opengl.GL11.GL_VIEWPORT, viewport);
+                org.lwjgl.opengl.GL11.glGetBooleanv(org.lwjgl.opengl.GL11.GL_COLOR_WRITEMASK, mask);
+                try {
+                    init();
+                    org.lwjgl.opengl.GL30.glBindFramebuffer(org.lwjgl.opengl.GL30.GL_FRAMEBUFFER, framebuffer);
+                    // Depth is sampled, not attached: no framebuffer feedback and no scene-depth writes.
+                    org.lwjgl.opengl.GL30.glFramebufferTexture2D(org.lwjgl.opengl.GL30.GL_FRAMEBUFFER, org.lwjgl.opengl.GL30.GL_COLOR_ATTACHMENT0,
+                        org.lwjgl.opengl.GL11.GL_TEXTURE_2D, colorTexture, 0);
+                    if (org.lwjgl.opengl.GL30.glCheckFramebufferStatus(org.lwjgl.opengl.GL30.GL_FRAMEBUFFER) != org.lwjgl.opengl.GL30.GL_FRAMEBUFFER_COMPLETE)
+                        throw new IllegalStateException("Native fog framebuffer incomplete");
+                    org.lwjgl.opengl.GL11.glViewport(0, 0, width, height);
+                    org.lwjgl.opengl.GL11.glDisable(org.lwjgl.opengl.GL11.GL_DEPTH_TEST);
+                    org.lwjgl.opengl.GL11.glDisable(org.lwjgl.opengl.GL11.GL_CULL_FACE);
+                    org.lwjgl.opengl.GL11.glDisable(org.lwjgl.opengl.GL11.GL_SCISSOR_TEST);
+                    org.lwjgl.opengl.GL11.glDisable(org.lwjgl.opengl.GL11.GL_STENCIL_TEST);
+                    org.lwjgl.opengl.GL11.glEnable(org.lwjgl.opengl.GL11.GL_BLEND);
+                    org.lwjgl.opengl.GL20.glBlendEquationSeparate(org.lwjgl.opengl.GL14.GL_FUNC_ADD, org.lwjgl.opengl.GL14.GL_FUNC_ADD);
+                    org.lwjgl.opengl.GL14.glBlendFuncSeparate(org.lwjgl.opengl.GL11.GL_SRC_ALPHA, org.lwjgl.opengl.GL11.GL_ONE_MINUS_SRC_ALPHA,
+                        org.lwjgl.opengl.GL11.GL_ZERO, org.lwjgl.opengl.GL11.GL_ONE);
+                    org.lwjgl.opengl.GL11.glColorMask(true, true, true, false);
+                    org.lwjgl.opengl.GL20.glUseProgram(program);
+                    org.lwjgl.opengl.GL30.glBindVertexArray(vao);
+                    org.lwjgl.opengl.GL11.glBindTexture(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, depthTexture);
+                    org.lwjgl.opengl.GL33.glBindSampler(0, sampler);
+                    org.lwjgl.opengl.GL20.glUniform1i(depthLocation, 0);
+                    org.lwjgl.opengl.GL20.glUniformMatrix4fv(inverseProjectionLocation, false, inverseScratch.set(projection).invert().get(stack.mallocFloat(16)));
+                    org.lwjgl.opengl.GL20.glUniformMatrix4fv(inverseViewLocation, false, inverseScratch.set(view).invert().get(stack.mallocFloat(16)));
+                    org.lwjgl.opengl.GL20.glUniform3f(colorLocation, red, green, blue);
+                    org.lwjgl.opengl.GL20.glUniform4f(rangesLocation, start, end, renderStart, renderEnd);
+                    org.lwjgl.opengl.GL20.glUniform1i(shapeLocation, shape);
+                    var caps = org.lwjgl.opengl.GL.getCapabilities();
+                    int zeroToOne = (caps.OpenGL45 || caps.GL_ARB_clip_control)
+                        && org.lwjgl.opengl.GL11.glGetInteger(org.lwjgl.opengl.GL45.GL_CLIP_DEPTH_MODE) == org.lwjgl.opengl.GL45.GL_ZERO_TO_ONE ? 1 : 0;
+                    org.lwjgl.opengl.GL20.glUniform1i(clipLocation, zeroToOne);
+                    org.lwjgl.opengl.GL11.glDrawArrays(org.lwjgl.opengl.GL11.GL_TRIANGLES, 0, 3);
+                } finally {
+                    org.lwjgl.opengl.GL20.glUseProgram(previousProgram);
+                    org.lwjgl.opengl.GL30.glBindVertexArray(previousVao);
+                    org.lwjgl.opengl.GL11.glBindTexture(org.lwjgl.opengl.GL11.GL_TEXTURE_2D, oldTexture);
+                    org.lwjgl.opengl.GL33.glBindSampler(0, oldSampler);
+                    org.lwjgl.opengl.GL13.glActiveTexture(activeTexture);
+                    org.lwjgl.opengl.GL14.glBlendFuncSeparate(srcRgb, dstRgb, srcAlpha, dstAlpha);
+                    org.lwjgl.opengl.GL20.glBlendEquationSeparate(rgbEquation, alphaEquation);
+                    set(org.lwjgl.opengl.GL11.GL_DEPTH_TEST, depth); set(org.lwjgl.opengl.GL11.GL_BLEND, blend);
+                    set(org.lwjgl.opengl.GL11.GL_CULL_FACE, cull); set(org.lwjgl.opengl.GL11.GL_SCISSOR_TEST, scissor); set(org.lwjgl.opengl.GL11.GL_STENCIL_TEST, stencil);
+                    org.lwjgl.opengl.GL11.glColorMask(mask.get(0) != 0, mask.get(1) != 0, mask.get(2) != 0, mask.get(3) != 0);
+                    org.lwjgl.opengl.GL30.glBindFramebuffer(org.lwjgl.opengl.GL30.GL_DRAW_FRAMEBUFFER, drawFbo);
+                    org.lwjgl.opengl.GL30.glBindFramebuffer(org.lwjgl.opengl.GL30.GL_READ_FRAMEBUFFER, readFbo);
+                    org.lwjgl.opengl.GL11.glViewport(viewport.get(0), viewport.get(1), viewport.get(2), viewport.get(3));
+                }
+            }
+        }
+
+        private static void set(int capability, boolean enabled) {
+            if (enabled) org.lwjgl.opengl.GL11.glEnable(capability); else org.lwjgl.opengl.GL11.glDisable(capability);
+        }
+    }
+
+    /** Pack-aware lighting adaptation; unknown packs are never guessed or darkened with a screen overlay. */
+    private static final class SunlightAdapter {
+        private static final String META = "shaders/backwoods_sunlight.properties";
+        private static final String MACRO = "BW_DIMENSION_SUNLESS";
+        private long nextCheck, nextCleanup;
+        private final java.util.Set<String> cleanupFailures = new java.util.HashSet<>();
+        private String observedName, observedDimension;
+        private Configuration observedConfig;
+        private Object observedConnection;
+        private boolean observedEnabled, observedAuto, observedShadersEnabled;
+        private java.nio.file.Path observedSource;
+        private long observedModified, observedSize;
+        private boolean irisAbsent;
+        private final java.util.Set<String> failedTransitions = new java.util.HashSet<>();
+
+        private void update(String dimension) {
+            if (dimension == null) { observedConnection = null; observedDimension = null; nextCheck = 0; return; }
+            if (irisAbsent) return;
+            var connection = net.minecraft.client.Minecraft.getInstance().getConnection();
+            long now = System.nanoTime();
+            // Dimension/connection changes must never wait for the filesystem polling interval.
+            if (java.util.Objects.equals(dimension, observedDimension) && connection == observedConnection
+                    && nextCheck != 0 && now - nextCheck < 0) return;
+            nextCheck = now + 2_000_000_000L;
+            try {
+                Class<?> iris;
+                try { iris = Class.forName("net.irisshaders.iris.Iris"); }
+                catch (ClassNotFoundException absent) { irisAbsent = true; return; }
+                Object irisConfig = iris.getMethod("getIrisConfig").invoke(null);
+                var nameValue = (java.util.Optional<?>) irisConfig.getClass().getMethod("getShaderPackName").invoke(irisConfig);
+                String selected = (String) nameValue.orElse(null);
+                if (selected == null) return;
+                boolean shadersEnabled = (Boolean) irisConfig.getClass().getMethod("areShadersEnabled").invoke(irisConfig);
+                if (selected.equals(observedName) && dimension.equals(observedDimension) && observedConfig == Client.config
+                        && observedEnabled == ENABLED && observedAuto == ENABLE_AUTO_SUNLIGHT_ADAPTER && observedShadersEnabled == shadersEnabled
+                        && connection == observedConnection && observedSource != null
+                        && (java.nio.file.Files.isRegularFile(observedSource)
+                            ? java.nio.file.Files.getLastModifiedTime(observedSource).toMillis() == observedModified
+                                && java.nio.file.Files.size(observedSource) == observedSize
+                            : observedModified == -1 && observedSize == -1)) {
+                    cleanup(observedSource.getParent(), observedSource.getFileName().toString(), selected);
+                    return;
+                }
+                var directory = ((java.nio.file.Path) iris.getMethod("getShaderpacksDirectory").invoke(null)).toAbsolutePath().normalize();
+                var selectedFile = safeFile(directory, selected);
+                var meta = readMetadata(selectedFile);
+                String original = meta.getProperty("source", selected);
+                var source = safeFile(directory, original);
+                observedName = selected; observedDimension = dimension; observedConfig = Client.config;
+                observedEnabled = ENABLED; observedAuto = ENABLE_AUTO_SUNLIGHT_ADAPTER; observedShadersEnabled = shadersEnabled;
+                observedSource = source; observedConnection = connection;
+                boolean sourceAvailable = java.nio.file.Files.isRegularFile(source);
+                observedModified = sourceAvailable ? java.nio.file.Files.getLastModifiedTime(source).toMillis() : -1;
+                observedSize = sourceAvailable ? java.nio.file.Files.size(source) : -1;
+                if (!ENABLE_AUTO_SUNLIGHT_ADAPTER) {
+                    if (!original.equals(selected)) choose(iris, irisConfig, original, selected);
+                    if (original.equals(selectedName(irisConfig))) { if (!original.equals(selected)) nextCleanup = 0; cleanup(directory, original, original); }
+                    return;
+                }
+                var dimensions = new java.util.TreeSet<String>();
+                for (String id : meta.getProperty("dimensions", "").split("\\s+")) {
+                    Rule rule = select(Client.config, id);
+                    if (!id.isEmpty() && rule != null && rule.disableSunlight) dimensions.add(id);
+                }
+                // Login supplies every server dimension: prepare once before a portal trip.
+                if (connection != null) for (var key : connection.levels()) {
+                    String id = key.identifier().toString();
+                    Rule rule = select(Client.config, id);
+                    if (rule != null && rule.disableSunlight) dimensions.add(id);
+                }
+                Rule current = select(Client.config, dimension);
+                if (current != null && current.disableSunlight) dimensions.add(dimension);
+                if (dimensions.isEmpty()) {
+                    if (!original.equals(selected)) choose(iris, irisConfig, original, selected);
+                    if (original.equals(selectedName(irisConfig))) { if (!original.equals(selected)) nextCleanup = 0; cleanup(directory, original, original); }
+                    return;
+                }
+                // Each supported shader family is identified and anchor-checked before selection.
+                if (!shadersEnabled) return;
+                // Generated packs contain every resource; the source is needed only to rebuild.
+                if (!sourceAvailable && !(managed(meta, selected, original)
+                        && meta.getProperty("signature","").startsWith(RECIPE+"\n")
+                        && String.join(" ", dimensions).equals(meta.getProperty("dimensions"))))
+                    throw new java.io.IOException("Original shader pack required to upgrade adapter code or dimension mappings: " + original);
+                String stamp = sourceAvailable
+                    ? RECIPE + "\n" + original + "\n" + observedModified + "\n" + observedSize + "\n" + String.join(" ", dimensions)
+                    : meta.getProperty("signature");
+                String primary = friendlyName(original, false), alternate = friendlyName(original, true);
+                String generated = null;
+                for (String candidate : java.util.List.of(primary, alternate)) {
+                    var path = safeFile(directory, candidate);
+                    if (!java.nio.file.Files.isRegularFile(path, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+                    var cached = readMetadata(path);
+                    if (managed(cached, candidate, original) && stamp.equals(cached.getProperty("signature"))) {
+                        generated = candidate; break;
+                    }
+                }
+                if (generated == null) {
+                    // Windows may keep the selected ZIP open: build into the inactive readable slot.
+                    generated = selected.equals(primary) ? alternate : primary;
+                    var output = safeFile(directory, generated);
+                    if (java.nio.file.Files.exists(output, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                        if(!java.nio.file.Files.isRegularFile(output,java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                            throw new java.io.IOException("Refusing to replace an unowned shader pack: "+generated);
+                        var ownership=readMetadata(output);
+                        String previousSource=ownership.getProperty("source");
+                        if(!managed(ownership,generated,previousSource))
+                            throw new java.io.IOException("Refusing to replace an unowned shader pack: "+generated);
+                        if(!original.equals(previousSource)) {
+                            if(!java.nio.file.Files.isRegularFile(safeFile(directory,previousSource),java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                                throw new java.io.IOException("Refusing to replace the only remaining copy of "+previousSource);
+                            saveOptions(safeFile(directory,generated+".txt"),previousSource);
+                        }
+                    }
+                    if (managed(meta, selected, original) && stamp.equals(meta.getProperty("signature")))
+                        java.nio.file.Files.copy(selectedFile, output, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    else build(source, output, original, dimensions, stamp);
+                }
+                if (!generated.equals(selected)) {
+                    // Preserve currently selected user settings before cleaning the previous generated copy.
+                    var options = safeFile(directory, selected + ".txt");
+                    var saved=savedOptions(original);
+                    if (!managed(meta,selected,original)&&java.nio.file.Files.isRegularFile(saved,java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                            &&(!java.nio.file.Files.isRegularFile(options,java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                                ||java.nio.file.Files.getLastModifiedTime(saved).compareTo(java.nio.file.Files.getLastModifiedTime(options))>0)) options=saved;
+                    var copiedOptions = safeFile(directory, generated + ".txt");
+                    if (java.nio.file.Files.isSymbolicLink(copiedOptions)) throw new java.io.IOException("Shader options target is a symbolic link");
+                    if (java.nio.file.Files.isRegularFile(options, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                        java.nio.file.Files.copy(options, copiedOptions, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    else if (java.nio.file.Files.isRegularFile(copiedOptions, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                        java.nio.file.Files.deleteIfExists(copiedOptions);
+                    choose(iris, irisConfig, generated, selected);
+                    if(generated.equals(selectedName(irisConfig))) saveOptions(copiedOptions,original);
+                }
+                String actual = selectedName(irisConfig);
+                if (generated.equals(actual)) { if (!generated.equals(selected)) nextCleanup = 0; cleanup(directory, original, actual); }
+            } catch (ReflectiveOperationException | java.io.IOException | RuntimeException exception) {
+                LOGGER.warn("Sunlight adapter unavailable for this pack/build; existing shader lighting is retained", exception);
+            }
+        }
+
+        private void choose(Class<?> iris, Object config, String desired, String previous) throws ReflectiveOperationException {
+            String transition = previous + "\n" + desired;
+            if (failedTransitions.contains(transition)) return;
+            var setter = config.getClass().getMethod("setShaderPackName", String.class);
+            var save = config.getClass().getMethod("save");
+            var getter = config.getClass().getMethod("getShaderPackName");
+            var enabledGetter = config.getClass().getMethod("areShadersEnabled");
+            var enabledSetter = config.getClass().getMethod("setShadersEnabled", boolean.class);
+            boolean wasEnabled = (Boolean) enabledGetter.invoke(config);
+            boolean reloadStarted = false;
+            try {
+                setter.invoke(config, desired);
+                // Iris.reload() calls IrisConfig.initialize(): unsaved selections are discarded.
+                save.invoke(config);
+                reloadStarted = true;
+                iris.getMethod("reload").invoke(null);
+                String loaded = (String) ((java.util.Optional<?>) getter.invoke(config)).orElse(null);
+                if (!desired.equals(loaded) || (Boolean) enabledGetter.invoke(config) != wasEnabled)
+                    throw new IllegalStateException("Iris did not retain the requested pack and shader-enabled preference");
+                observedName = loaded;
+                LOGGER.info("Verified dimension-scoped sunlight adapter {} (shader-enabled preference preserved)", loaded);
+            } catch (ReflectiveOperationException | RuntimeException failure) {
+                failedTransitions.add(transition); // No automatic retry loop for a failed pack transition.
+                try {
+                    setter.invoke(config, previous);
+                    enabledSetter.invoke(config, wasEnabled);
+                    save.invoke(config);
+                    if (reloadStarted) iris.getMethod("reload").invoke(null);
+                    observedName = previous;
+                }
+                catch (ReflectiveOperationException | RuntimeException rollbackFailure) { failure.addSuppressed(rollbackFailure); }
+                throw failure;
+            }
+        }
+
+        private static String friendlyName(String original, boolean updated) {
+            String stem=original.replaceFirst("(?i)\\.zip$", ""),lower=stem.toLowerCase(java.util.Locale.ROOT);
+            String label=lower.contains("rethinking")?"RV":lower.contains("complementary")?"Complementary":lower.contains("bliss")?"Bliss"
+                :lower.contains("makeup")?"MakeUp":lower.contains("photon")?"Photon":lower.contains("seus")?"SEUS"
+                :lower.contains("solas")?"Solas":lower.contains("ushader")?"UShader":lower.contains("bsl")?"BSL":stem;
+            var version=java.util.regex.Pattern.compile("(?i)(?:^|[_ -])([vr]?[0-9]+(?:[.][0-9]+)*(?:[-_]beta[0-9]+)?[a-z]?)").matcher(stem);
+            if(!label.equals(stem)&&version.find()) label+=" "+version.group(1).replace('_','-');
+            label=label.replaceAll("[^a-zA-Z0-9._ -]", "");if(label.length()>72) label=label.substring(0,72);
+            String base="Backwoods - "+label;
+            if(original.equals(base+".zip")||original.equals(base+" (2).zip")) base+=" Adapted";
+            return base+(updated?" (2)":"")+".zip";
+        }
+
+        private static String previousFriendlyName(String original, boolean updated) {
+            String label = original.replaceFirst("(?i)\\.zip$", "")
+                .replaceFirst("(?i)^rethinking[-_ ]voxels[-_ ]*", "Rethinking Voxels ");
+            return "Backwoods - " + label + " - Dimension Visuals" + (updated ? " (Updated)" : "") + ".zip";
+        }
+
+        private static boolean managed(java.util.Properties metadata, String name, String original) {
+            if(original==null||original.equals(name)||!original.equals(metadata.getProperty("source"))) return false;
+            if(!java.nio.file.Path.of(original).getFileName().toString().equals(original)) return false;
+            String signature=metadata.getProperty("signature", "");
+            if(!(signature.startsWith("rv-sunless-v")||signature.startsWith(RECIPE+"\n"))||!signature.contains("\n"+original+"\n")) return false;
+            String owner=metadata.getProperty("generator", "");
+            if(owner.equals("the_backwoods:dimension_visuals"))
+                return name.equals(friendlyName(original,false))||name.equals(friendlyName(original,true))
+                    ||name.equals(previousFriendlyName(original,false))||name.equals(previousFriendlyName(original,true));
+            return owner.isEmpty()&&name.matches("backwoods-sunless-[0-9a-f]{16}\\.zip")
+                &&(signature.startsWith("rv-sunless-v1\n")||signature.startsWith("rv-sunless-v2-native-ambient\n"));
+        }
+
+        private static java.nio.file.Path savedOptions(String original) throws java.io.IOException {
+            try {
+                String hash=java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(original.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+                return net.neoforged.fml.loading.FMLPaths.CONFIGDIR.get().resolve("backwoods-shaders").resolve(hash+".properties");
+            } catch(java.security.NoSuchAlgorithmException missing) {throw new java.io.IOException(missing);}
+        }
+        private static void saveOptions(java.nio.file.Path options,String original) throws java.io.IOException {
+            if(!java.nio.file.Files.isRegularFile(options,java.nio.file.LinkOption.NOFOLLOW_LINKS)) return;
+            var saved=savedOptions(original);
+            if(java.nio.file.Files.isSymbolicLink(saved)||java.nio.file.Files.isSymbolicLink(saved.getParent()))
+                throw new java.io.IOException("Refusing linked shader settings cache");
+            java.nio.file.Files.createDirectories(saved.getParent());
+            java.nio.file.Files.copy(options,saved,java.nio.file.StandardCopyOption.REPLACE_EXISTING,java.nio.file.StandardCopyOption.COPY_ATTRIBUTES);
+        }
+
+        private void cleanup(java.nio.file.Path directory, String original, String selected) {
+            long now = System.nanoTime();
+            if (nextCleanup != 0 && now - nextCleanup < 0) return;
+            nextCleanup = now + 10_000_000_000L;
+            try (var files = java.nio.file.Files.newDirectoryStream(directory)) {
+                for (var file : files) {
+                    String name = file.getFileName().toString();
+                    if (name.equals(original) || name.equals(selected) || !name.endsWith(".zip")
+                            || !(name.startsWith("backwoods-sunless-") || name.startsWith("Backwoods - "))
+                            || !java.nio.file.Files.isRegularFile(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+                    try {
+                        var ownership=readMetadata(file);
+                        String ownerSource=ownership.getProperty("source");
+                        if (!managed(ownership, name, ownerSource)) continue;
+                        // If its original was deleted, this archive is the user's only remaining copy.
+                        if(!java.nio.file.Files.isRegularFile(safeFile(directory,ownerSource),java.nio.file.LinkOption.NOFOLLOW_LINKS)) continue;
+                        saveOptions(safeFile(directory,name+".txt"),ownerSource);
+                        // Single files only, verified metadata and normalized direct children of the pack folder.
+                        var obsolete = safeFile(directory, name);
+                        java.nio.file.Files.deleteIfExists(obsolete);
+                        var options = safeFile(directory, name + ".txt");
+                        if (java.nio.file.Files.isRegularFile(options, java.nio.file.LinkOption.NOFOLLOW_LINKS))
+                            java.nio.file.Files.deleteIfExists(options);
+                        cleanupFailures.remove(name);
+                        LOGGER.info("Removed obsolete generated dimension shader pack {}", name);
+                    } catch (java.io.IOException | RuntimeException inUse) {
+                        if (cleanupFailures.add(name)) LOGGER.warn("Generated shader cache {} is still in use or unavailable; cleanup will retry", name, inUse);
+                    }
+                }
+            } catch (java.io.IOException failure) {
+                if (cleanupFailures.add("<directory>")) LOGGER.warn("Generated shader cache cleanup unavailable", failure);
+            }
+        }
+
+        private static String selectedName(Object config) throws ReflectiveOperationException {
+            return (String) ((java.util.Optional<?>) config.getClass().getMethod("getShaderPackName").invoke(config)).orElse(null);
+        }
+
+        private static java.nio.file.Path safeFile(java.nio.file.Path directory, String name) throws java.io.IOException {
+            if (name == null || name.isBlank() || !java.nio.file.Path.of(name).getFileName().toString().equals(name))
+                throw new java.io.IOException("Expected a shader-pack filename");
+            var file = directory.resolve(name).normalize();
+            if (!file.getParent().equals(directory)) throw new java.io.IOException("Shader-pack path escapes directory");
+            return file;
+        }
+
+        private static java.util.Properties readMetadata(java.nio.file.Path pack) throws java.io.IOException {
+            var result = new java.util.Properties();
+            if (!java.nio.file.Files.isRegularFile(pack)) return result;
+            try (var zip = new java.util.zip.ZipFile(pack.toFile())) {
+                var entry = zip.getEntry(META);
+                if (entry != null) try (var input = zip.getInputStream(entry)) { result.load(input); }
+            }
+            return result;
+        }
+
+        private static String read(java.util.zip.ZipFile zip, String name) throws java.io.IOException {
+            var entry = zip.getEntry(name);
+            if (entry == null) throw new java.io.IOException("Unsupported shader layout: missing " + name);
+            try (var input = zip.getInputStream(entry)) { return new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8); }
+        }
+
+        private static String replaceOne(String text, String anchor, String replacement) throws java.io.IOException {
+            int first = text.indexOf(anchor);
+            if (first < 0 || text.indexOf(anchor, first + anchor.length()) >= 0)
+                throw new java.io.IOException("Unsupported shader layout: lighting anchor changed");
+            return text.substring(0, first) + replacement + text.substring(first + anchor.length());
+        }
+
+        private static void put(java.util.zip.ZipOutputStream zip, String name, byte[] bytes) throws java.io.IOException {
+            zip.putNextEntry(new java.util.zip.ZipEntry(name)); zip.write(bytes); zip.closeEntry();
+        }
+
+
+        private static final String RECIPE = "bw-sunless-v4-nine-packs";
+        private static final String NATIVE_UNIFORMS = """
+#ifndef BW_NATIVE_DIMENSION_LIGHT
+#define BW_NATIVE_DIMENSION_LIGHT
+uniform float ambientLight;
+uniform bool hasSkylight;
+vec3 bwAmbient(vec3 value) {
+    float factor = clamp(ambientLight, 0.0, 1.0);
+    return hasSkylight ? value + (vec3(1.0) - min(value, vec3(1.0))) * factor : vec3(factor);
+}
+#endif
+""";
+        private record Pack(String key, String settings) {}
+
+        private static Pack identify(java.util.Map<String,String> files) throws java.io.IOException {
+            if (files.containsKey("include/lighting/colors/light_color.glsl")) return new Pack("photon","settings.glsl");
+            if (files.containsKey("lib/atmos/colorsDefault.glsl")) return new Pack("ushader","settings.glsl");
+            if (files.containsKey("lib/diffuse_lighting.glsl")) return new Pack("bliss","lib/settings.glsl");
+            if (files.containsKey("src/light_vertex.glsl")) return new Pack("makeup","lib/config.glsl");
+            if (files.containsKey("lib/colors/lightAndAmbientColors.glsl"))
+                return new Pack(files.containsKey("lib/vx/irradianceCache.glsl")?"rv":"complementary","lib/common.glsl");
+            if (files.containsKey("lib/lighting/forwardLighting.glsl")) return new Pack("bsl","lib/settings.glsl");
+            if (files.containsKey("lib/lighting/gbuffersLighting.glsl")) return new Pack("solas","lib/common.glsl");
+            if (files.getOrDefault("composite2.fsh", "").contains("CalculateSunlightVisibility")) return new Pack("seus",null);
+            throw new java.io.IOException("No validated Backwoods lighting adapter for this shader layout");
+        }
+        private static String required(java.util.Map<String,String> files,String path) throws java.io.IOException {
+            String value=files.get(path);
+            if(value==null) throw new java.io.IOException("Unsupported shader layout: missing "+path);
+            return value;
+        }
+        private static String scoped(String original,String replacement) {
+            return "\n#ifdef "+MACRO+"\n"+replacement+"\n#else\n"+original+"\n#endif\n";
+        }
+        private static void change(java.util.Map<String,String> files,String path,String anchor,String replacement) throws java.io.IOException {
+            files.put(path,replaceOne(required(files,path),anchor,scoped(anchor,replacement)));
+        }
+        private static void before(java.util.Map<String,String> files,String path,String anchor,String addition) throws java.io.IOException {
+            files.put(path,replaceOne(required(files,path),anchor,"\n#ifdef "+MACRO+"\n"+addition+"\n#endif\n"+anchor));
+        }
+        private static int defines(java.util.Map<String,String> files,String name,String value) {
+            var pattern=java.util.regex.Pattern.compile("(?m)^[ \\t]*(?://[ \\t]*)?#define[ \\t]+"+java.util.regex.Pattern.quote(name)+"(?:[ \\t]+[^\\r\\n]*)?[ \\t]*$");
+            int count=0;
+            for(String path:new java.util.ArrayList<>(files.keySet())) {
+                var matcher=pattern.matcher(files.get(path));var result=new StringBuffer();boolean changed=false;
+                while(matcher.find()) {
+                    String old=matcher.group();
+                    // Parenthesized constants are not Iris user options, so saved profiles cannot re-enable them.
+                    String replacement=value==null?"#ifndef "+MACRO+"\n"+old+"\n#endif"
+                        :old+"\n#ifdef "+MACRO+"\n#undef "+name+"\n#define "+name+" ("+value+")\n#endif";
+                    matcher.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(replacement));count++;changed=true;
+                }
+                if(changed) {matcher.appendTail(result);files.put(path,result.toString());}
+            }
+            return count;
+        }
+        private static int functions(java.util.Map<String,String> files,String path,String name,String expression) throws java.io.IOException {
+            String source=required(files,path);
+            var pattern=java.util.regex.Pattern.compile("(?m)^[ \\t]*(?:void|float|vec[234])[ \\t]+"+java.util.regex.Pattern.quote(name)+"[ \\t]*\\([^)]*\\)\\s*\\{");
+            var matcher=pattern.matcher(source);var result=new StringBuffer();int count=0;
+            while(matcher.find()) {
+                matcher.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(matcher.group()+"\n#ifdef "+MACRO+"\nreturn"+(expression.isEmpty()?"":" "+expression)+";\n#endif\n"));count++;
+            }
+            if(count==0) throw new java.io.IOException("Unsupported shader function: "+path+":"+name);
+            matcher.appendTail(result);files.put(path,result.toString());return count;
+        }
+        private static int assignments(java.util.Map<String,String> files,String name,String expression,boolean ambient) {
+            var pattern=java.util.regex.Pattern.compile("(?m)^[ \\t]*(?:vec3[ \\t]+)?"+java.util.regex.Pattern.quote(name)+"[ \\t]*=[^;]+;");
+            int count=0;
+            for(String path:new java.util.ArrayList<>(files.keySet())) {
+                var matcher=pattern.matcher(files.get(path));var result=new StringBuffer();boolean changed=false;
+                while(matcher.find()) {
+                    String old=matcher.group();int equals=old.indexOf('=');
+                    if(ambient&&old.substring(equals+1).strip().equals("vec3(0.45);")) {
+                        // MakeUp routes fake emissive materials through this varying too.
+                        matcher.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(old));continue;
+                    }
+                    String replacement=old.substring(0,equals+1)+(ambient?" bwAmbient("+old.substring(equals+1,old.length()-1).strip()+")":" "+expression)+";";
+                    matcher.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(scoped(old,replacement)));count++;changed=true;
+                }
+                if(changed) {matcher.appendTail(result);files.put(path,result.toString());}
+            }
+            return count;
+        }
+        private static void settingsInclude(java.util.Map<String,String> files,String path) throws java.io.IOException {
+            files.put(path,required(files,path)+"\n#ifdef "+MACRO+"\n#include \"/bw_dimension.glsl\"\n#endif\n");
+        }
+        private static void adapt(java.util.Map<String,String> files,Pack pack) throws java.io.IOException {
+            if(pack.settings!=null) settingsInclude(files,pack.settings);
+            switch(pack.key) {
+                case "rv", "complementary" -> {
+                    change(files,"lib/colors/lightAndAmbientColors.glsl",
+                        "vec3 lightColor   = mix(clearLightColor, rainLightColor, rainFactor);","vec3 lightColor = vec3(0.0);");
+                    change(files,"lib/colors/lightAndAmbientColors.glsl",
+                        "vec3 ambientColor = mix(clearAmbientColor, rainAmbientColor, rainFactor);",
+                        "vec3 ambientColor = hasSkylight ? mix(clearAmbientColor, rainAmbientColor, rainFactor) : vec3(0.0);");
+                    String lighting="lib/lighting/mainLighting.glsl";
+                    var highlight=java.util.regex.Pattern.compile("(?m)^vec3 highlightColor = [^;]+;").matcher(required(files,lighting));
+                    if(!highlight.find()) throw new java.io.IOException("Unsupported Complementary highlight layout");
+                    change(files,lighting,highlight.group(),"vec3 highlightColor = vec3(0.0);");
+                    String scene=pack.key.equals("rv")
+                        ?"vec3 sceneLighting = lightColorM * shadowMult + ambientColorM * ambientMult;"
+                        :"vec3 sceneLighting = lightColorM * shadowLightMult + ambientColorM * ambientMult;";
+                    before(files,lighting,scene,"lightColorM = vec3(0.0);");
+                    before(files,lighting,"// Vanilla Ambient Occlusion","sceneLighting = bwAmbient(sceneLighting);");
+                    if(defines(files,"CLOUD_STYLE_DEFINE","0")==0) throw new java.io.IOException("Missing cloud style option");
+                    defines(files,"CLOUD_SHADOWS",null);
+                    String sky="program/gbuffers_skybasic.glsl";
+                    String text=required(files,sky);
+                    // Keep material style options intact; disable only the procedural disc rendering branch.
+                    String condition="#if SUN_MOON_STYLE >= 2";
+                    int first=text.indexOf(condition),second=text.indexOf(condition,first+condition.length());
+                    if(second<0) throw new java.io.IOException("Unsupported procedural sun/moon branch");
+                    text=text.substring(0,second)+text.substring(second).replaceFirst(java.util.regex.Pattern.quote(condition),condition+" && !defined "+MACRO);
+                    files.put(sky,text);
+                    if(pack.key.equals("rv")) {
+                        // RV's voxel sun bounce is separate from its traced block emitters.
+                        String rt="program/shadowcomp1.glsl";
+                        var sunlight=java.util.regex.Pattern.compile("(?m)^([ \\t]*)vec3 hitSunlight = [^;]+;").matcher(required(files,rt));
+                        if(!sunlight.find()) throw new java.io.IOException("Unsupported RV bounced sunlight layout");
+                        change(files,rt,sunlight.group(),"vec3 hitSunlight = vec3(0.0);");
+                    }
+                }
+                case "bliss" -> {
+                    if(defines(files,"sun_illuminance","0.0")==0||defines(files,"moon_illuminance","0.0")==0)
+                        throw new java.io.IOException("Unsupported Bliss solar palette");
+                    defines(files,"VOLUMETRIC_CLOUDS",null);defines(files,"CLOUDS_SHADOWS",null);defines(files,"VL_CLOUDS_SHADOWS",null);
+                    change(files,"lib/diffuse_lighting.glsl","return indirectLight;","return bwAmbient(indirectLight);");
+                    functions(files,"lib/sky_gradient.glsl","drawSun","inColor");
+                    functions(files,"lib/sky_gradient.glsl","drawMoon","Color");
+                }
+                case "bsl" -> {
+                    change(files,"lib/color/lightColor.glsl","vec3 lightColRaw = mix(lightNight, lightSun, sunVisibility);","vec3 lightColRaw = vec3(0.0);");
+                    String lighting="lib/lighting/forwardLighting.glsl";
+                    change(files,lighting,"vec3 sceneLighting = mix(ambientCol * lightmap.y, lightCol, fullShadow * shadowMult);",
+                        "vec3 sceneLighting = ambientCol * lightmap.y;");
+                    change(files,lighting,"sceneLighting *= skylightSqr * (1.0 + scattering * shadow);","sceneLighting *= skylightSqr;");
+                    before(files,lighting,"float newLightmap  = pow(lightmap.x, 10.0) * 1.6 + lightmap.x * 0.6;","sceneLighting = bwAmbient(sceneLighting);");
+                    change(files,lighting,"vec3 minLighting = minLightCol * (1.0 - skylightSqr);","vec3 minLighting = vec3(0.0);");
+                    if(defines(files,"CLOUDS","0")==0) throw new java.io.IOException("Missing BSL cloud option");
+                    defines(files,"SHADOW_CLOUD",null);defines(files,"LIGHT_SHAFT",null);
+                    functions(files,"lib/atmospherics/sunmoon.glsl","ShaderSunMoon","");functions(files,"lib/atmospherics/sunmoon.glsl","SunGlare","");
+                }
+                case "makeup" -> {
+                    if(assignments(files,"directLightColor","vec3(0.0)",false)==0||assignments(files,"omniLight","",true)==0)
+                        throw new java.io.IOException("Unsupported MakeUp lighting varyings");
+                    if(defines(files,"V_CLOUDS","0")==0) throw new java.io.IOException("Missing MakeUp cloud option");
+                    defines(files,"SUN_REFLECTION","0");defines(files,"CLOUD_REFLECTION",null);
+                }
+                case "photon" -> {
+                    functions(files,"include/lighting/colors/light_color.glsl","get_light_color","vec3(0.0)");
+                    functions(files,"include/sky/sky.glsl","draw_sun","vec3(0.0)");functions(files,"include/sky/sky.glsl","draw_moon","vec4(0.0)");
+                    String lighting="include/lighting/diffuse_lighting.glsl";
+                    change(files,lighting,"lighting += skylight * get_skylight_falloff(light_levels.y);","lighting += bwAmbient(skylight * get_skylight_falloff(light_levels.y));");
+                    for(String flag:new String[]{"CLOUDS_CUMULUS","CLOUDS_ALTOCUMULUS","CLOUDS_CIRRUS","CLOUDS_CUMULUS_CONGESTUS","CLOUD_SHADOWS","CREPUSCULAR_RAYS"}) defines(files,flag,null);
+                    defines(files,"CAVE_LIGHTING_I","0.0");
+                }
+                case "seus" -> {
+                    if(defines(files,"SUNLIGHT_INTENSITY","0.0")==0||assignments(files,"colorSunlight","vec3(0.0)",false)==0)
+                        throw new java.io.IOException("Unsupported SEUS solar palette");
+                    functions(files,"composite2.fsh","CloudPlane","");functions(files,"composite2.fsh","RenderSunDisc","0.0");
+                    functions(files,"composite2.fsh","CalculateSunglow","0.0");functions(files,"composite3.fsh","RenderSunDisc","0.0");
+                    String lighting="composite2.fsh";
+                    String text=required(files,lighting);
+                    var main=java.util.regex.Pattern.compile("void main\\s*\\(\\s*\\)\\s*\\{").matcher(text);
+                    if(!main.find()) throw new java.io.IOException("Missing SEUS composition entry");
+                    text=text.substring(0,main.start())+"\n#ifdef "+MACRO+"\n#include \"/bw_dimension.glsl\"\n#endif\n"+text.substring(main.start());files.put(lighting,text);
+                    change(files,lighting,"skylight *= gbuffer.mcLightmap.g;","skylight = bwAmbient(skylight * gbuffer.mcLightmap.g);");
+                }
+                case "solas" -> {
+                    change(files,"lib/color/lightColor.glsl","vec3 lightColRaw = fmix(lightNight, lightSun, sunVisibility);","vec3 lightColRaw = vec3(0.0);");
+                    change(files,"lib/lighting/gbuffersLighting.glsl",
+                        "vec3 sceneLighting = fmix(ambientCol, lightCol, shadow * rainFactor * shadowFade) * (0.25 + lightmap.y * 0.75);",
+                        "vec3 sceneLighting = ambientCol * (0.25 + lightmap.y * 0.75);");
+                    change(files,"lib/lighting/gbuffersLighting.glsl","sceneLighting *= 1.0 + sss * shadow * 2.0;","");
+                    before(files,"lib/lighting/gbuffersLighting.glsl","//Night vision","sceneLighting = bwAmbient(sceneLighting);");
+                    for(String flag:new String[]{"VOLUMETRIC_CLOUDS","PLANAR_CLOUDS","VANILLA_CLOUDS","VC_SHADOWS","VL"}) defines(files,flag,null);
+                    functions(files,"lib/atmosphere/sunMoon.glsl","drawSunMoon","");
+                }
+                case "ushader" -> {
+                    if(defines(files,"sunlightIllum","0.0")==0||defines(files,"moonlightIllum","0.0")==0)
+                        throw new java.io.IOException("Unsupported UShader illumination palette");
+                    defines(files,"sunIllumMult","0.0");defines(files,"moonIllumMult","0.0");
+                    for(String flag:new String[]{"cloudVolumeEnabled","cloudCirrusEnabled","cloudShadowsEnabled","cloudReflectionsToggle"}) defines(files,flag,null);
+                    change(files,"lib/atmos/colorsDefault.glsl","lightColor[1] *= vec3(skylightRedMult, skylightGreenMult, skylightBlueMult);",
+                        "lightColor[1] = bwAmbient(lightColor[1] * vec3(skylightRedMult, skylightGreenMult, skylightBlueMult));");
+                }
+                default -> throw new java.io.IOException("Unknown shader adapter: "+pack.key);
+            }
+            for(String path:new java.util.ArrayList<>(files.keySet())) {
+                if(path.matches("(?:.*/)?gbuffers_(?:skytextured|clouds)\\.(?:fsh|glsl)")) {
+                    var matcher=java.util.regex.Pattern.compile("void main\\s*\\(\\s*\\)\\s*\\{").matcher(files.get(path));var result=new StringBuffer();
+                    while(matcher.find()) matcher.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(matcher.group()+"\n#if defined "+MACRO+" && defined BW_DIMENSION_FRAGMENT\ndiscard;\n#endif\n"));
+                    matcher.appendTail(result);files.put(path,result.toString());
+                }
+            }
+            files.put("bw_dimension.glsl",NATIVE_UNIFORMS);
+        }
+
+        private static String shaderPrefix(java.util.zip.ZipFile zip) throws java.io.IOException {
+            if(zip.getEntry("shaders/shaders.properties")!=null) return "";
+            String prefix=null;var entries=zip.entries();
+            while(entries.hasMoreElements()) {
+                String name=entries.nextElement().getName();
+                if(name.endsWith("/shaders/shaders.properties")) {
+                    String candidate=name.substring(0,name.length()-"shaders/shaders.properties".length());
+                    if(prefix!=null&&!prefix.equals(candidate)) throw new java.io.IOException("Multiple shader roots in one archive");
+                    prefix=candidate;
+                }
+            }
+            if(prefix==null) throw new java.io.IOException("Shader archive has no shaders.properties");
+            return prefix;
+        }
+        private static String wrapper(String source,String originalPath) throws java.io.IOException {
+            var version=java.util.regex.Pattern.compile("(?m)^#version[^\\r\\n]*\\r?\\n").matcher(source);
+            if(!version.find()) throw new java.io.IOException("Missing shader version: "+originalPath);
+            source=source.substring(0,version.end())+"#define "+MACRO+"\n"+(originalPath.endsWith(".fsh")?"#define BW_DIMENSION_FRAGMENT\n":"")+source.substring(version.end());
+            var includes=java.util.regex.Pattern.compile("(?m)(#include\\s+\")([^\"\\r\\n]+)(\")").matcher(source);var result=new StringBuffer();
+            while(includes.find()) {
+                String target=includes.group(2);
+                if(!target.startsWith("/")) {
+                    int slash=originalPath.lastIndexOf('/');String parent=slash<0?"":originalPath.substring(0,slash+1);
+                    var normalized=java.nio.file.Path.of(parent+target).normalize();
+                    if(normalized.startsWith("..")) throw new java.io.IOException("Shader include escapes root");
+                    target="/"+normalized.toString().replace('\\','/');
+                }
+                includes.appendReplacement(result,java.util.regex.Matcher.quoteReplacement(includes.group(1)+target+includes.group(3)));
+            }
+            includes.appendTail(result);return result.toString();
+        }
+
+        private static String scopedProperties(String original,String entryRoot,java.util.Map<String,String> sources,Pack pack) {
+            var names=new java.util.HashSet<String>();
+            for(String path:sources.keySet()) if(path.startsWith(entryRoot)) {
+                String name=path.substring(entryRoot.length());
+                if(!name.contains("/")&&name.matches(".*\\.(?:fsh|vsh|gsh|csh|tcs|tes)")) names.add(name.substring(0,name.lastIndexOf('.')));
+            }
+            var result=new StringBuilder(original).append("\n# Backwoods program aliases; original dimensions keep their own properties.\n");
+            // Generic settings are inherited first; explicit world0 settings retain precedence.
+            for(boolean explicit:new boolean[]{false,true}) {
+                for(String line:original.split("\\R")) {
+                    String stripped=line.strip();
+                    if(stripped.matches("#(?:if|ifdef|ifndef|elif|else|endif|define|undef)\\b.*")) {result.append(line).append('\n');continue;}
+                    int equals=line.indexOf('=');if(equals<0||stripped.startsWith("#")) continue;
+                    String key=line.substring(0,equals).strip(),value=line.substring(equals);
+                    if(explicit) {
+                        if(entryRoot.equals("world0/")&&key.contains(".world0/"))
+                            result.append(key.replace(".world0/",".bw_sunless/")).append(value).append('\n');
+                    } else {
+                        int dot=key.indexOf('.');if(dot<0) continue;
+                        String kind=key.substring(0,dot),tail=key.substring(dot+1);
+                        if(!java.util.Set.of("program","blend","alphaTest","scale","flip").contains(kind)) continue;
+                        int end=tail.indexOf('.');String program=end<0?tail:tail.substring(0,end);
+                        if(!program.contains("/")&&names.contains(program))
+                            result.append(kind).append(".bw_sunless/").append(tail).append(value).append('\n');
+                    }
+                }
+            }
+            if(pack.key.equals("bsl")) result.append("program.bw_sunless/composite1.enabled=false\n"); // Solar shafts only; block-light shadowcomp stays enabled.
+            return result.toString();
+        }
+
+        private static void build(java.nio.file.Path source,java.nio.file.Path output,String original,
+                java.util.SortedSet<String> dimensions,String stamp) throws java.io.IOException {
+            try(var zip=new java.util.zip.ZipFile(source.toFile())) {
+                String prefix=shaderPrefix(zip);var files=new java.util.LinkedHashMap<String,String>();
+                var entries=zip.entries();
+                while(entries.hasMoreElements()) {
+                    var entry=entries.nextElement();String name=entry.getName();
+                    if(name.startsWith(prefix+"shaders/")&&name.matches(".*\\.(?:glsl|inc|fsh|vsh|gsh|csh|tcs|tes)"))
+                        files.put(name.substring((prefix+"shaders/").length()),read(zip,name));
+                }
+                var originals=new java.util.HashMap<>(files);Pack pack=identify(files);adapt(files,pack);
+                String entryRoot=originals.keySet().stream().anyMatch(k->k.startsWith("world0/"))?"world0/":"";
+                java.util.Map<String,String> wrappers=new java.util.LinkedHashMap<>();
+                for(var entry:files.entrySet()) {
+                    String path=entry.getKey();if(!path.startsWith(entryRoot)) continue;
+                    String relative=path.substring(entryRoot.length());
+                    if(relative.contains("/")||!relative.matches(".*\\.(?:fsh|vsh|gsh|csh|tcs|tes)")) continue;
+                    // Some packs use .fsh/.vsh files as includes rather than standalone programs.
+                    if(!java.util.regex.Pattern.compile("(?m)^#version[^\\r\\n]*\\r?\\n").matcher(entry.getValue()).find()) continue;
+                    wrappers.put("shaders/bw_sunless/"+relative,wrapper(entry.getValue(),path));
+                }
+                if(wrappers.isEmpty()) throw new java.io.IOException("No compatible Overworld programs");
+                var mapping=new java.util.Properties();var mappingEntry=zip.getEntry(prefix+"shaders/dimension.properties");
+                if(mappingEntry!=null) try(var input=zip.getInputStream(mappingEntry)) {mapping.load(input);}
+                else {
+                    // Once a custom mapping file exists Iris no longer synthesizes these legacy defaults.
+                    if(originals.keySet().stream().anyMatch(k->k.startsWith("world0/")))
+                        mapping.setProperty("dimension.world0","minecraft:overworld *");
+                    if(originals.keySet().stream().anyMatch(k->k.startsWith("world-1/")))
+                        mapping.setProperty("dimension.world-1","minecraft:the_nether");
+                    if(originals.keySet().stream().anyMatch(k->k.startsWith("world1/")))
+                        mapping.setProperty("dimension.world1","minecraft:the_end");
+                }
+                String properties=scopedProperties(read(zip,prefix+"shaders/shaders.properties"),entryRoot,originals,pack);
+                for(String key:new java.util.ArrayList<>(mapping.stringPropertyNames())) {
+                    if(!key.startsWith("dimension.")) continue;
+                    var ids=new java.util.ArrayList<>(java.util.List.of(mapping.getProperty(key).strip().split("\\s+")));
+                    ids.removeIf(dimensions::contains);mapping.setProperty(key,String.join(" ",ids));
+                }
+                mapping.setProperty("dimension.bw_sunless",String.join(" ",dimensions));
+                var metadata=new java.util.Properties();metadata.setProperty("generator","the_backwoods:dimension_visuals");
+                metadata.setProperty("source",original);metadata.setProperty("dimensions",String.join(" ",dimensions));
+                metadata.setProperty("signature",stamp);metadata.setProperty("adapter",pack.key);
+                var temporary=java.nio.file.Files.createTempFile(output.getParent(),"backwoods-sunless-",".tmp");
+                try {
+                    var written=new java.util.HashSet<String>();
+                    try(var result=new java.util.zip.ZipOutputStream(java.nio.file.Files.newOutputStream(temporary))) {
+                        result.setLevel(java.util.zip.Deflater.BEST_SPEED);entries=zip.entries();
+                        while(entries.hasMoreElements()) {
+                            var entry=entries.nextElement();if(entry.isDirectory()) continue;
+                            String raw=entry.getName(),name=raw.startsWith(prefix)?raw.substring(prefix.length()):raw;
+                            if(name.equals(META)||name.equals("shaders/dimension.properties")) continue;
+                            if(!written.add(name)) throw new java.io.IOException("Conflicting normalized shader resource: "+name);
+                            String path=name.startsWith("shaders/")?name.substring(8):"";
+                            if(name.equals("shaders/shaders.properties")) put(result,name,properties.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            else if(files.containsKey(path)&&!files.get(path).equals(originals.get(path)))
+                                put(result,name,files.get(path).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                            else {result.putNextEntry(new java.util.zip.ZipEntry(name));try(var input=zip.getInputStream(entry)){input.transferTo(result);}result.closeEntry();}
+                        }
+                        for(var entry:files.entrySet()) if(!originals.containsKey(entry.getKey()))
+                            put(result,"shaders/"+entry.getKey(),entry.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        for(var entry:wrappers.entrySet()) put(result,entry.getKey(),entry.getValue().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        var bytes=new java.io.ByteArrayOutputStream();mapping.store(bytes,"Backwoods dimension-specific lighting adapter");
+                        put(result,"shaders/dimension.properties",bytes.toByteArray());bytes.reset();
+                        metadata.store(bytes,"Managed shader copy; original archive unchanged");put(result,META,bytes.toByteArray());
+                    }
+                    try {java.nio.file.Files.move(temporary,output,java.nio.file.StandardCopyOption.ATOMIC_MOVE,java.nio.file.StandardCopyOption.REPLACE_EXISTING);}
+                    catch(java.nio.file.AtomicMoveNotSupportedException unsupported) {java.nio.file.Files.move(temporary,output,java.nio.file.StandardCopyOption.REPLACE_EXISTING);}
+                    LOGGER.info("Prepared Backwoods {} shader adapter with {} dimension-scoped programs",pack.key,wrappers.size());
+                } finally {java.nio.file.Files.deleteIfExists(temporary);}
+            }
+        }
+
+    }
+
+    /** Optional public Iris API only: no Iris dependency or private pipeline manipulation. */
+    private static final class IrisBridge {
+        private Object apiConfig, api;
+        private java.lang.reflect.Method packInUse;
+        private java.lang.reflect.Method enabled;
+        private java.lang.reflect.Method apply;
+        private boolean discovered;
+        private boolean restoreEnabled;
+        private long retryAt;
+
+        private void discover() throws ReflectiveOperationException {
+            if (discovered) return;
+            try {
+                Class<?> apiType = Class.forName("net.irisshaders.iris.api.v0.IrisApi");
+                Class<?> configType = Class.forName("net.irisshaders.iris.api.v0.IrisApiConfig");
+                api = apiType.getMethod("getInstance").invoke(null);
+                packInUse = apiType.getMethod("isShaderPackInUse");
+                apiConfig = apiType.getMethod("getConfig").invoke(api);
+                enabled = configType.getMethod("areShadersEnabled");
+                apply = configType.getMethod("setShadersEnabledAndApply", boolean.class);
+                discovered = true;
+            } catch (ClassNotFoundException absent) {
+                discovered = true;
+                LOGGER.info("Iris API absent; dimension visual controls use native rendering only (other packs may override them)");
+            }
+        }
+
+        private boolean packActive() {
+            try { discover(); return api != null && packInUse != null && (Boolean) packInUse.invoke(api); }
+            catch (ReflectiveOperationException | LinkageError | RuntimeException unavailable) { return false; }
+        }
+
+        private void update(boolean bypass) {
+            long now = System.nanoTime();
+            if (retryAt != 0 && now - retryAt < 0) return;
+            try {
+                discover();
+                if (apiConfig == null || enabled == null || apply == null) return;
+                boolean current = (Boolean) enabled.invoke(apiConfig);
+                if (bypass && current) {
+                    // Claim restoration before apply: even a partially failed reload may change Iris's preference.
+                    restoreEnabled = true;
+                    apply.invoke(apiConfig, false);
+                    LOGGER.info("External Iris pack bypassed for dimension visual policy");
+                } else if (!bypass && restoreEnabled) {
+                    if (!current) apply.invoke(apiConfig, true);
+                    restoreEnabled = false;
+                    LOGGER.info("Restored external Iris shader preference");
+                }
+                retryAt = 0;
+            } catch (ReflectiveOperationException | LinkageError | RuntimeException exception) {
+                retryAt = now + 30_000_000_000L;
+                LOGGER.warn("Iris visual-policy transition failed; retrying in 30 seconds", exception);
+            }
+        }
+    }
+}
+// 26.1.2
