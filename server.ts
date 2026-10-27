@@ -1,6 +1,6 @@
 /**
  * ARCHITECTURAL NOTICE FOR FUTURE AI ASSISTANTS:
- * If this application ever loads as a blank white screen, check the following 3 requirements:
+ * If this application ever loads as a blank white screen, check the following requirements:
  * 1. FULL-STACK ENTRYPOINT: package.json scripts must run server.ts, NOT standalone vite:
  *    - "dev": "tsx server.ts" (NOT "vite --port=3000")
  *    - "start": "node server.ts"
@@ -9,6 +9,7 @@
  *    If jszip is missing, Vite throws a client-side bundle import error and halts rendering.
  * 3. COMPONENT INTEGRITY: App.tsx must NEVER be overwritten with placeholder templates like "export default function App() { return <div></div>; }".
  *    Always preserve the complete 21KB dashboard component.
+ * 4. CONSTANT REMINDER: Always fully import so the updated frame logic is always there.
  */
 
 import express from 'express';
@@ -141,6 +142,18 @@ app.get('/api/files/stream', (req, res) => {
   });
 });
 
+function readFirstBytes(filePath: string, maxBytes = 4096): string {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(maxBytes);
+    const bytesRead = fs.readSync(fd, buf, 0, maxBytes, 0);
+    fs.closeSync(fd);
+    return buf.toString('utf-8', 0, bytesRead);
+  } catch {
+    return '';
+  }
+}
+
 // GET /api/files - list all files in uploaded_files
 app.get('/api/files', (req, res) => {
   try {
@@ -155,15 +168,8 @@ app.get('/api/files', (req, res) => {
         const filePath = path.join(UPLOAD_DIR, filename);
         const stats = fs.statSync(filePath);
         
-        let contentSample = '';
-        if (stats.isFile() && stats.size < 100 * 1024) {
-          try {
-            contentSample = fs.readFileSync(filePath, 'utf-8');
-          } catch (e) {
-            // unreadable
-          }
-        }
-
+        // Fast 4KB sample read instead of loading entire large file into memory
+        const contentSample = stats.isFile() ? readFirstBytes(filePath, 4096) : '';
         const { version, source } = detectVersion(filename, contentSample);
         const ext = path.extname(filename).toLowerCase().replace('.', '') || 'file';
 
@@ -186,7 +192,7 @@ app.get('/api/files', (req, res) => {
   }
 });
 
-// GET /api/files/:filename/content - get single file content
+// GET /api/files/:filename/content - get single file content (supports ?raw=1 streaming)
 app.get('/api/files/:filename/content', (req, res) => {
   try {
     const filename = path.basename(req.params.filename);
@@ -196,9 +202,22 @@ app.get('/api/files/:filename/content', (req, res) => {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
 
-    const content = fs.readFileSync(filePath, 'utf-8');
     const stats = fs.statSync(filePath);
-    const { version, source } = detectVersion(filename, content);
+
+    // Fast-path: raw streaming directly to client (eliminates JSON serialization & memory overhead for large files)
+    if (req.query.raw === '1' || req.headers.accept?.includes('text/plain')) {
+      const sample = readFirstBytes(filePath, 4096);
+      const { version } = detectVersion(filename, sample);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      res.setHeader('X-File-Size', stats.size.toString());
+      res.setHeader('X-File-Version', version);
+      const stream = fs.createReadStream(filePath);
+      return stream.pipe(res);
+    }
+
+    const sample = stats.size > 8192 ? readFirstBytes(filePath, 4096) : undefined;
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const { version, source } = detectVersion(filename, sample ?? content);
 
     res.json({
       success: true,

@@ -1,9 +1,10 @@
 /**
  * ============================================================================
- * STRICT RULE / CONSTANT REMINDER:
- * The updated indicator will ONLY appear if the file is updated, and will ONLY
- * disappear through the "Mark as Read" button or when the file content is copied.
- * Selecting or viewing a file MUST NOT clear the updated indicator.
+ * STRICT RULE / CONSTANT REMINDERS:
+ * 1. ALWAYS FULLY IMPORT SO THE UPDATED FRAME LOGIC IS ALWAYS THERE.
+ * 2. The updated indicator will ONLY appear if the file is updated, and will ONLY
+ *    disappear through the "Mark as Read" button or when the file content is copied.
+ *    Selecting or viewing a file MUST NOT clear the updated indicator.
  * ============================================================================
  */
 

@@ -1,3 +1,10 @@
+/**
+ * ============================================================================
+ * STRICT RULE / CONSTANT REMINDER:
+ * Always fully import so the updated frame logic is always there.
+ * ============================================================================
+ */
+
 import React from 'react';
 import { Search, X, Archive } from 'lucide-react';
 import { ShortenPreset } from '../types';

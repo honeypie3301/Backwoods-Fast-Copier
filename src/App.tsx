@@ -1,3 +1,10 @@
+/**
+ * ============================================================================
+ * STRICT RULE / CONSTANT REMINDER:
+ * Always fully import so the updated frame logic is always there.
+ * ============================================================================
+ */
+
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import JSZip from 'jszip';
 import { FileItem, ShortenPreset, ToastMessage } from './types';
@@ -420,13 +427,15 @@ export default function App() {
     try {
       let text = contentCache[filename];
       if (text === undefined) {
-        const res = await fetch(`/api/files/${encodeURIComponent(filename)}/content`, { cache: 'no-store' });
-        const data = await res.json();
-        if (!data.success) {
-          addToast('Copy Failed', data.error || 'Failed to fetch content', 'error');
+        const res = await fetch(`/api/files/${encodeURIComponent(filename)}/content?raw=1`, {
+          cache: 'no-store',
+          headers: { Accept: 'text/plain' },
+        });
+        if (!res.ok) {
+          addToast('Copy Failed', 'Failed to fetch file content', 'error');
           return false;
         }
-        text = data.content;
+        text = await res.text();
         setContentCache((prev) => ({ ...prev, [filename]: text }));
       }
 
@@ -545,9 +554,11 @@ export default function App() {
       for (const f of filesToZip) {
         let text = batchCache[f.name];
         if (text === undefined) {
-          const res = await fetch(`/api/files/${encodeURIComponent(f.name)}/content`, { cache: 'no-store' });
-          const data = await res.json();
-          text = data.success ? data.content : '';
+          const res = await fetch(`/api/files/${encodeURIComponent(f.name)}/content?raw=1`, {
+            cache: 'no-store',
+            headers: { Accept: 'text/plain' },
+          });
+          text = res.ok ? await res.text() : '';
         }
         zip.file(f.name, text);
       }

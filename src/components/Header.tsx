@@ -1,3 +1,10 @@
+/**
+ * ============================================================================
+ * CONSTANT REMINDER:
+ * Always fully import so the updated frame logic is always there.
+ * ============================================================================
+ */
+
 import React from 'react';
 
 interface HeaderProps {
