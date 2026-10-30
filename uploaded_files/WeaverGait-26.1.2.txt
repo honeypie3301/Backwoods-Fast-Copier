@@ -1,0 +1,627 @@
+package net.mcreator.thebackwoods;
+
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
+import net.minecraft.util.Mth;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.level.LevelEvent;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import org.joml.Quaternionf;
+
+/** Client-side, tick-clocked tripod gait; rendering only samples committed steps. */
+@EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+public class WeaverGait {
+    public static double FOOT_SPREAD = 4.0;
+    public static double STEP_DISTANCE = 0.85;
+    public static double STEP_HEIGHT = 0.55;
+    public static double STANCE_HEIGHT = 3.1;
+    public static double POSE_BLEND_TICKS = 4.0;
+    private static final Map<UUID, EntityGaitState> GAIT_STATES = new HashMap<>();
+    private static Level gaitLevel;
+
+    public static EntityGaitState getOrCreateState(UUID uuid) {
+        if (!GAIT_STATES.containsKey(uuid) && GAIT_STATES.size() >= 512) {
+            GAIT_STATES.remove(GAIT_STATES.keySet().iterator().next());
+        }
+        return GAIT_STATES.computeIfAbsent(uuid, k -> new EntityGaitState());
+    }
+
+    public static EntityGaitState getState(UUID uuid) {
+        return GAIT_STATES.get(uuid);
+    }
+
+    public static float transitionWeight(EntityGaitState state, double time, boolean active) {
+        double elapsed = Math.max(0, time - state.blendStartedAt);
+        float current = (float) Mth.lerp(Mth.clamp(elapsed / Math.max(1, POSE_BLEND_TICKS), 0, 1),
+            state.blendFrom, state.poseActive ? 1.0 : 0.0);
+        if (state.poseActive != active) {
+            state.blendFrom = current;
+            state.blendStartedAt = time;
+            state.poseActive = active;
+        }
+        return current;
+    }
+
+    /** Continuous leg weight, independent of the authored body/root blend. */
+    public static float transitionLegWeight(EntityGaitState state, double time, float target) {
+        double elapsed = Double.isNaN(state.legBlendTime) ? 0 : Math.max(0, time - state.legBlendTime);
+        state.legBlendTime = Double.isNaN(state.legBlendTime) ? time : Math.max(state.legBlendTime, time);
+        float step = (float) (elapsed / Math.max(1, POSE_BLEND_TICKS));
+        state.legWeight += Mth.clamp(target - state.legWeight, -step, step);
+        return state.legWeight;
+    }
+
+    /** Fade authored foot motion without reducing terrain IK authority. */
+    public static float transitionActionWeight(EntityGaitState state, double time, boolean active) {
+        double elapsed = Double.isNaN(state.actionBlendTime) ? 0 : Math.max(0, time - state.actionBlendTime);
+        state.actionBlendTime = Double.isNaN(state.actionBlendTime) ? time : Math.max(state.actionBlendTime, time);
+        float step = (float) (elapsed / Math.max(1, POSE_BLEND_TICKS));
+        state.actionWeight += Mth.clamp((active ? 1f : 0f) - state.actionWeight, -step, step);
+        return state.actionWeight;
+    }
+
+    public static void cleanUp(UUID uuid) {
+        GAIT_STATES.remove(uuid);
+    }
+
+    @SubscribeEvent
+    public static void onEntityLeave(EntityLeaveLevelEvent event) {
+        if (event.getLevel().isClientSide()) cleanUp(event.getEntity().getUUID());
+    }
+
+    @SubscribeEvent
+    public static void onLevelUnload(LevelEvent.Unload event) {
+        if (event.getLevel() == gaitLevel) {
+            GAIT_STATES.clear();
+            gaitLevel = null;
+        }
+    }
+
+    public static class LegState {
+        public Vec3 currentPlantedPos = Vec3.ZERO;
+        public Vec3 lastPlantedPos = Vec3.ZERO;
+        public Vec3 targetHomePos = Vec3.ZERO;
+        public Vec3 landingPos = Vec3.ZERO;
+        public float stepProgress = 1.0f;
+        public boolean isStepping;
+        public boolean grounded;
+        public boolean contactAvailable, narrow;
+        public Vec3 contactNormal = new Vec3(0, 1, 0);
+        public Vec3 targetContactNormal = new Vec3(0, 1, 0);
+        public boolean targetNarrow;
+        public Vec3 liftUp = new Vec3(0, 1, 0);
+        public double stepStart;
+        public double stepDuration = 6.0;
+        public double lift = STEP_HEIGHT;
+        public boolean recoveryRequested;
+        public float kneeSwivel, previousKneeSwivel;
+        public int clearanceTick = Integer.MIN_VALUE;
+        public boolean clearanceBlocked;
+        public Vec3 clearanceHip, clearanceKnee, clearanceAnkle, avoidContactPos;
+        public int avoidContactUntil;
+        public long lastRecoveryTick = -1000;
+        public Vec3 renderedAnkle;
+        public Vec3 renderedNormal;
+        public double renderedAt = Double.NaN;
+        public float contactWeight;
+        public float minYaw = Float.NaN, maxYaw = Float.NaN;
+        public long plantedAtTick = -100;
+
+        public void init(Vec3 initialPos) {
+            currentPlantedPos = lastPlantedPos = targetHomePos = landingPos = initialPos;
+            stepProgress = 1.0f;
+            isStepping = false;
+            recoveryRequested = false;
+            kneeSwivel = previousKneeSwivel = 0;
+            clearanceTick = Integer.MIN_VALUE;
+            clearanceBlocked = false;
+            clearanceHip = clearanceKnee = clearanceAnkle = avoidContactPos = null;
+            avoidContactUntil = 0;
+            lastRecoveryTick = -1000;
+            plantedAtTick = -100;
+            renderedAnkle = renderedNormal = null;
+            renderedAt = Double.NaN;
+            contactWeight = 1.0f;
+            minYaw = maxYaw = Float.NaN;
+        }
+
+        public Vec3 sample(double time) {
+            if (!isStepping) return currentPlantedPos;
+            if (time < stepStart) return lastPlantedPos;
+            double p = Mth.clamp((time - stepStart) / stepDuration, 0.0, 1.0);
+            double ease = p * p * p * (p * (p * 6 - 15) + 10);
+            double arc = Math.sin(Math.PI * Math.pow(p, 0.75));
+            return lastPlantedPos.lerp(landingPos, ease).add(liftUp.scale(lift * arc));
+        }
+    }
+
+    public static class EntityGaitState {
+        public final LegState[] legs = new LegState[6];
+        public int activeGroup;
+        public long lastTick = Long.MIN_VALUE;
+        public long enabledAtTick;
+        public long lastGroundedTick;
+        public boolean poseActive, hasPose;
+        public double blendStartedAt;
+        public float blendFrom;
+        public final float[] jointPose = new float[54];
+        public float rootY, rootPitch, rootRoll;
+        public Vec3 renderedRoot;
+        public final Quaternionf renderedRootRotation = new Quaternionf();
+        public double renderedRootAt = Double.NaN;
+        public boolean preserveAuthoredRoot;
+        public long contactCheckTick = -1;
+        public boolean nearLanding;
+        public float landingApproach, legWeight;
+        public double legBlendTime = Double.NaN;
+        public float actionWeight;
+        public final float[] actionOffsets = new float[18];
+        public double actionBlendTime = Double.NaN;
+        public Vec3 lastBodyPos = Vec3.ZERO;
+        public boolean initialized;
+        public double bodyHeight, previousBodyHeight;
+        public float pitch, previousPitch, roll, previousRoll;
+
+        public EntityGaitState() {
+            for (int i = 0; i < legs.length; i++) legs[i] = new LegState();
+        }
+    }
+
+    // Indices: front left/right, middle left/right, rear left/right.
+    public static final int[][] GAIT_GROUPS = {{0, 3, 4}, {1, 2, 5}};
+    public static final int[][] ADJACENT_LEGS = {
+        {1, 2},       // 0: front-left
+        {0, 3},       // 1: front-right
+        {0, 3, 4},    // 2: middle-left
+        {1, 2, 5},    // 3: middle-right
+        {2, 5},       // 4: rear-left
+        {3, 4}        // 5: rear-right
+    };
+
+    public static boolean canUseGroundIK(Entity entity) {
+        if (WoodweaverSurfaceNavigation.attached(entity) || entity.onGround()) return true;
+        EntityGaitState state = getOrCreateState(entity.getUUID());
+        if (state.contactCheckTick != entity.tickCount) {
+            state.contactCheckTick = entity.tickCount;
+            BlockHitResult floor = entity.getDeltaMovement().y <= 0.03
+                ? WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+                    entity.position().add(0, 0.35, 0), entity.position().add(0, -Math.min(12.0,
+                        Math.max(1.25, -entity.getDeltaMovement().y * 6 + 1.5)), 0)) : null;
+            state.nearLanding = floor != null;
+            double distance = floor == null ? Double.POSITIVE_INFINITY
+                : Math.max(0, entity.getY() - floor.getLocation().y);
+            state.landingApproach = landingWeight(distance, Math.max(0, -entity.getDeltaMovement().y));
+        }
+        // Keep the gait clock warm through ascent/apex; leg weight still follows contact/landing approach.
+        boolean leap = entity instanceof net.mcreator.thebackwoods.entity.WoodweaverEntity woodweaver
+            && (woodweaver.getEntityData().get(net.mcreator.thebackwoods.entity.WoodweaverEntity.DATA_isLeaping)
+                || woodweaver.getEntityData().get(net.mcreator.thebackwoods.entity.WoodweaverEntity.DATA_isLanding));
+        return state.nearLanding || leap;
+    }
+
+    /** Finish extending the feet two ticks before predicted impact. */
+    public static float landingWeight(double distance, double downwardSpeed) {
+        if (!Double.isFinite(distance)) return 0;
+        double gap = Math.max(0, distance - 0.15), speed = Math.max(0, downwardSpeed);
+        double ticks = (Math.sqrt(speed * speed + 0.16 * gap) - speed) / 0.08;
+        float approach = (float) Mth.clamp((6 - ticks) / 4, 0, 1);
+        return approach * approach * (3 - 2 * approach);
+    }
+
+    /** Model X/Z to world X/Z, matching MobRenderer's 180 - bodyYaw rotation. */
+    public static Vec3 rotateHorizontal(Vec3 offset, float yaw) {
+        double radians = Math.toRadians(yaw), cos = Math.cos(radians), sin = Math.sin(radians);
+        return new Vec3(offset.x * cos + offset.z * sin, offset.y, offset.x * sin - offset.z * cos);
+    }
+
+    public record Contact(Vec3 position, Vec3 normal, boolean narrow) {}
+
+    /** Surface-frame probes cover floor, wall and ceiling collision shapes, never unloaded columns. */
+    public static Contact findContact(Level level, Entity entity, Vec3 relativeOffset, float yaw, Vec3 prediction) {
+        Quaternionf rotation = WoodweaverSurfaceNavigation.rotation(entity, 1);
+        Vec3 up = WoodweaverSurfaceNavigation.up(entity, 1);
+        Vec3 offset = WoodweaverSurfaceNavigation.WeaverFrame.offset(rotation, yaw, relativeOffset.x, 0, relativeOffset.z);
+        Vec3 tangentPrediction = prediction.subtract(up.scale(prediction.dot(up)));
+        Vec3 point = WoodweaverSurfaceNavigation.footPlane(entity).add(offset).add(tangentPrediction);
+
+        // ArachnoMod obstacle / slope detection: raise scan start if moving toward a rise or step
+        double heightBias = 0.0;
+        if (tangentPrediction.lengthSqr() > 0.01) {
+            Vec3 forwardProbe = point.add(tangentPrediction.normalize().scale(0.6));
+            BlockPos probePos = BlockPos.containing(forwardProbe.x, forwardProbe.y + 0.3, forwardProbe.z);
+            if (!level.getBlockState(probePos).isAir()) {
+                heightBias = 0.85; // Raised scan start to cleanly detect higher step/slope terraces
+            }
+        }
+
+        double startHeight = Math.min(7.0, Math.max(1.5, relativeOffset.y) + 1.0 + heightBias);
+        BlockHitResult hit = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
+            point.add(up.scale(startHeight)), point.subtract(up.scale(10.0)));
+
+        // Multi-candidate scan on slopes and uneven ground (ArachnoMod candidate grid)
+        if (hit == null || (hit.getDirection().getAxis().isHorizontal() && Math.abs(WoodweaverSurfaceNavigation.normal(hit.getDirection()).y) < 0.2)) {
+            double[] gridD = {-0.4, 0.4};
+            for (double gx : gridD) {
+                for (double gz : gridD) {
+                    Vec3 candPoint = point.add(gx, 0, gz);
+                    BlockHitResult candHit = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
+                        candPoint.add(up.scale(startHeight)), candPoint.subtract(up.scale(10.0)));
+                    if (candHit != null && candHit.getDirection().getAxis().isVertical()) {
+                        hit = candHit;
+                        point = candPoint;
+                        break;
+                    }
+                }
+                if (hit != null && hit.getDirection().getAxis().isVertical()) break;
+            }
+        }
+
+        if (hit == null) {
+            Vec3 hipOrigin = entity.position().add(0, WoodweaverSurfaceNavigation.ROOT_HEIGHT, 0).add(offset.scale(0.35));
+            Vec3 angledDown = point.subtract(up.scale(7.5)).subtract(offset.scale(0.25));
+            hit = WoodweaverSurfaceNavigation.clipLoaded(level, entity, hipOrigin, angledDown);
+        }
+
+        // ArachnoMod inward ledge recovery: probe back inward toward body center to find footing on the lip
+        if (hit == null) {
+            Vec3 inward = entity.position().subtract(point);
+            inward = inward.subtract(up.scale(inward.dot(up)));
+            if (inward.lengthSqr() > 0.01) {
+                inward = inward.normalize();
+                for (int step = 1; step <= 3; step++) {
+                    Vec3 probe = point.add(inward.scale(step * 0.5));
+                    hit = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
+                        probe.add(up.scale(startHeight)), probe.subtract(up.scale(8.0)));
+                    if (hit != null) break;
+                }
+            }
+        }
+
+        if (hit == null) return null;
+        return new Contact(hit.getLocation(), WoodweaverSurfaceNavigation.normal(hit.getDirection()), Math.abs(relativeOffset.x) < 2.0);
+    }
+
+    public static Vec3 findGroundHeight(Level level, Entity entity, Vec3 relativeOffset, float yaw, Vec3 worldPredict) {
+        Contact contact = findContact(level, entity, relativeOffset, yaw, worldPredict);
+        return contact == null ? null : contact.position;
+    }
+
+    private static Contact reachableGround(Level level, Entity entity, Vec3 offset, float yaw, Vec3 prediction, int leg) {
+        Contact contact = findContact(level, entity, offset, yaw, prediction);
+        if (contact == null) return null;
+        LegState state = getOrCreateState(entity.getUUID()).legs[leg];
+        if (state.avoidContactPos != null && entity.tickCount < state.avoidContactUntil
+            && (!state.grounded || contact.position.distanceToSqr(state.currentPlantedPos) >= 0.25 * 0.25)
+            && contact.position.distanceToSqr(state.avoidContactPos) < 0.65 * 0.65) return null;
+        double hx = leg % 2 == 0 ? -0.5 : 0.5;
+        double hz = leg < 2 ? -0.625 : leg < 4 ? 0.0625 : 0.75;
+        Vec3 hip = entity.position().add(0, WoodweaverSurfaceNavigation.ROOT_HEIGHT, 0).add(
+            WoodweaverSurfaceNavigation.WeaverFrame.offset(WoodweaverSurfaceNavigation.rotation(entity, 1), yaw, hx, 0.5, hz));
+        if (!WoodweaverSurfaceNavigation.attached(entity)) {
+            EntityGaitState gaitState = getOrCreateState(entity.getUUID());
+            double pitchOffset = -Math.sin(gaitState.pitch) * hz;
+            double heightOffset = gaitState.bodyHeight - (entity.getY() + STANCE_HEIGHT);
+            hip = hip.add(0, offset.y - 3.15 + pitchOffset + heightOffset, 0);
+        }
+        if (!entity.onGround() && entity.getDeltaMovement().y < 0)
+            hip = hip.add(0, -Math.min(2.0, Math.max(0, entity.getY() - contact.position.y)), 0);
+        double reach = contact.position.add(contact.normal.scale(0.1875)).distanceToSqr(hip);
+        Vec3 difference = contact.position.subtract(hip);
+        org.joml.Vector3f local = WoodweaverSurfaceNavigation.rotation(entity, 1).conjugate()
+            .transform(new org.joml.Vector3f((float)difference.x, (float)difference.y, (float)difference.z));
+        Vec3 model = rotateHorizontal(new Vec3(local.x, local.y, local.z), yaw);
+        double side = leg % 2 == 0 ? -1 : 1;
+        double angle = Math.atan2(-side * model.z, side * model.x);
+        double min = leg < 2 ? (side < 0 ? -1.30 : 0.35) : leg < 4 ? -0.25 : (side < 0 ? 0.35 : -1.30);
+        double max = leg < 2 ? (side < 0 ? -0.35 : 1.30) : leg < 4 ? 0.25 : (side < 0 ? 1.30 : -0.35);
+        if (contact.narrow) {
+            min = leg < 2 ? (side < 0 ? -1.30 : 0.30) : leg < 4 ? -0.20 : (side < 0 ? 0.30 : -1.30);
+            max = leg < 2 ? (side < 0 ? -0.30 : 1.30) : leg < 4 ? 0.20 : (side < 0 ? 1.30 : -0.30);
+        }
+        if (model.x * side < (difference.y < -0.8 ? -0.45 : -0.15) || angle < min || angle > max) return null;
+        // Reject anchors inside the solver's minimum reach instead of clamping into a folded pose.
+        return reach >= 1.8 * 1.8 && reach <= 6.25 * 6.25 ? contact : null;
+    }
+
+    public static void updateGait(Entity entity, float partialTicks, double[] hipY) {
+        updateGait(entity, partialTicks, hipY, false);
+    }
+
+    public static void updateGait(Entity entity, float partialTicks, double[] hipY, boolean preserveRoot) {
+        updateGait(entity, partialTicks, hipY, preserveRoot, false);
+    }
+
+    public static void updateGait(Entity entity, float partialTicks, double[] hipY, boolean preserveRoot, boolean landingPose) {
+        Level level = entity.level();
+        if (!level.isClientSide()) return;
+        if (level != gaitLevel) {
+            GAIT_STATES.clear();
+            gaitLevel = level;
+        }
+        EntityGaitState state = getOrCreateState(entity.getUUID());
+        state.preserveAuthoredRoot = preserveRoot;
+        long tick = entity.tickCount;
+        if (state.lastTick == tick) return;
+        boolean reset = !state.initialized || tick < state.lastTick
+            || entity.position().distanceToSqr(state.lastBodyPos) > 64;
+        state.lastTick = tick;
+        boolean touchdown = entity.onGround() && tick - state.lastGroundedTick > 1;
+        if (entity.onGround()) state.lastGroundedTick = tick;
+        state.lastBodyPos = entity.position();
+        float yaw = entity instanceof LivingEntity living ? living.yBodyRot : entity.getYRot();
+        Vec3 surfaceUp = WoodweaverSurfaceNavigation.up(entity, 1);
+        Vec3 motion = new Vec3(entity.getX() - entity.xo, entity.getY() - entity.yo, entity.getZ() - entity.zo);
+        motion = motion.subtract(surfaceUp.scale(motion.dot(surfaceUp)));
+        double speed = motion.length();
+        if (speed > 1.0) motion = motion.scale(1.0 / speed);
+        float yawDelta = entity instanceof LivingEntity living ? Mth.wrapDegrees(living.yBodyRot - living.yBodyRotO) : 0;
+        double yawDeltaRad = Math.toRadians(yawDelta);
+        Vec3 linearPredict = motion.scale(Math.min(3.2, 2.0 + speed * 3.5));
+        double time = tick;
+        Quaternionf surfaceRotation = WoodweaverSurfaceNavigation.rotation(entity, 1);
+        boolean airborneApproach = !entity.onGround() && entity.getDeltaMovement().y < 0 && state.nearLanding;
+        boolean anyStepping = false;
+        double[] groupError = new double[2];
+        for (int i = 0; i < 6; i++) {
+            LegState leg = state.legs[i];
+            double x = (i % 2 == 0 ? -1 : 1) * (i >= 2 && i < 4 ? FOOT_SPREAD * 1.15 : FOOT_SPREAD);
+            double z = i < 2 ? -2.4 : i < 4 ? 0.0 : 2.5;
+            Vec3 turnOffset = rotateHorizontal(new Vec3(-z * yawDeltaRad * 2.5, 0, x * yawDeltaRad * 2.5), yaw);
+            Vec3 predict = linearPredict.add(turnOffset);
+            if (predict.length() > 3.2) predict = predict.scale(3.2 / predict.length());
+            Vec3 offset = new Vec3(x, hipY[i], z);
+            Contact contact = reachableGround(level, entity, offset, yaw, predict, i);
+            if (contact == null && predict.lengthSqr() > 0.001)
+                contact = reachableGround(level, entity, offset, yaw, Vec3.ZERO, i);
+            // Search around a ledge before folding the leg inward toward the body.
+            if (contact == null) for (double dz : new double[]{-0.75, 0.75, -1.5, 1.5}) {
+                contact = reachableGround(level, entity, new Vec3(x, hipY[i], z + dz), yaw, Vec3.ZERO, i);
+                if (contact != null) break;
+            }
+            if (contact == null) for (double scale : new double[]{0.9, 0.8, 0.7}) {
+                double probeZ = scale < 0.8 && i >= 2 && i < 4 ? (i == 2 ? -1.1 : 1.1) : z;
+                contact = reachableGround(level, entity, new Vec3(x * scale, hipY[i], probeZ), yaw, Vec3.ZERO, i);
+                if (contact != null) break;
+            }
+            // A slanted probe can grip a slope or drop face below the ledge:
+            if (contact == null) {
+                Vec3 hip = entity.position().add(0, WoodweaverSurfaceNavigation.ROOT_HEIGHT, 0).add(
+                    WoodweaverSurfaceNavigation.WeaverFrame.offset(surfaceRotation, yaw, i % 2 == 0 ? -0.5 : 0.5, 0.5, z * 0.3));
+                for (double downDist : new double[]{0.8, 1.8, 3.2, 5.0}) {
+                    Vec3 edge = WoodweaverSurfaceNavigation.footPlane(entity).add(
+                        WoodweaverSurfaceNavigation.WeaverFrame.offset(surfaceRotation, yaw, (i % 2 == 0 ? -0.25 : 0.25), 0, z));
+                    BlockHitResult grip = WoodweaverSurfaceNavigation.clipLoaded(level, entity, hip, edge.subtract(surfaceUp.scale(downDist)));
+                    if (grip != null && hip.distanceToSqr(grip.getLocation()) >= 1.8 * 1.8
+                        && hip.distanceToSqr(grip.getLocation()) < 6.25 * 6.25) {
+                        contact = new Contact(grip.getLocation(), WoodweaverSurfaceNavigation.normal(grip.getDirection()), true);
+                        break;
+                    }
+                }
+            }
+            Vec3 hanging = WoodweaverSurfaceNavigation.footPlane(entity).add(
+                WoodweaverSurfaceNavigation.WeaverFrame.offset(surfaceRotation, yaw, x, 0.2, z));
+            Vec3 home = contact != null ? contact.position : hanging;
+            leg.contactAvailable = true;
+            if (contact != null) {
+                leg.targetContactNormal = contact.normal;
+                leg.targetNarrow = contact.narrow;
+                if (reset) { leg.contactNormal = contact.normal; leg.narrow = contact.narrow; }
+            } else {
+                leg.targetContactNormal = surfaceUp;
+                leg.targetNarrow = false;
+                if (reset) { leg.contactNormal = surfaceUp; leg.narrow = false; }
+            }
+            leg.liftUp = surfaceUp;
+            if (reset) {
+                leg.init(home);
+                leg.grounded = contact != null;
+                leg.plantedAtTick = tick;
+                leg.contactWeight = 1.0f;
+            }
+            leg.targetHomePos = home;
+            if (!entity.onGround() && !WoodweaverSurfaceNavigation.attached(entity)) {
+                // In air, feet track the body frame (or anticipate landing floor) rather than lagging at takeoff
+                leg.grounded = contact != null && airborneApproach;
+                leg.isStepping = false;
+                leg.stepProgress = 1;
+                leg.currentPlantedPos = leg.lastPlantedPos = leg.landingPos = home;
+                leg.contactNormal = leg.targetContactNormal;
+                leg.narrow = leg.targetNarrow;
+            }
+            if (touchdown || (landingPose && entity.onGround() && !leg.grounded)) {
+                if (leg.currentPlantedPos != null && leg.currentPlantedPos.distanceToSqr(home) > 0.04) {
+                    leg.lastPlantedPos = leg.currentPlantedPos;
+                    leg.landingPos = home;
+                    leg.stepStart = time;
+                    leg.stepDuration = 2.0;
+                    leg.lift = 0.0;
+                    leg.isStepping = true;
+                } else {
+                    leg.currentPlantedPos = leg.lastPlantedPos = leg.landingPos = home;
+                    leg.isStepping = false;
+                }
+                leg.stepProgress = 0;
+                leg.contactNormal = leg.targetContactNormal;
+                leg.narrow = leg.targetNarrow;
+                leg.grounded = contact != null;
+                leg.plantedAtTick = tick;
+            }
+            if (leg.isStepping) {
+                leg.currentPlantedPos = leg.sample(time);
+                leg.stepProgress = (float) Mth.clamp((time - leg.stepStart) / leg.stepDuration, 0, 1);
+                if (leg.stepProgress >= 1.0f) {
+                    leg.currentPlantedPos = leg.landingPos;
+                    leg.isStepping = false;
+                    leg.grounded = true;
+                    leg.plantedAtTick = tick;
+                }
+            }
+            // Validate planted contacts cheaply, including blocks removed under an idle foot.
+            if (!reset && !leg.isStepping && leg.grounded && (tick + i) % 10 == 0) {
+                BlockPos support = BlockPos.containing(leg.currentPlantedPos);
+                if (!level.hasChunkAt(support)) {
+                    leg.grounded = false;
+                } else {
+                    BlockHitResult existing = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
+                        leg.currentPlantedPos.add(leg.contactNormal.scale(0.25)),
+                        leg.currentPlantedPos.subtract(leg.contactNormal.scale(0.25)));
+                    if (existing == null || existing.getLocation().distanceToSqr(leg.currentPlantedPos) > 0.03 * 0.03)
+                        leg.grounded = false;
+                }
+            }
+            leg.contactAvailable = contact != null || leg.grounded || leg.isStepping;
+        }
+        if (reset) {
+            state.initialized = true;
+            state.enabledAtTick = tick;
+            state.poseActive = true;
+            state.hasPose = true;
+            state.blendFrom = 1.0f;
+            state.legWeight = 1.0f;
+            state.legBlendTime = tick;
+            state.actionWeight = 0;
+            state.actionBlendTime = tick;
+            state.renderedRoot = null;
+            state.renderedRootAt = Double.NaN;
+            state.blendStartedAt = tick;
+            state.bodyHeight = state.previousBodyHeight = entity.getY() + STANCE_HEIGHT;
+            state.pitch = state.previousPitch = state.roll = state.previousRoll = 0;
+        } else if (!airborneApproach && !landingPose) {
+            double threshold = STEP_DISTANCE * STEP_DISTANCE * (speed < 0.04 ? 2.2 : 1.0);
+            int supports = 0;
+            for (LegState support : state.legs) {
+                if (support.grounded && !support.isStepping) supports++;
+            }
+
+            int group = state.activeGroup;
+            int otherGroup = 1 - group;
+            int[] checkOrder = new int[6];
+            int idx = 0;
+            for (int i : GAIT_GROUPS[group]) checkOrder[idx++] = i;
+            for (int i : GAIT_GROUPS[otherGroup]) checkOrder[idx++] = i;
+
+            boolean anyStarted = false;
+            for (int i : checkOrder) {
+                LegState leg = state.legs[i];
+                if (leg.isStepping || leg.targetHomePos == null) continue;
+
+                Vec3 diff = leg.currentPlantedPos.subtract(leg.targetHomePos);
+                Vec3 tangentDiff = diff.subtract(surfaceUp.scale(diff.dot(surfaceUp)));
+                double error = tangentDiff.lengthSqr() + Math.pow(diff.dot(surfaceUp) * 0.35, 2);
+                boolean wantsToMove = !leg.grounded || error > threshold || leg.recoveryRequested;
+
+                if (speed < 0.04 && leg.grounded && tick - leg.plantedAtTick < 8 && !leg.recoveryRequested) {
+                    continue;
+                }
+
+                if (wantsToMove) {
+                    boolean neighborStepping = false;
+                    for (int adj : ADJACENT_LEGS[i]) {
+                        if (state.legs[adj].isStepping) {
+                            neighborStepping = true;
+                            break;
+                        }
+                    }
+                    if (neighborStepping && leg.grounded) continue;
+                    if (leg.grounded && supports <= 3) continue;
+
+                    if (leg.grounded) supports--;
+                    leg.lastPlantedPos = leg.currentPlantedPos;
+                    leg.landingPos = leg.targetHomePos;
+                    leg.contactNormal = leg.targetContactNormal;
+                    leg.narrow = leg.targetNarrow;
+                    leg.stepStart = time;
+                    leg.stepDuration = Mth.clamp(3.8 - speed * 2.5, 2.2, 3.6);
+                    leg.lift = Math.max(STEP_HEIGHT, Math.min(1.25,
+                        Math.abs(leg.landingPos.y - leg.lastPlantedPos.y) * 0.5 + 0.3));
+                    BlockHitResult obstacle = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
+                        leg.lastPlantedPos.add(surfaceUp.scale(0.2)), leg.landingPos.add(surfaceUp.scale(0.2)));
+                    if (obstacle != null) leg.lift = Math.max(leg.lift, 1.0);
+                    leg.isStepping = true;
+                    leg.grounded = false;
+                    leg.recoveryRequested = false;
+                    leg.plantedAtTick = tick;
+                    anyStarted = true;
+                }
+            }
+            if (anyStarted) state.activeGroup = 1 - group;
+        }
+        if (surfaceUp.y > 0.35) updateBody(state, entity);
+        else {
+            state.previousBodyHeight = state.bodyHeight = entity.getY() + STANCE_HEIGHT;
+            state.previousPitch = state.pitch = state.previousRoll = state.roll = 0;
+        }
+    }
+
+    private static void updateBody(EntityGaitState state, Entity entity) {
+        state.previousBodyHeight = state.bodyHeight;
+        state.previousPitch = state.pitch;
+        state.previousRoll = state.roll;
+
+        float yaw = entity instanceof LivingEntity living ? living.yBodyRot : entity.getYRot();
+
+        // Direct foot differential adaptation (ArachnoMod):
+        // Front feet (0, 1) vs Rear feet (4, 5) give immediate pitch response to slopes.
+        // Right feet (1, 3, 5) vs Left feet (0, 2, 4) give immediate lateral roll response.
+        Vec3 fl = state.legs[0].grounded ? state.legs[0].currentPlantedPos : state.legs[0].targetHomePos;
+        Vec3 fr = state.legs[1].grounded ? state.legs[1].currentPlantedPos : state.legs[1].targetHomePos;
+        Vec3 ml = state.legs[2].grounded ? state.legs[2].currentPlantedPos : state.legs[2].targetHomePos;
+        Vec3 mr = state.legs[3].grounded ? state.legs[3].currentPlantedPos : state.legs[3].targetHomePos;
+        Vec3 rl = state.legs[4].grounded ? state.legs[4].currentPlantedPos : state.legs[4].targetHomePos;
+        Vec3 rr = state.legs[5].grounded ? state.legs[5].currentPlantedPos : state.legs[5].targetHomePos;
+
+        // Anticipate upcoming slopes/drops ahead
+        Vec3 forwardDir = rotateHorizontal(new Vec3(0, 0, -1), yaw);
+        Vec3 aheadPos = entity.position().add(forwardDir.scale(2.2));
+        BlockHitResult aheadHit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+            aheadPos.add(0, 2.5, 0), aheadPos.add(0, -6.0, 0));
+        double terrainSlopePitch = 0;
+        double slopeDrop = 0;
+        if (aheadHit != null) {
+            double dy = aheadHit.getLocation().y - entity.getY();
+            terrainSlopePitch = -Math.atan2(dy, 2.2);
+            if (dy < -0.4) slopeDrop = -dy;
+        }
+
+        if (fl != null && fr != null && ml != null && mr != null && rl != null && rr != null) {
+            double frontY = (fl.y + fr.y) * 0.5;
+            double rearY = (rl.y + rr.y) * 0.5;
+            double dy = frontY - rearY;
+            double pitch = -Math.atan2(dy, 4.8); // 4.8 blocks span between front and rear contacts
+
+            double rightY = (fr.y + mr.y + rr.y) / 3.0;
+            double leftY = (fl.y + ml.y + rl.y) / 3.0;
+            double roll = -Math.atan2(rightY - leftY, FOOT_SPREAD * 2.0);
+
+            if (terrainSlopePitch != 0 && Math.abs(terrainSlopePitch) > Math.abs(pitch)) {
+                pitch = Mth.lerp(0.4, pitch, terrainSlopePitch);
+            }
+
+            double avgSupportY = (fl.y + fr.y + ml.y + mr.y + rl.y + rr.y) / 6.0;
+            double crouch = Mth.clamp(slopeDrop * 0.3, 0, 1.0);
+            double targetHeight = avgSupportY + STANCE_HEIGHT - crouch;
+
+            state.bodyHeight = Mth.lerp(0.35, state.bodyHeight,
+                Mth.clamp(targetHeight, entity.getY() + 0.8, entity.getY() + 4.5));
+            state.roll = Mth.lerp(0.35f, state.roll, (float) Mth.clamp(roll, -1.15, 1.15));
+            state.pitch = Mth.lerp(0.35f, state.pitch, (float) Mth.clamp(pitch, -1.15, 1.15));
+        } else {
+            double crouch = Mth.clamp(slopeDrop * 0.35, 0, 1.2);
+            state.bodyHeight = Mth.lerp(0.2, state.bodyHeight, entity.getY() + STANCE_HEIGHT - crouch);
+            state.roll = Mth.lerp(0.15f, state.roll, 0);
+            state.pitch = Mth.lerp(0.25f, state.pitch, (float) Mth.clamp(terrainSlopePitch, -1.15, 1.15));
+        }
+    }
+}
+// 26.1.2

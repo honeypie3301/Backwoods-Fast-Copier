@@ -74,39 +74,39 @@ import java.util.concurrent.ConcurrentHashMap;
 @EventBusSubscriber
 public class VerdantEngineOnEntityTickUpdateProcedure {
 
-	public static final double MAX_INFECTION_RADIUS = 256.0;
-	public static final double HOVER_TARGET_ALTITUDE = 72.0;
-	public static final double BEAM_RADIUS = 3.0;
-	public static final double BEAM_START_Y_OFFSET = 0.0;
-	public static final double BASE_GRAVITY_RADIUS = 32.0;
-	public static final double BASE_POUND_RADIUS = 32.0;
-	public static final double POUND_RADIUS_INCREMENT = 16.0;
-	public static final double MAX_POUND_RADIUS_CAP = 224.0;
-	public static final double SHOCKWAVE_BASE_SCALE = 8.0;
-	public static final int CHARGE_DURATION_TICKS = 110;
-	public static final int CYCLE_TOTAL_TICKS = 240;
-	public static final int RINGS_START_TICK = 160;
+	public static double MAX_INFECTION_RADIUS = 256.0;
+	public static double HOVER_TARGET_ALTITUDE = 72.0;
+	public static double BEAM_RADIUS = 3.0;
+	public static double BEAM_START_Y_OFFSET = 0.0;
+	public static double BASE_GRAVITY_RADIUS = 32.0;
+	public static double BASE_POUND_RADIUS = 32.0;
+	public static double POUND_RADIUS_INCREMENT = 16.0;
+	public static double MAX_POUND_RADIUS_CAP = 224.0;
+	public static double SHOCKWAVE_BASE_SCALE = 8.0;
+	public static int CHARGE_DURATION_TICKS = 110;
+	public static int CYCLE_TOTAL_TICKS = 240;
+	public static int RINGS_START_TICK = 160;
 
-	public static final double SUPERCHARGED_MAX_INFECTION_RADIUS = 432.0;
-	public static final double SUPERCHARGED_CYCLE_SPEED = 1.5;
-	public static final double SUPERCHARGED_POUND_RADIUS_INCREMENT = 20.0;
-	public static final double SUPERCHARGED_MAX_POUND_RADIUS_CAP = 288.0;
-	public static final float SUPERCHARGED_SCREENSHAKE_MULTIPLIER = 3.0F;
-	public static final float SUPERCHARGED_SCREENSHAKE_DISTANCE = 96.0F;
-	public static final double SUPERCHARGED_DAMPENING_HORIZONTAL = 0.15;
-	public static final double SUPERCHARGED_DAMPENING_VERTICAL = -0.70;
-	public static final double SUPERCHARGED_ZERO_G_LIFT_SPEED_MULTIPLIER = 2.5;
-		public static final double SUPERCHARGED_HOVER_TARGET_ALTITUDE = 118.8;
-	public static final double SUPERCHARGED_CRATER_MAX_RADIUS_CAP = 80.0;
-	public static final double SUPERCHARGED_CRATER_BASE_RADIUS = 16.0;
-	public static final double SUPERCHARGED_CRATER_RADIUS_PER_POUND = 5.0;
-	public static final double SUPERCHARGED_CRATER_BASE_DEPTH = 4.5;
-	public static final double SUPERCHARGED_CRATER_MAX_DEPTH_CAP = 36.0;
-	public static final double SUPERCHARGED_CRATER_DEPTH_PER_POUND = 1.8;
-	public static final double SUPERCHARGED_CRATER_DEPTH_FALLOFF = 0.60;
+	public static double SUPERCHARGED_MAX_INFECTION_RADIUS = 432.0;
+	public static double SUPERCHARGED_CYCLE_SPEED = 1.5;
+	public static double SUPERCHARGED_POUND_RADIUS_INCREMENT = 20.0;
+	public static double SUPERCHARGED_MAX_POUND_RADIUS_CAP = 288.0;
+	public static float SUPERCHARGED_SCREENSHAKE_MULTIPLIER = 3.0F;
+	public static float SUPERCHARGED_SCREENSHAKE_DISTANCE = 96.0F;
+	public static double SUPERCHARGED_DAMPENING_HORIZONTAL = 0.15;
+	public static double SUPERCHARGED_DAMPENING_VERTICAL = -0.70;
+	public static double SUPERCHARGED_ZERO_G_LIFT_SPEED_MULTIPLIER = 2.5;
+		public static double SUPERCHARGED_HOVER_TARGET_ALTITUDE = 118.8;
+	public static double SUPERCHARGED_CRATER_MAX_RADIUS_CAP = 80.0;
+	public static double SUPERCHARGED_CRATER_BASE_RADIUS = 16.0;
+	public static double SUPERCHARGED_CRATER_RADIUS_PER_POUND = 5.0;
+	public static double SUPERCHARGED_CRATER_BASE_DEPTH = 4.5;
+	public static double SUPERCHARGED_CRATER_MAX_DEPTH_CAP = 36.0;
+	public static double SUPERCHARGED_CRATER_DEPTH_PER_POUND = 1.8;
+	public static double SUPERCHARGED_CRATER_DEPTH_FALLOFF = 0.60;
 
-	public static final double NON_TERRAFORMING_ASCEND_SPEED = 0.175;
-	public static final double NON_TERRAFORMING_DESCEND_SPEED = 0.080;
+	public static double NON_TERRAFORMING_ASCEND_SPEED = 0.175;
+	public static double NON_TERRAFORMING_DESCEND_SPEED = 0.080;
 
 	public static double getMaxInfectionRadius(CompoundTag nbt) {
 		return (nbt != null && persistentBoolean(nbt, "verdant_supercharged_mode", false)) ? SUPERCHARGED_MAX_INFECTION_RADIUS : MAX_INFECTION_RADIUS;
@@ -116,34 +116,34 @@ public class VerdantEngineOnEntityTickUpdateProcedure {
 		return (nbt != null && persistentBoolean(nbt, "verdant_supercharged_mode", false)) ? SUPERCHARGED_HOVER_TARGET_ALTITUDE : HOVER_TARGET_ALTITUDE;
 	}
 
-	public static final boolean ENABLE_FLUID_EVAPORATION = false;
-	public static final boolean VERDANT_DEATH_EXPLOSION_GRIEFING = true;
+	public static boolean ENABLE_FLUID_EVAPORATION = false;
+	public static boolean VERDANT_DEATH_EXPLOSION_GRIEFING = true;
 
-	public static final float PLANETARY_POUND_BASE_DAMAGE = 65.0F;
-	public static final float PLANETARY_POUND_PER_POUND_DAMAGE = 22.0F;
-	public static final float SHOCKWAVE_BASE_DAMAGE = 65.0F;
-	public static final float SHOCKWAVE_MIN_DAMAGE = 25.0F;
-	public static final float GRAVITY_SLAM_IMPACT_DAMAGE = 10.0F;
-	public static final float CORE_ASPHYXIATION_DAMAGE = 2.0F;
-	public static final double ZERO_G_LIFT_VERTICAL_MIN = -12.0;
-	public static final double ZERO_G_LIFT_VERTICAL_MAX = 36.0;
-	public static final double ZERO_G_LIFT_MAX_Y_CAP = 16.0;
+	public static float PLANETARY_POUND_BASE_DAMAGE = 65.0F;
+	public static float PLANETARY_POUND_PER_POUND_DAMAGE = 22.0F;
+	public static float SHOCKWAVE_BASE_DAMAGE = 65.0F;
+	public static float SHOCKWAVE_MIN_DAMAGE = 25.0F;
+	public static float GRAVITY_SLAM_IMPACT_DAMAGE = 10.0F;
+	public static float CORE_ASPHYXIATION_DAMAGE = 2.0F;
+	public static double ZERO_G_LIFT_VERTICAL_MIN = -12.0;
+	public static double ZERO_G_LIFT_VERTICAL_MAX = 36.0;
+	public static double ZERO_G_LIFT_MAX_Y_CAP = 16.0;
 
-	public static final double GRAVITY_BEAM_PARTICLE_QUALITY = 0.65;
-	public static final double GRAVITY_BEAM_PARTICLE_RENDER_DIST = 1024.0;
-	public static final double GRAVITY_BEAM_PARTICLE_RENDER_DIST_SQ = 1024.0 * 1024.0;
-	public static final double INFECTION_SPEED_MULTIPLIER = 0.25;
-	public static final boolean GRAVITY_BEAM_PENETRATION_ENABLED = false;
-	public static final double GRAVITY_BEAM_PENETRATION_SPEED = 0.125;
+	public static double GRAVITY_BEAM_PARTICLE_QUALITY = 0.65;
+	public static double GRAVITY_BEAM_PARTICLE_RENDER_DIST = 1024.0;
+	public static double GRAVITY_BEAM_PARTICLE_RENDER_DIST_SQ = 1024.0 * 1024.0;
+	public static double INFECTION_SPEED_MULTIPLIER = 0.25;
+	public static boolean GRAVITY_BEAM_PENETRATION_ENABLED = false;
+	public static double GRAVITY_BEAM_PENETRATION_SPEED = 0.125;
 	public static final double GRAVITY_BEAM_EFFECT_RADIUS = 12.0;
-	public static final double GRAVITY_BEAM_MAX_GRAVITY_MODIFIER = 3.5;
-	public static final double SHOCKWAVE_PARTICLE_RADIUS = 48.0;
-	public static final double SHOCKWAVE_PARTICLE_QUALITY = 1.0;
-	public static final double INFECTION_SATURATION_THRESHOLD = 0.95;
-	public static final int SATURATION_RELOCATE_DELAY_TICKS = 900;
-	public static final int SUPERCHARGED_SATURATION_RELOCATE_DELAY_TICKS = 3500;
-	public static final boolean ENABLE_INFECTION_CHAT_LOGGING = false;
-	public static final boolean INFECT_INDESTRUCTIBLE_BLOCKS = false;
+	public static double GRAVITY_BEAM_MAX_GRAVITY_MODIFIER = 3.5;
+	public static double SHOCKWAVE_PARTICLE_RADIUS = 48.0;
+	public static double SHOCKWAVE_PARTICLE_QUALITY = 1.0;
+	public static double INFECTION_SATURATION_THRESHOLD = 0.95;
+	public static int SATURATION_RELOCATE_DELAY_TICKS = 900;
+	public static int SUPERCHARGED_SATURATION_RELOCATE_DELAY_TICKS = 3500;
+	public static boolean ENABLE_INFECTION_CHAT_LOGGING = false;
+	public static boolean INFECT_INDESTRUCTIBLE_BLOCKS = false;
 
 		private static List<Entity> getNearbyVerdantEngines(ServerLevel level, Entity self, double centerX, double centerZ, double maxDist) {
 		if (level == null) return java.util.Collections.emptyList();
@@ -205,7 +205,7 @@ public class VerdantEngineOnEntityTickUpdateProcedure {
 	private static final int FULL_RADIUS_RADIAL_COLUMN_BUDGET = 384;
 	private static final int FULL_RADIUS_SAMPLES_PER_POUND = 800;
 	private static final int FULL_RADIUS_SAMPLE_CAP = 650;
-	private static final long FULL_RADIUS_SERVER_TIME_BUDGET_NANOS = 12_000_000L;
+	private static final long FULL_RADIUS_SERVER_TIME_BUDGET_NANOS = 30_000_000L;
 	private static final int MULTI_ENGINE_BURST_COLUMN_BUDGET = 192;
 private static final long SUPERCHARGED_BURST_TIME_BUDGET_NANOS = 6_000_000L;
 private static final long SUPERCHARGED_CRATER_TIME_BUDGET_NANOS = 4_000_000L;
@@ -300,21 +300,21 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 	private static final Map<ResourceLocation, Integer> SATURATION_MODEL_V4_SERVERS = new ConcurrentHashMap<>();
 	private static final Map<ResourceLocation, Integer> SATURATION_MODEL_V5_SERVERS = new ConcurrentHashMap<>();
 
-	public static final boolean BEDROCK_TESTING_MODE = true;
+	public static boolean BEDROCK_TESTING_MODE = true;
 
-	public static final int BEDROCK_CRACK_BASE_POUNDS_DEFAULT = 3;
-	public static final int BEDROCK_SHATTER_BASE_POUNDS_DEFAULT = 5;
-	public static final int BEDROCK_CRACK_MID_POUNDS_DEFAULT = 5;
-	public static final int BEDROCK_SHATTER_MID_POUNDS_DEFAULT = 7;
-	public static final int BEDROCK_CRACK_OUTER_POUNDS_DEFAULT = 7;
-	public static final int BEDROCK_SHATTER_OUTER_POUNDS_DEFAULT = 9;
+	public static int BEDROCK_CRACK_BASE_POUNDS_DEFAULT = 3;
+	public static int BEDROCK_SHATTER_BASE_POUNDS_DEFAULT = 5;
+	public static int BEDROCK_CRACK_MID_POUNDS_DEFAULT = 5;
+	public static int BEDROCK_SHATTER_MID_POUNDS_DEFAULT = 7;
+	public static int BEDROCK_CRACK_OUTER_POUNDS_DEFAULT = 7;
+	public static int BEDROCK_SHATTER_OUTER_POUNDS_DEFAULT = 9;
 
-	public static final int BEDROCK_CRACK_BASE_POUNDS_TESTING = 1;
-	public static final int BEDROCK_SHATTER_BASE_POUNDS_TESTING = 1;
-	public static final int BEDROCK_CRACK_MID_POUNDS_TESTING = 2;
-	public static final int BEDROCK_SHATTER_MID_POUNDS_TESTING = 2;
-	public static final int BEDROCK_CRACK_OUTER_POUNDS_TESTING = 2;
-	public static final int BEDROCK_SHATTER_OUTER_POUNDS_TESTING = 3;
+	public static int BEDROCK_CRACK_BASE_POUNDS_TESTING = 1;
+	public static int BEDROCK_SHATTER_BASE_POUNDS_TESTING = 1;
+	public static int BEDROCK_CRACK_MID_POUNDS_TESTING = 2;
+	public static int BEDROCK_SHATTER_MID_POUNDS_TESTING = 2;
+	public static int BEDROCK_CRACK_OUTER_POUNDS_TESTING = 2;
+	public static int BEDROCK_SHATTER_OUTER_POUNDS_TESTING = 3;
 
 	public static boolean isBedrockTestingEnabled(CompoundTag nbt) {
 		if (nbt != null && nbt.contains("verdant_bedrock_testing_mode")) {
@@ -450,29 +450,8 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		return false;
 	}
 
-	private static boolean isEpicenterBlockedCached(ServerLevel level, CompoundTag nbt, double cx, double gy, double cz, double verdantY) {
-		if (nbt == null) return isEpicenterBlockedByIndestructibleBarrier(level, cx, gy, cz, verdantY);
-		long gameTime = level.getGameTime();
-		if (persistentLong(nbt, "verdant_barrier_check_tick", Long.MIN_VALUE) == gameTime
-				&& Double.compare(persistentDouble(nbt, "verdant_barrier_check_x", Double.NaN), cx) == 0
-				&& Double.compare(persistentDouble(nbt, "verdant_barrier_check_ground_y", Double.NaN), gy) == 0
-				&& Double.compare(persistentDouble(nbt, "verdant_barrier_check_z", Double.NaN), cz) == 0
-				&& Double.compare(persistentDouble(nbt, "verdant_barrier_check_engine_y", Double.NaN), verdantY) == 0) {
-			return persistentBoolean(nbt, "verdant_barrier_check_result", false);
-		}
-		boolean blocked = isEpicenterBlockedByIndestructibleBarrier(level, cx, gy, cz, verdantY);
-		nbt.putLong("verdant_barrier_check_tick", gameTime);
-		nbt.putDouble("verdant_barrier_check_x", cx);
-		nbt.putDouble("verdant_barrier_check_ground_y", gy);
-		nbt.putDouble("verdant_barrier_check_z", cz);
-		nbt.putDouble("verdant_barrier_check_engine_y", verdantY);
-		nbt.putBoolean("verdant_barrier_check_result", blocked);
-		return blocked;
-	}
-
 	private static final ResourceLocation VERDANT_BEAM_GRAV_MOD_ID = ResourceLocation.parse("the_backwoods:verdant_beam_gravity");
 	private static final Map<UUID, Long> GRAVITY_MODIFIED_ENTITIES = new ConcurrentHashMap<>();
-	private static final Map<Class<?>, Boolean> SUSPECTED_PROJECTILE_CLASSES = new ConcurrentHashMap<>();
 
 	public static double getGravityBeamEffectRadius(CompoundTag nbt) {
 		return GRAVITY_BEAM_EFFECT_RADIUS;
@@ -681,14 +660,12 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 	private static void syncHiveCompletedRegionsToMembers(ServerLevel level, VerdantHiveState hiveState) {
 		if (level == null || hiveState == null) return;
-		int completedRegionCount = countCompletedHiveRegionsInsideBorder(level, hiveState);
 		for (UUID memberUuid : hiveState.members.keySet()) {
 			Entity member = level.getEntity(memberUuid);
 			if (member == null) continue;
 			CompoundTag memberNbt = member.getPersistentData();
 			syncHiveCompletedRegions(memberNbt, hiveState);
-			memberNbt.putInt("verdant_hive_completed_region_count", completedRegionCount);
-			memberNbt.putLong("verdant_hive_last_sync_tick", level.getGameTime());
+			memberNbt.putInt("verdant_hive_completed_region_count", countCompletedHiveRegionsInsideBorder(level, hiveState));
 		}
 	}
 
@@ -993,13 +970,8 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 			nbt.putDouble("verdant_hive_border_max_x", hiveState.lastBorderMaxX);
 			nbt.putDouble("verdant_hive_border_min_z", hiveState.lastBorderMinZ);
 			nbt.putDouble("verdant_hive_border_max_z", hiveState.lastBorderMaxZ);
-			long lastHiveSyncTick = persistentLong(nbt, "verdant_hive_last_sync_tick", Long.MIN_VALUE);
-			if (lastHiveSyncTick == Long.MIN_VALUE || currentTick - lastHiveSyncTick >= 20L
-					|| persistentLongArray(nbt, "verdant_hive_completed_regions").length != hiveState.completedRegions.size()) {
-				syncHiveCompletedRegions(nbt, hiveState);
-				nbt.putInt("verdant_hive_completed_region_count", countCompletedHiveRegionsInsideBorder(level, hiveState));
-				nbt.putLong("verdant_hive_last_sync_tick", currentTick);
-			}
+			syncHiveCompletedRegions(nbt, hiveState);
+			nbt.putInt("verdant_hive_completed_region_count", countCompletedHiveRegionsInsideBorder(level, hiveState));
 			return hiveState;
 		}
 	}
@@ -1711,7 +1683,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		if (nbt.getLong("verdant_last_game_tick") == gameTime) return;
 		nbt.putLong("verdant_last_game_tick", gameTime);
 
-		if ((gameTime & 7L) == (entity.getId() & 7)) cleanseNegativeEffects(entity);
+		cleanseNegativeEffects(entity);
 
 		if (!nbt.getBoolean("verdant_initialized")) {
 			setupInitialSpawnData(level, entity, nbt);
@@ -2554,26 +2526,6 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		}
 	}
 
-	private static boolean isShootingStarDamage(DamageSource ds) {
-		if (ds == null) return false;
-		try {
-			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
-				String typeId = ds.typeHolder().unwrapKey().get().location().toString().toLowerCase();
-				if (typeId.equals("shooting_star_demo:shooting_star") || typeId.equals("shooting_star_demo:shooting_star_hit")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		String msgId = ds.getMsgId();
-		if (msgId != null) {
-			String lower = msgId.toLowerCase();
-			return lower.equals("shooting_star_demo:shooting_star") || lower.equals("shooting_star_demo:shooting_star_hit")
-				|| lower.equals("shooting_star_demo.shooting_star") || lower.equals("shooting_star_demo.shooting_star_hit")
-				|| lower.equals("shooting_star") || lower.equals("shooting_star_hit");
-		}
-		return false;
-	}
-
 	@SubscribeEvent(priority = EventPriority.HIGHEST)
 	public static void onLivingDamage(LivingDamageEvent.Pre event) {
 		Entity entity = event.getEntity();
@@ -2605,7 +2557,8 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 			boolean isSupercharged = persistentBoolean(entity.getPersistentData(), "verdant_supercharged_mode", false);
 			boolean isAbsorbing = persistentBoolean(entity.getPersistentData(), "verdant_railgun_absorbing", false);
-			boolean isRailgun = isShootingStarDamage(ds);
+			String msgId = ds != null && ds.getMsgId() != null ? ds.getMsgId().toLowerCase() : "";
+			boolean isRailgun = msgId.contains("railgun") || msgId.contains("star") || msgId.contains("shooting") || event.getNewDamage() >= 300.0F;
 
 			if (!isSupercharged && (isRailgun || isAbsorbing)) {
 				event.setNewDamage(0.0F);
@@ -2664,7 +2617,8 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 			boolean isSupercharged = persistentBoolean(entity.getPersistentData(), "verdant_supercharged_mode", false);
 			boolean isAbsorbing = persistentBoolean(entity.getPersistentData(), "verdant_railgun_absorbing", false);
-			boolean isRailgun = isShootingStarDamage(ds);
+			String msgId = ds != null && ds.getMsgId() != null ? ds.getMsgId().toLowerCase() : "";
+			boolean isRailgun = msgId.contains("railgun") || msgId.contains("star") || msgId.contains("shooting") || event.getAmount() >= 300.0F;
 
 			if (isSupercharged && isRailgun) {
 				event.setAmount(0.0F);
@@ -2732,7 +2686,8 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 			boolean isSupercharged = persistentBoolean(entity.getPersistentData(), "verdant_supercharged_mode", false);
 			boolean isAbsorbing = persistentBoolean(entity.getPersistentData(), "verdant_railgun_absorbing", false);
-			boolean isRailgun = isShootingStarDamage(ds);
+			String msgId = ds != null && ds.getMsgId() != null ? ds.getMsgId().toLowerCase() : "";
+			boolean isRailgun = msgId.contains("railgun") || msgId.contains("star") || msgId.contains("shooting");
 
 			if (isSupercharged && isRailgun) {
 				event.setCanceled(true);
@@ -2863,15 +2818,12 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		private final Map<Long, Long> completedColumns = new ConcurrentHashMap<>();
 		private long lastCleanupTick = Long.MIN_VALUE;
 		private long lastColumnCleanupTick = Long.MIN_VALUE;
-		private long activeEngineCountTick = Long.MIN_VALUE;
-		private int activeEngineCount = 1;
-		private long lastGravityCleanupTick = Long.MIN_VALUE;
 	}
 
 	private static final class GravityFieldCache {
 		private ResourceLocation dimension;
 		private long lastQueryTick = Long.MIN_VALUE;
-		private final List<Entity> entities = new ArrayList<>();
+		private final List<UUID> entityUuids = new ArrayList<>();
 	}
 
 	private static final Map<ServerLevel, TerraformWorkCoordinator> TERRAFORM_COORDINATORS =
@@ -2929,18 +2881,22 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		if (dimensionChanged || cache.lastQueryTick == Long.MIN_VALUE || scheduledRefresh || elapsed >= GRAVITY_FIELD_ENTITY_QUERY_FAILSAFE_TICKS) {
 			cache.dimension = level.dimension().location();
 			cache.lastQueryTick = gameTime;
-			cache.entities.clear();
-			cache.entities.addAll(level.getEntitiesOfClass(Entity.class, queryBox, e -> e != engine && e.isAlive()));
+			cache.entityUuids.clear();
+			for (Entity nearby : level.getEntitiesOfClass(Entity.class, queryBox, e -> e != engine && e.isAlive())) {
+				cache.entityUuids.add(nearby.getUUID());
+			}
 		}
-		cache.entities.removeIf(cachedEntity -> !cachedEntity.isAlive() || cachedEntity.level() != level || cachedEntity == engine);
-		return cache.entities;
+		List<Entity> cachedEntities = new ArrayList<>(cache.entityUuids.size());
+		for (UUID entityUuid : cache.entityUuids) {
+			Entity cachedEntity = level.getEntity(entityUuid);
+			if (cachedEntity != null && cachedEntity.isAlive() && cachedEntity != engine) cachedEntities.add(cachedEntity);
+		}
+		return cachedEntities;
 	}
 
 	private static int getActiveTerraformingEngineCount(ServerLevel level) {
 		if (level == null) return 1;
 		long gameTime = level.getGameTime();
-		TerraformWorkCoordinator coordinator = getTerraformCoordinator(level);
-		if (coordinator.activeEngineCountTick == gameTime) return coordinator.activeEngineCount;
 		ResourceLocation dimension = level.dimension().location();
 		int activeCount = 0;
 		for (Map.Entry<UUID, ActiveVerdantCore> entry : ACTIVE_CORES.entrySet()) {
@@ -2953,9 +2909,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 			Entity activeEntity = level.getEntity(entry.getKey());
 			if (age <= 40L && core.dimension.equals(dimension) && activeEntity != null && activeEntity.isAlive()) activeCount++;
 		}
-		coordinator.activeEngineCount = Math.max(1, activeCount);
-		coordinator.activeEngineCountTick = gameTime;
-		return coordinator.activeEngineCount;
+		return Math.max(1, activeCount);
 	}
 
 	private static int claimTerraformingSampleBudget(CompoundTag nbt, String debtKey,
@@ -4976,16 +4930,14 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 	}
 
 	private static boolean isSuspectedProjectile(Entity e) {
-		return SUSPECTED_PROJECTILE_CLASSES.computeIfAbsent(e.getClass(), projectileClass -> {
-			String n = projectileClass.getSimpleName().toLowerCase(java.util.Locale.ROOT);
-			return n.contains("bullet") || n.contains("projectile") || n.contains("ammo");
-		});
+		String n = e.getClass().getSimpleName().toLowerCase();
+		return n.contains("bullet") || n.contains("projectile") || n.contains("ammo");
 	}
 
 	private static void handleGravityDistortionAndProjectiles(ServerLevel level, Entity engine, Vec3 core, double groundY, double gravR, int cycle, boolean isTerraforming) {
 		double lockedY = engine != null ? persistentDouble(engine.getPersistentData(), "verdant_locked_y", core.y) : core.y;
 		boolean isCeiled = isCeiledDimension(level);
-		boolean isBedrockMode = isCeiled && isEpicenterBlockedCached(level, engine != null ? engine.getPersistentData() : null, core.x, groundY, core.z, lockedY);
+		boolean isBedrockMode = isCeiled && isEpicenterBlockedByIndestructibleBarrier(level, core.x, groundY, core.z, lockedY);
 
 		for (ServerPlayer sp : level.players()) {
 			if (sp.isCreative() || sp.isSpectator()) continue;
@@ -5318,20 +5270,18 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		}
 
 		long now = level.getGameTime();
-		TerraformWorkCoordinator coordinator = getTerraformCoordinator(level);
-		if (coordinator.lastGravityCleanupTick != now) {
-			coordinator.lastGravityCleanupTick = now;
-			for (java.util.Map.Entry<UUID, Long> entry : GRAVITY_MODIFIED_ENTITIES.entrySet()) {
-				if (entry.getValue() < now) {
-					Entity tracked = level.getEntity(entry.getKey());
-					if (tracked instanceof LivingEntity living) {
-						try {
-							var attr = living.getAttribute(Attributes.GRAVITY);
-							if (attr != null) attr.removeModifier(VERDANT_BEAM_GRAV_MOD_ID);
-						} catch (Throwable ignored) {}
-					}
-					GRAVITY_MODIFIED_ENTITIES.remove(entry.getKey(), entry.getValue());
+		for (java.util.Map.Entry<UUID, Long> entry : GRAVITY_MODIFIED_ENTITIES.entrySet()) {
+			if (entry.getValue() < now) {
+				Entity tracked = level.getEntity(entry.getKey());
+				if (tracked instanceof LivingEntity living) {
+					try {
+						var attr = living.getAttribute(Attributes.GRAVITY);
+						if (attr != null) {
+							attr.removeModifier(VERDANT_BEAM_GRAV_MOD_ID);
+						}
+					} catch (Throwable ignored) {}
 				}
+				GRAVITY_MODIFIED_ENTITIES.remove(entry.getKey());
 			}
 		}
 	}
@@ -5545,7 +5495,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		double lockedY = engine.getPersistentData().getDouble("verdant_locked_y");
 		if (lockedY <= 0) lockedY = gy + getHoverTargetAltitude(nbt);
 
-		boolean isBedrockMode = isCeiledDimension(level) && isEpicenterBlockedCached(level, nbt, ix, gy, iz, lockedY);
+		boolean isBedrockMode = isCeiledDimension(level) && isEpicenterBlockedByIndestructibleBarrier(level, ix, gy, iz, lockedY);
 
 		float soundVol = isBedrockMode ? 16.0F : 12.0F;
 		float soundPitch = isBedrockMode ? 0.005F : 0.01F;
@@ -5571,9 +5521,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 		double maxY = lockedY + 32.0;
 		AABB poundArea = new AABB(ix - poundR, gy - 12.0, iz - poundR, ix + poundR, maxY, iz + poundR);
-		List<Entity> poundEntities = level.getEntitiesOfClass(Entity.class, poundArea, e -> e != engine && e.isAlive());
-		for (Entity p : poundEntities) {
-			if (!(p instanceof Projectile) && !isSuspectedProjectile(p)) continue;
+		for (Entity p : level.getEntitiesOfClass(Entity.class, poundArea, e -> e instanceof Projectile || e.getClass().getSimpleName().toLowerCase().contains("bullet") || e.getClass().getSimpleName().toLowerCase().contains("projectile") || e.getClass().getSimpleName().toLowerCase().contains("ammo"))) {
 			if (p.isAlive() && p != engine) {
 				p.setNoGravity(false);
 				p.setDeltaMovement(p.getDeltaMovement().x * 0.05, -12.0, p.getDeltaMovement().z * 0.05);
@@ -5584,7 +5532,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 		float slamDmg = PLANETARY_POUND_BASE_DAMAGE + (poundCount * PLANETARY_POUND_PER_POUND_DAMAGE);
 
 		java.util.List<Long> hitIds = new java.util.ArrayList<>();
-		for (Entity victim : poundEntities) {
+		for (Entity victim : level.getEntitiesOfClass(Entity.class, poundArea, e -> e != engine && e.isAlive())) {
 			if (victim instanceof Player p && (p.isCreative() || p.isSpectator())) continue;
 			if (isWoodbound(victim) || isVerdantEngine(victim)) continue;
 
@@ -5686,7 +5634,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 
 		if (terraform) {
 			boolean hasCeiling = isCeiledDimension(level);
-			boolean epicenterBlocked = hasCeiling && isEpicenterBlockedCached(level, nbt, ix, gy, iz, lockedY);
+			boolean epicenterBlocked = hasCeiling && isEpicenterBlockedByIndestructibleBarrier(level, ix, gy, iz, lockedY);
 
 			if (!epicenterBlocked) {
 				nbt.putDouble("verdant_burst_target_radius", Math.min(getMaxInfectionRadius(nbt), persistentDouble(nbt, "verdant_infection_radius", BEAM_RADIUS + 0.5) + 32.0 + (poundCount * 14.0)));
@@ -6126,7 +6074,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 	private static void performContinuousBeamTipInfection(ServerLevel level, CompoundTag nbt, double cx, double gy, double cz, int cycle, int pounds) {
 		boolean hasCeiling = isCeiledDimension(level);
 		double lockedY = persistentDouble(nbt, "verdant_locked_y", gy + getHoverTargetAltitude(nbt));
-		if (hasCeiling && isEpicenterBlockedCached(level, nbt, cx, gy, cz, lockedY)) {
+		if (hasCeiling && isEpicenterBlockedByIndestructibleBarrier(level, cx, gy, cz, lockedY)) {
 			return;
 		}
 
@@ -6190,7 +6138,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 	private static void performContinuousSolidRadialWoodInfection(ServerLevel level, Entity entity, CompoundTag nbt, double cx, double gy, double cz, int pounds) {
 		boolean hasCeiling = isCeiledDimension(level);
 		double lockedY = persistentDouble(nbt, "verdant_locked_y", gy + getHoverTargetAltitude(nbt));
-		boolean epicenterBlocked = hasCeiling && isEpicenterBlockedCached(level, nbt, cx, gy, cz, lockedY);
+		boolean epicenterBlocked = hasCeiling && isEpicenterBlockedByIndestructibleBarrier(level, cx, gy, cz, lockedY);
 		if (epicenterBlocked) {
 			nbt.putDouble("verdant_infection_radius", BEAM_RADIUS + 0.5);
 			nbt.putDouble("verdant_burst_target_radius", 0.0);
@@ -6351,7 +6299,7 @@ private static final int SUPERCHARGED_BURST_DEBT_CAP = 600 * 16;
 	private static void handleBurstInfectionSpill(ServerLevel level, Entity entity, CompoundTag nbt, double cx, double gy, double cz, int pounds) {
 		boolean hasCeiling = isCeiledDimension(level);
 		double lockedY = persistentDouble(nbt, "verdant_locked_y", gy + getHoverTargetAltitude(nbt));
-		boolean epicenterBlocked = hasCeiling && isEpicenterBlockedCached(level, nbt, cx, gy, cz, lockedY);
+		boolean epicenterBlocked = hasCeiling && isEpicenterBlockedByIndestructibleBarrier(level, cx, gy, cz, lockedY);
 		if (epicenterBlocked) return;
 
 		boolean supercharged = persistentBoolean(nbt, "verdant_supercharged_mode", false);

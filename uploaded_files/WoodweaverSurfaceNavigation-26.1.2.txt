@@ -1,0 +1,968 @@
+package net.mcreator.thebackwoods;
+
+import java.util.*;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.network.RegistryFriendlyByteBuf;
+import net.minecraft.network.codec.StreamCodec;
+import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.tags.BlockTags;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
+import net.minecraft.world.phys.Vec3;
+import net.mcreator.thebackwoods.entity.WoodweaverEntity;
+import net.mcreator.thebackwoods.procedures.WoodweaverOnEntityTickUpdateProcedure;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.EntityLeaveLevelEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerEvent;
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
+import net.neoforged.neoforge.network.PacketDistributor;
+import net.neoforged.neoforge.network.event.RegisterPayloadHandlersEvent;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+
+/** Server-owned, incremental surface navigation. No entity element lock or chunk forcing. */
+@EventBusSubscriber(modid = "the_backwoods")
+public final class WoodweaverSurfaceNavigation {
+    public static final boolean ENABLE_SURFACE_NAVIGATION = true;
+    public static final boolean ENABLE_WALLS = true, ENABLE_CEILINGS = true, ENABLE_NARROW_BRIDGES = true;
+    public static final boolean BREAK_ROUTE_OBSTRUCTIONS = true, RESPECT_MOB_GRIEFING = true;
+    public static final double SPEED = 0.370, ROOT_HEIGHT = 2.65, WALL_STANDOFF = 2.68, CEILING_STANDOFF = 3.48;
+    public static final int NODES_PER_ENTITY_TICK = 48, MAX_SEARCH_NODES = 1024, REPLAN_TICKS = 5;
+    public static final int GLOBAL_NODE_BUDGET = 144, GLOBAL_BLOCK_BUDGET = 20000, GLOBAL_BREAK_BUDGET = 12;
+    public static final int BREAKS_PER_ENTITY_TICK = 3;
+    public static final float ROTATION_DEGREES_PER_TICK = 18.0f;
+    private static final Vec3 UP = new Vec3(0, 1, 0);
+    private static final Map<Mob, Controller> STATES = new WeakHashMap<>();
+    private static int budgetTick = Integer.MIN_VALUE, nodesLeft, blocksLeft, breaksLeft;
+    private static long deadline, nanosLeft;
+    // Live route checks must not be starved by another entity's path search.
+    private static int movementBlocksLeft = -1;
+
+    private record Key(BlockPos cell, Direction face) {}
+    private record Node(Key key, Vec3 position, BlockPos support, int obstructionCost) {}
+    private record Entry(Node node, double cost, double score) {}
+    private static final class Search {
+        final PriorityQueue<Entry> open = new PriorityQueue<>(Comparator.comparingDouble(Entry::score));
+        final Map<Key, Double> costs = new HashMap<>();
+        final Map<Key, Node> known = new HashMap<>();
+        final Map<Key, Key> parents = new HashMap<>();
+        final Map<Key, Integer> candidateCursor = new HashMap<>();
+        final Vec3 goal;
+        boolean exhausted, limited;
+        Search(Node start, Vec3 goal) {
+            this.goal = goal;
+            open.add(new Entry(start, 0, start.position.distanceTo(goal)));
+            costs.put(start.key, 0.0); known.put(start.key, start);
+        }
+    }
+    private static final class Controller {
+        boolean owns, oldNoAi, oldNoGravity, waitingLeap;
+        int searchStartedTick, failedSearches;
+        int tick = -1, lastPacket = -100, retryAt, stuck, waitStarted, idleTicks;
+        Node current;
+        final Map<Key, Failure> failures = new LinkedHashMap<>();
+        Vec3 combatAnchor;
+        Key supportedKey;
+        int supportsAt = -100;
+        Set<BlockPos> cachedSupports = Set.of();
+        final Deque<Node> route = new ArrayDeque<>();
+        Search search;
+        Vec3 previousPosition = Vec3.ZERO;
+        final Quaternionf rotation = new Quaternionf();
+        Vec3 orientationNormal;
+        int orientationAt = -100;
+        double standoff = ROOT_HEIGHT;
+        Key sensedTransition, committedTransition;
+        int sensedAt = -100, candidateSince = -1, transitionSeenAt, lastFaceSwitch = -100;
+        double currentConfidence, nextConfidence;
+    }
+
+    private record Failure(int until, BlockPos support, BlockState block, BlockPos goal) {}
+    public record Capabilities(double speed, double health, double armor, double width, double height, double reach) {}
+    public static Capabilities capabilities(Mob mob) {
+        return new Capabilities(Math.max(0.01, mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED)),
+            mob.getHealth() / Math.max(1, mob.getMaxHealth()), mob.getArmorValue(), mob.getBbWidth(), mob.getBbHeight(), 5.8);
+    }
+    public static float attackYaw(Mob mob, net.minecraft.world.entity.LivingEntity target, float fallback) {
+        if (!controlling(mob) || target == null) return fallback;
+        Vec3 delta = target.getBoundingBox().getCenter().subtract(mob.position().add(0, ROOT_HEIGHT, 0));
+        Vector3f local = new Vector3f((float) delta.x, (float) delta.y, (float) delta.z);
+        rotation(mob, 1).conjugate().transform(local);
+        return local.x * local.x + local.z * local.z < 0.0001 ? fallback
+            : (float) Math.toDegrees(Math.atan2(local.z, local.x)) - 90;
+    }
+    public static Vec3 attackPoint(Mob mob, Vec3 uprightPoint) {
+        if (!controlling(mob)) return uprightPoint;
+        Vec3 pivot = mob.position().add(0, ROOT_HEIGHT, 0), offset = uprightPoint.subtract(pivot);
+        Vector3f local = new Vector3f((float) offset.x, (float) offset.y, (float) offset.z);
+        rotation(mob, 1).transform(local);
+        return pivot.add(local.x, local.y, local.z);
+    }
+    public static Vec3 combatOrigin(Mob mob) {
+        if (!controlling(mob)) return mob.getEyePosition(1.0F);
+        return mob.position().add(0, ROOT_HEIGHT, 0).add(
+            WeaverFrame.offset(rotation(mob, 1), mob.yBodyRot, 0, 1.55, -1.9));
+    }
+
+    public static boolean hasCombatSight(Mob mob, net.minecraft.world.entity.LivingEntity target) {
+        if (target == null || !target.isAlive()) return false;
+        if (!controlling(mob)) return mob.getSensing().hasLineOfSight(target);
+        Vec3 start = combatOrigin(mob), end = target.getEyePosition(1.0F);
+        if (!loadedBox(mob.level(), new AABB(start, end).inflate(0.01))) return false;
+        return clipLoaded(mob.level(), mob, start, end) == null;
+    }
+
+    public static boolean combatActive(Mob mob) {
+        var data = mob.getPersistentData();
+        return data.getBooleanOr("is_attacking", false) || data.getIntOr("hypno_phase", 0) > 0 || data.getIntOr("weapon_flash_phase", 0) > 0
+            || data.getIntOr("weapon_post_fatigue_ticks", 0) > 0;
+    }
+    private static void rememberFailure(Mob mob, Controller state, Node next) {
+        if (next == null || !mob.level().hasChunkAt(next.support)) return;
+        if (state.failures.size() >= 128) state.failures.remove(state.failures.keySet().iterator().next());
+        state.failures.put(next.key, new Failure(mob.tickCount + 100, next.support,
+            mob.level().getBlockState(next.support), mob.getTarget().blockPosition()));
+    }
+    private static boolean failed(Mob mob, Key key) {
+        Controller state = STATES.get(mob);
+        if (state == null) return false;
+        Failure failure = state.failures.get(key);
+        if (failure == null) return false;
+        if (mob.tickCount >= failure.until || !mob.level().hasChunkAt(failure.support)
+            || mob.level().getBlockState(failure.support) != failure.block
+            || mob.getTarget().blockPosition().distSqr(failure.goal) > 16) {
+            state.failures.remove(key); return false;
+        }
+        return true;
+    }
+    /** Collision-shape sweep using the launch equations used by the combat procedure. */
+    public static boolean validLeap(Mob mob, Vec3 landing) {
+        if (!Double.isFinite(landing.x + landing.y + landing.z)) return false;
+        Capabilities body = capabilities(mob);
+        AABB destination = mob.getBoundingBox().move(landing.subtract(mob.position())).deflate(0.03);
+        if (!loadedBox(mob.level(), destination) || !mob.level().noCollision(mob, destination)) return false;
+        BlockHitResult floor = clipLoaded(mob.level(), mob, landing.add(0, 0.2, 0), landing.add(0, -0.3, 0));
+        if (floor == null || floor.getDirection() != Direction.UP) return false;
+        Vec3 offset = landing.subtract(mob.position()); double horizontal = Math.max(0.1, offset.horizontalDistance());
+        double ticks = Mth.clamp(12 + horizontal * 0.7, 16, 26);
+        double speed = WoodweaverOnEntityTickUpdateProcedure.horizontalLeapSpeed(horizontal, offset.y, ticks);
+        if (!Double.isFinite(speed) || speed > body.speed * 8) return false;
+        Vec3 velocity = new Vec3(offset.x / horizontal * speed,
+            Mth.clamp(0.04 * ticks + offset.y / ticks + WoodweaverOnEntityTickUpdateProcedure.LEAP_HEIGHT_BOOST * 0.48, 0.65, 1.85),
+            offset.z / horizontal * speed);
+        Node landingNode = new Node(new Key(BlockPos.containing(landing), Direction.UP), landing, floor.getBlockPos(), 0);
+        if (supports(mob, landingNode).size() < 3) return false;
+        Vec3 position = mob.position();
+        for (int tick = 0; tick < 64; tick++) {
+            Vec3 next = position.add(velocity);
+            // Only accept contact with the selected floor on descent, never a wall collision.
+            if (velocity.y < 0 && next.y <= landing.y + 0.08 && position.y >= landing.y - 0.08) {
+                double fraction = Mth.clamp((position.y - landing.y) / Math.max(0.0001, position.y - next.y), 0, 1);
+                Vec3 touch = position.lerp(next, fraction);
+                if (touch.subtract(landing).horizontalDistanceSqr() > Math.pow(Math.max(0.75, body.width * 0.5), 2)) return false;
+                next = touch.add(0, 0.04, 0);
+                AABB sweep = mob.getBoundingBox().move(position.subtract(mob.position()))
+                    .minmax(mob.getBoundingBox().move(next.subtract(mob.position()))).deflate(0.03);
+                return loadedBox(mob.level(), sweep) && mob.level().noCollision(mob, sweep);
+            }
+            AABB sweep = mob.getBoundingBox().move(position.subtract(mob.position()))
+                .minmax(mob.getBoundingBox().move(next.subtract(mob.position()))).deflate(0.03);
+            if (!loadedBox(mob.level(), sweep) || !mob.level().noCollision(mob, sweep)) return false;
+            position = next; velocity = new Vec3(velocity.x * 0.91, (velocity.y - 0.08) * 0.98, velocity.z * 0.91);
+        }
+        return false;
+    }
+
+    private static void budget(ServerLevel level) {
+        int tick = level.getServer().getTickCount();
+        if (tick != budgetTick) {
+            budgetTick = tick; nodesLeft = GLOBAL_NODE_BUDGET; blocksLeft = GLOBAL_BLOCK_BUDGET;
+            breaksLeft = GLOBAL_BREAK_BUDGET; nanosLeft = 3_000_000L;
+        }
+        deadline = System.nanoTime() + nanosLeft;
+    }
+    private static boolean timeLeft() {
+        return movementBlocksLeft >= 0 ? movementBlocksLeft > 0
+            : blocksLeft > 0 && System.nanoTime() < deadline;
+    }
+    public static Vec3 normal(Direction face) { return new Vec3(face.getStepX(), face.getStepY(), face.getStepZ()); }
+    public static double standoff(Direction face) {
+        return face == Direction.DOWN ? CEILING_STANDOFF : face == Direction.UP ? ROOT_HEIGHT : WALL_STANDOFF;
+    }
+
+    /** A ray never reads an unloaded column, even when it crosses a chunk corner. */
+    public static BlockHitResult clipLoaded(Level level, Entity entity, Vec3 from, Vec3 to) {
+        int x0 = Mth.floor(Math.min(from.x, to.x)) >> 4, x1 = Mth.floor(Math.max(from.x, to.x)) >> 4;
+        int z0 = Mth.floor(Math.min(from.z, to.z)) >> 4, z1 = Mth.floor(Math.max(from.z, to.z)) >> 4;
+        if (x1 - x0 > 2 || z1 - z0 > 2) return null;
+        for (int x = x0; x <= x1; x++) for (int z = z0; z <= z1; z++)
+            if (!level.hasChunkAt(new BlockPos(x << 4, Mth.floor(from.y), z << 4))) return null;
+        BlockHitResult hit = level.clip(new ClipContext(from, to, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, entity));
+        return hit.getType() == HitResult.Type.MISS ? null : hit;
+    }
+
+    public static boolean controlling(Mob mob) {
+        Controller state = STATES.get(mob);
+        return state != null && state.owns;
+    }
+    /** Prefer a viable climbing attempt before using a combat leap to reach an elevated target. */
+    public static boolean preferClimbing(Mob mob) {
+        if (!ENABLE_SURFACE_NAVIGATION || mob.getTarget() == null || !mob.getTarget().isAlive()) return false;
+        Vec3 normal = supportNormal(mob, Direction.UP);
+        boolean onSlope = normal != null && normal.y < 0.95;
+        if (!onSlope && mob.getTarget().getY() <= mob.getY() + 3 && !mob.horizontalCollision) return false;
+        Controller state = STATES.get(mob);
+        if (state == null) return true;
+        if (state.waitingLeap || state.failedSearches >= 2) return false;
+        if (state.owns && !state.route.isEmpty()) return true;
+        return mob.tickCount - state.searchStartedTick < 80 || state.owns && state.idleTicks < 80;
+    }
+
+    public static void recoverSavedState(Mob mob) {
+        if (mob.level().isClientSide()) return;
+        var tag = mob.getPersistentData();
+        if (tag.getBooleanOr("weaver_surface_owned", false) && !controlling(mob)) {
+            mob.setNoAi(tag.getBooleanOr("weaver_surface_old_no_ai", false));
+            mob.setNoGravity(tag.getBooleanOr("weaver_surface_old_no_gravity", false));
+            tag.remove("weaver_surface_owned"); tag.remove("weaver_surface_old_no_ai"); tag.remove("weaver_surface_old_no_gravity");
+        }
+    }
+
+    public static boolean tick(Mob mob) {
+        if (!(mob.level() instanceof ServerLevel level)) return false;
+        recoverSavedState(mob);
+        budget(level);
+        long start = System.nanoTime();
+        try { return tickWithinBudget(mob); }
+        finally {
+            movementBlocksLeft = -1;
+            nanosLeft = Math.max(0, nanosLeft - (System.nanoTime() - start));
+        }
+    }
+
+    private static boolean tickWithinBudget(Mob mob) {
+        if (!ENABLE_SURFACE_NAVIGATION || !(mob.level() instanceof ServerLevel level)) { cancel(mob); return false; }
+        Controller state = STATES.get(mob);
+        if (!mob.isAlive()) { cancel(mob); return false; }
+        if (state != null && state.owns && combatActive(mob)) {
+            if (state.current == null || !mob.level().hasChunkAt(state.current.support)
+                || mob.level().getBlockState(state.current.support).getCollisionShape(mob.level(), state.current.support).isEmpty()) { cancel(mob); return false; }
+            if (state.combatAnchor == null) state.combatAnchor = mob.position();
+            mob.setDeltaMovement(Vec3.ZERO); publish(mob, state, false); return false;
+        }
+        if (state != null) state.combatAnchor = null;
+        if (mob.getTarget() == null || !mob.getTarget().isAlive()) { cancel(mob); return false; }
+        if (state == null) {
+            if (mob.isNoAi() || mob.tickCount % 5 != 0 || !needsSurfaceRoute(mob)) return false;
+            state = new Controller(); state.searchStartedTick = mob.tickCount; STATES.put(mob, state);
+        }
+        if (state.tick == mob.tickCount) return state.owns && !state.waitingLeap;
+        state.tick = mob.tickCount;
+        var combatTag = mob.getPersistentData();
+        if (state.owns && combatTag.getIntOr("weapon_flash_phase", 0) > 0) {
+            mob.setDeltaMovement(Vec3.ZERO); publish(mob, state, false); return false;
+        }
+        budget(level);
+        var tag = mob.getPersistentData();
+        if (state.owns && tag.getBooleanOr("leap_requested", false) && !state.waitingLeap) {
+            state.waitingLeap = true; state.waitStarted = mob.tickCount;
+        }
+        if (state.waitingLeap) {
+            if (mob.tickCount - state.waitStarted > 65) { cancel(mob); return false; }
+            mob.getNavigation().stop();
+            return false; // The existing preparation/launch procedure owns its authored clock.
+        }
+        Vec3 goal = mob.getTarget().position();
+        // Run the existing ranged attack state machine while maintaining surface adhesion.
+        if (state.owns && tag.getIntOr("weapon_flash_phase", 0) > 0) {
+            mob.setDeltaMovement(Vec3.ZERO); publish(mob, state, false); return false;
+        }
+        if (state.owns && !state.waitingLeap) {
+            int leapCooldown = tag.getIntOr("leap_cooldown", 0);
+            if (leapCooldown > 0) tag.putInt("leap_cooldown", leapCooldown - 1);
+            int cooldown = tag.getIntOr("weapon_flash_cooldown", 0);
+            if (cooldown > 0) tag.putInt("weapon_flash_cooldown", cooldown - 1);
+            int catchCooldown = tag.getIntOr("weaver_catch_cooldown", 0);
+            if (catchCooldown > 0) tag.putInt("weaver_catch_cooldown", catchCooldown - 1);
+            int hypnoCooldown = tag.getIntOr("hypno_cooldown", 0);
+            if (hypnoCooldown > 0) tag.putInt("hypno_cooldown", hypnoCooldown - 1);
+            state.idleTicks++;
+            if (mob.tickCount % 5 == 0 && WoodweaverOnEntityTickUpdateProcedure.tryStartProjectileCatch(mob, tag)) {
+                state.combatAnchor = mob.position(); publish(mob, state, true); return false;
+            }
+            String action = WoodweaverOnEntityTickUpdateProcedure.chooseWeaverAction(mob, mob.getTarget());
+            if (mob.tickCount % 10 == 0 && mob.distanceToSqr(mob.getTarget()) <= 32 * 32) {
+                if (action.equals("MELEE") && hasCombatSight(mob, mob.getTarget())) {
+                    tag.putBoolean("is_attacking", true); tag.putBoolean("is_block_attack", false);
+                    tag.putBoolean("is_parrying", false); tag.putInt("attack_type", WoodweaverOnEntityTickUpdateProcedure.chooseTacticalClaw(mob, mob.getTarget(), tag));
+                    tag.putInt("attack_timer", WoodweaverOnEntityTickUpdateProcedure.MELEE_ATTACK_DURATION);
+                    tag.putFloat("attack_facing_yaw", mob.yBodyRot);
+                    state.combatAnchor = mob.position(); publish(mob, state, true); return false;
+                }
+                if (action.equals("HYPNO") && mob.getTarget() instanceof net.minecraft.world.entity.player.Player) {
+                    tag.putInt("hypno_phase", 1); tag.putInt("hypno_ticks", 0);
+                    tag.putString("hypno_mode", WoodweaverOnEntityTickUpdateProcedure.chooseHypnoMode(mob, tag, mob.getTarget())); tag.putInt("hypno_target_id", mob.getTarget().getId());
+                    tag.putString("hypno_target_ids", ""); tag.putInt("hypno_cooldown", 400);
+                    tag.putDouble("hypno_start_x", mob.getX()); tag.putDouble("hypno_start_y", mob.getY()); tag.putDouble("hypno_start_z", mob.getZ());
+                    state.combatAnchor = mob.position(); publish(mob, state, true); return false;
+                }
+                Vec3 landing = action.equals("LEAP") ? landingNear(mob, mob.getTarget().position()
+                    .add(mob.getTarget().getDeltaMovement().scale(6))) : null;
+                if (landing != null && validLeap(mob, landing) && tag.getIntOr("leap_cooldown", 0) <= 0
+                    && action.equals("LEAP") && !preferClimbing(mob)
+                    && state.route.isEmpty() && state.search == null && state.failedSearches >= 2 && state.idleTicks > 80) {
+                    tag.putBoolean("leap_requested", true);
+                    tag.putDouble("leap_requested_x", landing.x);
+                    tag.putDouble("leap_requested_y", landing.y);
+                    tag.putDouble("leap_requested_z", landing.z);
+                    state.waitingLeap = true; state.waitStarted = mob.tickCount;
+                    publish(mob, state, true); return false;
+                }
+                if (cooldown <= 0 && action.equals("FLASH") && hasCombatSight(mob, mob.getTarget())) {
+                    tag.putInt("weapon_flash_phase", 1); tag.putInt("weapon_flash_ticks", 0);
+                    tag.putInt("weapon_flash_cooldown", 400);
+                    tag.putBoolean("isWeaponClose", false);
+                    boolean fastCharge = mob.getRandom().nextBoolean();
+                    tag.putBoolean("isHypnotizing2", !fastCharge);
+                    tag.putBoolean("isHypnotizing3", fastCharge);
+                    tag.putBoolean("was_fast_flash", fastCharge);
+                    tag.putInt("weapon_flash_saved_target", mob.getTarget().getId());
+                    tag.putDouble("hypno_start_x", mob.getX());
+                    tag.putDouble("hypno_start_y", mob.getY());
+                    tag.putDouble("hypno_start_z", mob.getZ());
+                    publish(mob, state, true); return false;
+                }
+            }
+        }
+        // Combat decisions are independent of the traversal search budget.
+        if (!timeLeft() && (!state.owns || state.route.isEmpty())) {
+            if (state.owns) mob.setDeltaMovement(Vec3.ZERO);
+            return state.owns && !state.waitingLeap;
+        }
+        if (!state.owns && state.current != null && state.current.position.distanceToSqr(mob.position()) > 4) {
+            state.current = null; state.search = null; state.route.clear();
+        }
+        if (state.current == null && mob.tickCount < state.retryAt) return preferClimbing(mob);
+        if (state.current == null) {
+            state.current = findNode(mob, new Key(mob.blockPosition(), Direction.UP));
+            if (state.current == null) for (Direction face : Direction.values()) {
+                state.current = findNode(mob, new Key(mob.blockPosition(), face));
+                if (state.current != null) break;
+            }
+            if (state.current == null) {
+                if (!timeLeft()) { mob.getPersistentData().putString("weaver_plan_status", "BUDGET_LIMIT"); return preferClimbing(mob); }
+                state.failedSearches++; state.retryAt = mob.tickCount + REPLAN_TICKS;
+                return preferClimbing(mob);
+            }
+        }
+        if (state.search != null && state.search.goal.distanceToSqr(goal) > 64) state.search = null;
+        if (!state.route.isEmpty() && state.route.peekLast().position.distanceToSqr(goal) > 144) {
+            state.route.clear(); state.search = null; state.retryAt = mob.tickCount; // Repath immediately if target pearled/moved
+        }
+        if (state.route.isEmpty()) {
+            if (state.search == null && mob.tickCount >= state.retryAt) state.search = new Search(state.current, goal);
+            if (state.search != null) {
+                tag.putString("weaver_plan_status", "SEARCHING");
+                Deque<Node> found = advanceSearch(mob, state.search);
+                if (found != null) {
+                    state.route.addAll(found); state.search = null; state.failedSearches = 0;
+                    tag.putString("weaver_plan_status", "READY");
+                    if (!state.owns) {
+                        state.oldNoAi = mob.isNoAi(); state.oldNoGravity = mob.isNoGravity();
+                        state.owns = true;
+                        var lease = mob.getPersistentData();
+                        lease.putBoolean("weaver_surface_owned", true);
+                        lease.putBoolean("weaver_surface_old_no_ai", state.oldNoAi);
+                        lease.putBoolean("weaver_surface_old_no_gravity", state.oldNoGravity);
+                        mob.setNoAi(true); mob.setNoGravity(true);
+                    }
+                } else if (state.search.exhausted || state.search.limited) {
+                    tag.putString("weaver_plan_status", state.search.limited ? "BUDGET_LIMIT" : "BLOCKED");
+                    if (state.search.exhausted) state.failedSearches++;
+                    // Commit useful partial progress rather than holding the same wall forever.
+                    Node best = state.current;
+                    for (Node candidate : state.search.known.values())
+                        if (candidate.position.distanceToSqr(goal) + 4 < best.position.distanceToSqr(goal))
+                            best = candidate;
+                    if (state.owns && best != state.current) {
+                        Key key = best.key;
+                        while (key != null) {
+                            Node step = state.search.known.get(key);
+                            if (step == null) break;
+                            state.route.addFirst(step);
+                            key = state.search.parents.get(key);
+                        }
+                        if (!state.route.isEmpty() && state.route.peekFirst().key.equals(state.current.key))
+                            state.route.removeFirst();
+                    }
+                    state.search = null; state.retryAt = mob.tickCount + REPLAN_TICKS;
+                }
+            }
+            if (!state.owns) {
+                if (!preferClimbing(mob)) return false;
+                // Keep approaching the obstacle while bounded route search owns the action decision.
+                mob.getNavigation().moveTo(mob.getTarget(), 1.0);
+                return true;
+            }
+        }
+        // Bounded per follower, separate from the shared search deadline/block allowance.
+        // Support, clearance and transition checks still run before every movement.
+        movementBlocksLeft = 2048;
+        mob.getNavigation().stop(); mob.setNoGravity(true); mob.setNoAi(true); mob.fallDistance = 0;
+        Node next = state.route.peekFirst();
+        if (next == null) {
+            if (state.current != null && state.current.key.face == Direction.UP) {
+                cancel(mob);
+                return false;
+            }
+            mob.setDeltaMovement(Vec3.ZERO);
+            publish(mob, state, false);
+            return true; // Keep a valid grip while another bounded search runs.
+        }
+        // Lookahead pruning (adapted from Nyfs Spiders) so mob doesn't stutter on intermediate waypoints
+        while (state.route.size() > 1) {
+            Iterator<Node> it = state.route.iterator();
+            Node first = it.next();
+            Node second = it.next();
+            if (second.key.face == state.current.key.face && mob.position().distanceToSqr(second.position) < 1.3 * 1.3) {
+                state.current = first;
+                state.route.pollFirst();
+                next = second;
+            } else {
+                break;
+            }
+        }
+        if (next.position.distanceToSqr(mob.position()) > 64) {
+            state.route.clear(); state.search = null; state.current = null;
+            return true;
+        }
+        if (!next.key.equals(state.supportedKey) || mob.tickCount - state.supportsAt >= 5) {
+            state.cachedSupports = supports(mob, next);
+            state.supportedKey = next.key; state.supportsAt = mob.tickCount;
+        }
+        Set<BlockPos> supports = new HashSet<>(state.cachedSupports);
+        if (supports.size() < (ENABLE_NARROW_BRIDGES ? 1 : 2)) {
+            if (!mob.level().hasChunkAt(state.current.support)
+                || mob.level().getBlockState(state.current.support).getCollisionShape(mob.level(), state.current.support).isEmpty()) {
+                cancel(mob); return false;
+            }
+            state.route.clear(); state.search = null; state.retryAt = mob.tickCount + REPLAN_TICKS;
+            publish(mob, state, false); return true;
+        }
+        supports.add(state.current.support); supports.add(next.support);
+        AABB corridor = clearance(mob, next.position, next.key.face)
+            .minmax(clearance(mob, mob.position(), state.current.key.face));
+        int clear = inspect(mob, corridor, supports, true, next);
+        if (clear < 0 || clear > 0) {
+            if (clear == -1) { rememberFailure(mob, state, next); state.route.clear(); state.search = null; state.retryAt = mob.tickCount + REPLAN_TICKS; }
+            mob.setDeltaMovement(Vec3.ZERO); publish(mob, state, false); return true;
+        }
+        if (!prepareSurfaceTransition(mob, state, next)) {
+            if (!controlling(mob)) return false;
+            publish(mob, state, false);
+            return true;
+        }
+        Quaternionf wanted = new Quaternionf().rotationTo(0, 1, 0,
+            next.key.face.getStepX(), next.key.face.getStepY(), next.key.face.getStepZ());
+        // Adapt Nyf's separation of discrete path sides and collision-derived body orientation.
+        // The same quaternion is published to rendering, combat transforms and terrain IK.
+        if (mob.tickCount - state.orientationAt >= 3 || state.orientationNormal == null
+            || state.orientationNormal.dot(normal(next.key.face)) < 0.8) {
+            Vec3 measured = supportNormal(mob, next.key.face);
+            state.orientationNormal = measured != null ? measured : normal(next.key.face);
+            state.orientationAt = mob.tickCount;
+        }
+        Vec3 bodyUp = state.orientationNormal;
+        wanted.rotationTo(0, 1, 0, (float)bodyUp.x, (float)bodyUp.y, (float)bodyUp.z);
+        approachRotation(state.rotation, wanted, ROTATION_DEGREES_PER_TICK);
+        state.standoff += Mth.clamp(standoff(next.key.face) - state.standoff, -0.08, 0.08);
+        Vec3 movement = next.position.subtract(mob.position());
+        double distance = movement.length();
+        double speed = Math.max(0.01, mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        // Slow turns moderately rather than halting rotation at each surface transition.
+        float alignment = Math.abs(state.rotation.dot(new Quaternionf().rotationTo(0, 1, 0,
+            next.key.face.getStepX(), next.key.face.getStepY(), next.key.face.getStepZ())));
+        speed *= 0.75 + 0.25 * alignment;
+        Vec3 delta = distance > speed ? movement.scale(speed / distance) : movement;
+        mob.move(MoverType.SELF, delta);
+        mob.setDeltaMovement(Vec3.ZERO);
+        mob.setOnGround(next.key.face == Direction.UP);
+        faceMovement(mob, state.rotation, movement);
+        if (mob.position().distanceToSqr(state.previousPosition) < 0.0001 && distance > 0.25) state.stuck++;
+        else state.stuck = 0;
+        state.previousPosition = mob.position();
+        if (delta.lengthSqr() > 0.001 && state.stuck == 0) state.idleTicks = 0;
+        if (state.stuck > 60) { rememberFailure(mob, state, next); state.route.clear(); state.search = null; state.stuck = 0; }
+        float angularError = 1 - Math.abs(state.rotation.dot(wanted));
+        Iterator<Node> upcoming = state.route.iterator();
+        if (upcoming.hasNext()) upcoming.next();
+        boolean continuesOnSurface = upcoming.hasNext() && upcoming.next().key.face == next.key.face;
+        double horizontalDist = new Vec3(movement.x, 0, movement.z).length();
+        boolean arrived = (distance < 0.75 || (horizontalDist < 0.55 && Math.abs(movement.y) < 1.45))
+            && (angularError < 0.25 || continuesOnSurface || distance < 0.35);
+        if (arrived) {
+            if (state.current.key.face != next.key.face) {
+                state.lastFaceSwitch = mob.tickCount;
+                publish(mob, state, true);
+            }
+            state.current = next; state.route.pollFirst();
+            state.committedTransition = null; state.candidateSince = -1;
+            if (state.route.isEmpty() && next.position.distanceTo(goal) < 6.5) {
+                if (next.key.face == Direction.UP) { cancel(mob); return false; }
+                if (mob.getSensing().hasLineOfSight(mob.getTarget()) && mob.distanceToSqr(mob.getTarget()) <= 36) { publish(mob, state, false); return true; }
+                Vec3 landing = landingNear(mob, goal);
+                if (landing != null && validLeap(mob, landing)) {
+                    tag.putBoolean("leap_requested", true);
+                    tag.putDouble("leap_requested_x", landing.x); tag.putDouble("leap_requested_y", landing.y);
+                    tag.putDouble("leap_requested_z", landing.z);
+                    state.waitingLeap = true; state.waitStarted = mob.tickCount;
+                    publish(mob, state, true); return false;
+                }
+            }
+        }
+        publish(mob, state, false);
+        return true;
+    }
+
+    /** Probe contact coverage; route selection remains the sole authority over attachment faces. */
+    private static double surfaceConfidence(Mob mob, Node node) {
+        Vec3 n = normal(node.key.face);
+        Vec3 tangent = Math.abs(n.y) > 0.5 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0);
+        Vec3 across = n.cross(tangent);
+        Vec3 plane = node.position.add(0, ROOT_HEIGHT, 0).subtract(n.scale(standoff(node.key.face)));
+        double radius = Mth.clamp(mob.getBbWidth() * 0.45, 0.45, 1.1), score = 0;
+        for (int i = 0; i < 9; i++) {
+            if (!timeLeft()) return -1; // Unknown is never a request to fall back to world-up.
+            double angle = i * Math.PI / 4;
+            Vec3 offset = i == 8 ? Vec3.ZERO
+                : tangent.scale(Math.cos(angle) * radius).add(across.scale(Math.sin(angle) * radius));
+            Vec3 center = plane.add(offset);
+            Vec3 start = center.add(n.scale(1.2)), end = center.subtract(n.scale(1.2));
+            if (!loadedBox(mob.level(), new AABB(start, end).inflate(0.01))) return -1;
+            BlockHitResult hit = clipLoaded(mob.level(), mob, start, end);
+            if (hit != null && hit.getDirection() == node.key.face) score += i == 8 ? 2 : 1;
+        }
+        return score / 10;
+    }
+
+    private static boolean prepareSurfaceTransition(Mob mob, Controller state, Node next) {
+        if (state.current.key.face == next.key.face) return true;
+        if (next.key.equals(state.committedTransition)) return true;
+        boolean oldSupportLost = !mob.level().hasChunkAt(state.current.support)
+            || mob.level().getBlockState(state.current.support).getCollisionShape(mob.level(), state.current.support).isEmpty();
+        if (oldSupportLost && (!mob.level().hasChunkAt(next.support) || mob.level().getBlockState(next.support).getCollisionShape(mob.level(), next.support).isEmpty())) {
+            cancel(mob); return false;
+        }
+        state.committedTransition = next.key;
+        return true;
+    }
+
+    /** Fit nearby real contacts, retaining the route face when coverage is insufficient. */
+    private static Vec3 supportNormal(Mob mob, Direction face) {
+        Vec3 n = normal(face);
+        Vec3 x = Math.abs(n.y) > 0.5 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0);
+        Vec3 z = n.cross(x);
+        Vec3 plane = mob.position().add(0, ROOT_HEIGHT, 0).subtract(n.scale(standoff(face)));
+        double sx = 0, sz = 0, sh = 0, sxx = 0, szz = 0, sxz = 0, sxh = 0, szh = 0;
+        int count = 0;
+        for (int ix = -1; ix <= 1; ix++) for (int iz = -1; iz <= 1; iz++) {
+            Vec3 point = plane.add(x.scale(ix)).add(z.scale(iz));
+            Vec3 from = point.add(n.scale(2.5)), to = point.subtract(n.scale(4.8));
+            if (!loadedBox(mob.level(), new AABB(from, to).inflate(0.01))) return null;
+            BlockHitResult hit = clipLoaded(mob.level(), mob, from, to);
+            if (hit == null || hit.getDirection() != face) continue;
+            double h = hit.getLocation().subtract(plane).dot(n);
+            sx += ix; sz += iz; sh += h;
+            sxx += ix * ix; szz += iz * iz; sxz += ix * iz;
+            sxh += ix * h; szh += iz * h;
+            count++;
+        }
+        if (count < 3) return null;
+        double xx = sxx - sx * sx / count, zz = szz - sz * sz / count;
+        double xz = sxz - sx * sz / count;
+        double xh = sxh - sx * sh / count, zh = szh - sz * sh / count;
+        double determinant = xx * zz - xz * xz;
+        if (determinant < 0.0001) return null;
+        return supportNormal(n, x, z, (xh * zz - zh * xz) / determinant,
+            (zh * xx - xh * xz) / determinant);
+    }
+
+    private static Vec3 supportNormal(Vec3 n, Vec3 x, Vec3 z, double slopeX, double slopeZ) {
+        double slope = Math.sqrt(slopeX * slopeX + slopeZ * slopeZ);
+        double limit = Math.tan(Math.toRadians(80));
+        double scale = slope > limit ? limit / slope : 1;
+        return n.subtract(x.scale(slopeX * scale)).subtract(z.scale(slopeZ * scale)).normalize();
+    }
+
+    public static void approachRotation(Quaternionf from, Quaternionf to, float degrees) {
+        double dot = Math.min(1, Math.abs(from.dot(to)));
+        double angle = 2 * Math.acos(dot);
+        if (angle < 0.00001) from.set(to);
+        else {
+            float stepDegrees = Math.max(degrees, (float) Math.toDegrees(angle) * 0.35f);
+            from.slerp(to, (float) Math.min(1, Math.toRadians(stepDegrees) / angle)).normalize();
+        }
+    }
+    private static void faceMovement(Mob mob, Quaternionf rotation, Vec3 direction) {
+        if (direction.lengthSqr() < 0.0001) return;
+        Vector3f local = new Quaternionf(rotation).conjugate().transform(
+            new Vector3f((float) direction.x, (float) direction.y, (float) direction.z));
+        if (local.x * local.x + local.z * local.z < 0.00001) return;
+        float wanted = (float) Math.toDegrees(Math.atan2(-local.x, local.z));
+        float previous = mob.getYRot();
+        float yaw = Mth.approachDegrees(previous, wanted, 6);
+        mob.yRotO = previous; mob.yBodyRotO = mob.yBodyRot; mob.yHeadRotO = mob.yHeadRot;
+        mob.setYRot(yaw); mob.setYBodyRot(yaw); mob.setYHeadRot(yaw);
+    }
+    private static boolean needsSurfaceRoute(Mob mob) {
+        if (mob.getTarget() == null || !mob.getTarget().isAlive()) return false;
+        if (mob.horizontalCollision || Math.abs(mob.getTarget().getY() - mob.getY()) > 1.25) return true;
+        if (mob.getNavigation().isDone() || !mob.getNavigation().isInProgress()) return true;
+        Vec3 n = supportNormal(mob, Direction.UP);
+        if (n != null && n.y < 0.95) return true;
+        if (!ENABLE_NARROW_BRIDGES || !mob.onGround()) return false;
+        Vec3 forward = mob.getTarget().position().subtract(mob.position()).multiply(1, 0, 1).normalize();
+        Vec3 ahead = mob.position().add(forward.scale(1.2));
+        if (clipLoaded(mob.level(), mob, ahead.add(0, 0.4, 0), ahead.add(0, -1.5, 0)) == null) return true;
+        for (int x : new int[]{-1, 1}) for (int z : new int[]{-1, 1})
+            if (clipLoaded(mob.level(), mob, mob.position().add(x, 0.2, z), mob.position().add(x, -1.2, z)) == null) return true;
+        return false;
+    }
+
+    private static Node findNode(Mob mob, Key key) {
+        if (key.face == Direction.DOWN && !ENABLE_CEILINGS || key.face.getAxis().isHorizontal() && !ENABLE_WALLS) return null;
+        Vec3 raw = new Vec3(key.cell.getX() + 0.5, key.cell.getY(), key.cell.getZ() + 0.5);
+        Vec3 root = raw.add(0, ROOT_HEIGHT, 0), n = normal(key.face);
+        double separation = standoff(key.face);
+        BlockHitResult contact = clipLoaded(mob.level(), mob, root.subtract(n.scale(separation - 1.4)),
+            root.subtract(n.scale(separation + 1.6)));
+        if (contact == null || contact.getDirection() != key.face) return null;
+        Vec3 position = contact.getLocation().add(n.scale(separation)).add(0, -ROOT_HEIGHT, 0);
+        if (position.distanceToSqr(raw) > 4.5) return null;
+        Node candidate = new Node(key, position, contact.getBlockPos(), 0);
+        int cost = inspect(mob, clearance(mob, position, key.face), Set.of(contact.getBlockPos()), false, candidate);
+        return cost < 0 ? null : new Node(key, position, contact.getBlockPos(), cost);
+    }
+    private static Deque<Node> advanceSearch(Mob mob, Search search) {
+        int expanded = 0;
+        while (!search.open.isEmpty() && expanded++ < NODES_PER_ENTITY_TICK && nodesLeft > 0 && timeLeft()) {
+            Entry entry = search.open.poll(); Node node = entry.node;
+            if (entry.cost > search.costs.getOrDefault(node.key, Double.POSITIVE_INFINITY)) continue;
+            Vec3 attackOrigin = node.position.add(0, ROOT_HEIGHT, 0);
+            BlockHitResult sight = attackOrigin.distanceToSqr(search.goal) < 16
+                ? clipLoaded(mob.level(), mob, attackOrigin, search.goal.add(0, 1, 0)) : null;
+            boolean attackPosition = attackOrigin.distanceToSqr(search.goal) < 16 && sight == null
+                && loadedBox(mob.level(), new AABB(attackOrigin, search.goal.add(0, 1, 0)))
+                && mob.level().hasChunkAt(BlockPos.containing(search.goal));
+            // A supported wall/ceiling attack position is also a useful terminal pose.
+            // Continue around the ledge instead of repeatedly returning the same grip.
+            if (attackPosition || node.key.face == Direction.UP
+                && Math.abs(node.position.y - search.goal.y) < 1.5
+                && node.position.distanceTo(search.goal) < 5.5) {
+                ArrayDeque<Node> result = new ArrayDeque<>(); Key key = node.key;
+                while (key != null) { result.addFirst(search.known.get(key)); key = search.parents.get(key); }
+                if (result.size() > 1) result.removeFirst();
+                return result;
+            }
+            nodesLeft--;
+            List<Key> candidates = new ArrayList<>(16);
+            for (Direction move : Direction.values()) {
+                if (move.getAxis() != node.key.face.getAxis())
+                    candidates.add(new Key(node.key.cell.relative(move), node.key.face));
+                if (move.getAxis() != node.key.face.getAxis())
+                    candidates.add(new Key(node.key.cell, move));
+            }
+            // Floors can step up/down; walls can transition around ledges and drops.
+            if (node.key.face == Direction.UP) {
+                for (Direction move : Direction.Plane.HORIZONTAL) {
+                    for (int y : new int[]{-3, -2, -1, 1, 2})
+                        candidates.add(new Key(node.key.cell.relative(move).offset(0, y, 0), Direction.UP));
+                    candidates.add(new Key(node.key.cell.relative(move).below(), move.getOpposite()));
+                    candidates.add(new Key(node.key.cell.relative(move).below(2), move.getOpposite()));
+                }
+            } else if (node.key.face.getAxis().isHorizontal()) {
+                candidates.add(new Key(node.key.cell.below(), node.key.face));
+                candidates.add(new Key(node.key.cell.below(2), node.key.face));
+                candidates.add(new Key(node.key.cell.relative(node.key.face).below(), Direction.UP));
+                candidates.add(new Key(node.key.cell.relative(node.key.face).below(2), Direction.UP));
+            }
+            for (int index = search.candidateCursor.getOrDefault(node.key, 0); index < candidates.size(); index++) {
+                if (!timeLeft()) {
+                    search.candidateCursor.put(node.key, index);
+                    search.open.add(entry); return null;
+                }
+                Key key = candidates.get(index);
+                if (failed(mob, key)) continue;
+                Node next = search.known.get(key);
+                if (next == null) next = findNode(mob, key);
+                if (next == null && !timeLeft()) {
+                    search.candidateCursor.put(node.key, index);
+                    search.open.add(entry); return null;
+                }
+                if (next == null) continue;
+                if (next.position.distanceTo(search.goal) > 64 || next.position.distanceTo(node.position) > 4.5) continue;
+                Capabilities body = capabilities(mob);
+                double cost = entry.cost + Math.max(0.25, node.position.distanceTo(next.position)) / body.speed
+                    + next.obstructionCost * (2.5 + (1 - body.health) * 8) + (key.face == node.key.face ? 0 : 4);
+                if (cost >= search.costs.getOrDefault(key, Double.POSITIVE_INFINITY)) continue;
+                if (search.costs.size() >= MAX_SEARCH_NODES) { search.limited = true; return null; }
+                search.known.put(key, next); search.costs.put(key, cost); search.parents.put(key, node.key);
+                search.open.add(new Entry(next, cost, cost + Math.max(0, next.position.distanceTo(search.goal) - 5.5) / capabilities(mob).speed));
+            }
+            search.candidateCursor.remove(node.key);
+        }
+        search.exhausted = search.open.isEmpty();
+        return null;
+    }
+
+    /** Torso clearance; the planted legs are not a solid six-block cube. */
+    public static AABB clearance(Mob mob, Vec3 feet, Direction up) {
+        double half = Math.max(1.15, mob.getBbWidth() * 0.44), tall = Math.max(1.8, mob.getBbHeight() * 0.45);
+        Vec3 n = normal(up);
+        Vec3 center = feet.add(0, ROOT_HEIGHT, 0).add(n.scale(tall * 0.5 - ROOT_HEIGHT * 0.5));
+        double x = up.getAxis() == Direction.Axis.X ? tall * 0.5 : half;
+        double y = up.getAxis() == Direction.Axis.Y ? tall * 0.5 : half;
+        double z = up.getAxis() == Direction.Axis.Z ? tall * 0.5 : half;
+        return new AABB(center.x - x + 0.035, center.y - y + 0.035, center.z - z + 0.035,
+            center.x + x - 0.035, center.y + y - 0.035, center.z + z - 0.035);
+    }
+    private static boolean canBreak(Mob mob, BlockPos pos, BlockState block) {
+        Level level = mob.level();
+        if (!BREAK_ROUTE_OBSTRUCTIONS || block.hasBlockEntity() || block.is(BlockTags.WITHER_IMMUNE)
+            || !block.canEntityDestroy(level, pos, mob)) return false;
+        String name = net.minecraft.core.registries.BuiltInRegistries.BLOCK.getKey(block.getBlock()).toString();
+        if (name.contains("portal") || name.contains("bedrock") || name.contains("spawner")) return false;
+        float hardness = block.getDestroySpeed(level, pos);
+        return hardness >= 0 && hardness <= WoodweaverOnEntityTickUpdateProcedure.MAX_CLAW_BLOCK_HARDNESS
+            && (!RESPECT_MOB_GRIEFING || level instanceof ServerLevel server && net.neoforged.neoforge.event.EventHooks.canEntityGrief(server, mob));
+    }
+    /** -2: budget/unloaded, -1: protected obstruction, positive: selected work remains. */
+    private static int inspect(Mob mob, AABB box, Set<BlockPos> supports, boolean clear, Node surface) {
+        Level level = mob.level(); int found = 0, broken = 0;
+        Vec3 supportNormal = normal(surface.key.face);
+        Vec3 supportPlane = surface.position.add(0, ROOT_HEIGHT, 0)
+            .subtract(supportNormal.scale(standoff(surface.key.face)));
+        int minY = Math.max(level.getMinY(), Mth.floor(box.minY));
+        int maxY = Math.min(level.getMaxY() - 1, Mth.floor(box.maxY));
+        if (box.minY < level.getMinY() || box.maxY >= level.getMaxY()) return -1;
+        for (int x = Mth.floor(box.minX); x <= Mth.floor(box.maxX); x++)
+            for (int z = Mth.floor(box.minZ); z <= Mth.floor(box.maxZ); z++) {
+                if (!level.hasChunkAt(new BlockPos(x, minY, z))) return -2;
+                for (int y = minY; y <= maxY; y++) {
+                    if (!timeLeft()) return -2;
+                    if (movementBlocksLeft >= 0) movementBlocksLeft--;
+                    else blocksLeft--;
+                    BlockPos pos = new BlockPos(x, y, z); BlockState block = level.getBlockState(pos);
+                    // Keep the entire support half-space, not just the six sampled contact blocks.
+                    // A climbable wall or floor is a route surface, never excavation material.
+                    double outward = (x + 0.5 - supportPlane.x) * supportNormal.x
+                        + (y + 0.5 - supportPlane.y) * supportNormal.y
+                        + (z + 0.5 - supportPlane.z) * supportNormal.z;
+                    if (outward <= 0.6) continue;
+                    var shape = block.getCollisionShape(level, pos);
+                    if (shape.isEmpty() || !shape.bounds().move(x, y, z).intersects(box)) continue;
+                    if (supports.contains(pos)) continue;
+                    if (!canBreak(mob, pos, block)) return -1;
+                    found++;
+                    if (clear && broken < BREAKS_PER_ENTITY_TICK && breaksLeft > 0) {
+                        if (level.destroyBlock(pos, false, mob)) { broken++; breaksLeft--; }
+                    }
+                }
+            }
+        return found; // Do not move until a subsequent pass confirms the corridor is clear.
+    }
+    private static Set<BlockPos> supports(Mob mob, Node node) {
+        Set<BlockPos> blocks = new HashSet<>();
+        if (node.support != null) blocks.add(node.support);
+        Quaternionf rotation = new Quaternionf().rotationTo(0, 1, 0,
+            node.key.face.getStepX(), node.key.face.getStepY(), node.key.face.getStepZ());
+        Vec3 n = normal(node.key.face);
+        Vec3 plane = node.position.add(0, ROOT_HEIGHT, 0).subtract(n.scale(standoff(node.key.face)));
+        for (int i = 0; i < 6; i++) {
+            double z = i < 2 ? -2.2 : i < 4 ? (i == 2 ? -1.0 : 1.0) : 2.4;
+            for (double spread : new double[]{4.0, 2.8, 1.6, 0.45}) {
+                Vec3 offset = WeaverFrame.offset(rotation, mob.yBodyRot, (i % 2 == 0 ? -1 : 1) * spread, 0, z);
+                BlockHitResult hit = clipLoaded(mob.level(), mob, plane.add(offset).add(n.scale(3.5)),
+                    plane.add(offset).subtract(n.scale(5.0)));
+                if (hit != null) { blocks.add(hit.getBlockPos()); break; }
+            }
+        }
+        return blocks;
+    }
+    public static Vec3 landingNear(Mob mob, Vec3 desired) {
+        for (int r = 0; r <= 2; r++) for (int x = -r; x <= r; x++) for (int z = -r; z <= r; z++) {
+            Vec3 p = desired.add(x, 0, z);
+            BlockHitResult floor = clipLoaded(mob.level(), mob, p.add(0, 3, 0), p.add(0, -4, 0));
+            if (floor == null || floor.getDirection() != Direction.UP) continue;
+            Vec3 feet = floor.getLocation().add(0, 0.04, 0);
+            AABB body = mob.getBoundingBox().move(feet.subtract(mob.position())).deflate(0.04);
+            if (loadedBox(mob.level(), body) && mob.level().noCollision(mob, body)) return feet;
+        }
+        return null;
+    }
+    public static boolean loadedBox(Level level, AABB box) {
+        for (int x = Mth.floor(box.minX) >> 4; x <= (Mth.floor(box.maxX) >> 4); x++)
+            for (int z = Mth.floor(box.minZ) >> 4; z <= (Mth.floor(box.maxZ) >> 4); z++)
+                if (!level.hasChunkAt(new BlockPos(x << 4, Mth.floor(box.minY), z << 4))) return false;
+        return true;
+    }
+    public static void cancel(Mob mob) {
+        Controller state = STATES.remove(mob);
+        if (state != null && state.owns) {
+            mob.setNoAi(state.oldNoAi); mob.setNoGravity(state.oldNoGravity);
+            var lease = mob.getPersistentData();
+            lease.remove("weaver_surface_owned"); lease.remove("weaver_surface_old_no_ai"); lease.remove("weaver_surface_old_no_gravity");
+            publish(mob, state, true, false);
+        }
+    }
+    @SubscribeEvent
+    public static void afterTick(EntityTickEvent.Post event) {
+        if (!(event.getEntity() instanceof WoodweaverEntity mob) || mob.level().isClientSide()) return;
+        Controller state = STATES.get(mob);
+        if (state == null || !state.owns) return;
+        if (combatActive(mob)) {
+            mob.setNoGravity(true); mob.setDeltaMovement(Vec3.ZERO); mob.fallDistance = 0;
+            if (state.combatAnchor != null) mob.setPos(state.combatAnchor.x, state.combatAnchor.y, state.combatAnchor.z);
+            return;
+        }
+        if (state.waitingLeap) {
+            if (mob.getEntityData().get(WoodweaverEntity.DATA_isLeaping) && mob.getDeltaMovement().y > 0.15)
+                cancel(mob); // Preserve the native launch velocity and impact clock.
+            else mob.setDeltaMovement(Vec3.ZERO); // Keep adhesion throughout preparation.
+        }
+    }
+    @SubscribeEvent
+    public static void leave(EntityLeaveLevelEvent event) {
+        if (event.getLevel().isClientSide()) Client.forget(event.getEntity());
+        else if (event.getEntity() instanceof Mob mob) cancel(mob);
+    }
+    @SubscribeEvent
+    public static void tracking(PlayerEvent.StartTracking event) {
+        if (event.getEntity() instanceof ServerPlayer player && event.getTarget() instanceof Mob mob) {
+            Controller state = STATES.get(mob);
+            if (state != null && state.owns) PacketDistributor.sendToPlayer(player, packet(mob, state, true));
+        }
+    }
+    private static void publish(Mob mob, Controller state, boolean force) { publish(mob, state, force, true); }
+    private static void publish(Mob mob, Controller state, boolean force, boolean active) {
+        if (!force && mob.tickCount - state.lastPacket < 4) return;
+        state.lastPacket = mob.tickCount;
+        PacketDistributor.sendToPlayersTrackingEntity(mob, packet(mob, state, active));
+    }
+    private static SurfacePacket packet(Mob mob, Controller state, boolean active) {
+        return new SurfacePacket(mob.getId(), mob.getUUID(), mob.level().dimension().identifier().toString(), active,
+            state.rotation.x, state.rotation.y, state.rotation.z, state.rotation.w, (float) state.standoff);
+    }
+    public record SurfacePacket(int id, UUID uuid, String dimension, boolean active,
+                                float x, float y, float z, float w, float stand) implements CustomPacketPayload {
+        public static final Type<SurfacePacket> TYPE = new Type<>(Identifier.parse("the_backwoods:weaver_surface"));
+        public static final StreamCodec<RegistryFriendlyByteBuf, SurfacePacket> CODEC = StreamCodec.of((b, p) -> {
+            b.writeVarInt(p.id); b.writeUUID(p.uuid); b.writeUtf(p.dimension, 128); b.writeBoolean(p.active);
+            b.writeFloat(p.x); b.writeFloat(p.y); b.writeFloat(p.z); b.writeFloat(p.w); b.writeFloat(p.stand);
+        }, b -> new SurfacePacket(b.readVarInt(), b.readUUID(), b.readUtf(128), b.readBoolean(),
+            b.readFloat(), b.readFloat(), b.readFloat(), b.readFloat(), b.readFloat()));
+        @Override public Type<SurfacePacket> type() { return TYPE; }
+    }
+    @EventBusSubscriber(modid = "the_backwoods")
+    public static final class Network {
+        @SubscribeEvent public static void register(RegisterPayloadHandlersEvent event) {
+            event.registrar("weaver_surface_v1").playToClient(SurfacePacket.TYPE, SurfacePacket.CODEC,
+                (p, context) -> context.enqueueWork(() -> Client.receive(p)));
+        }
+    }
+
+    /** Shared frame utilities keep server clearance, contacts, and rendered orientation consistent. */
+    public static final class WeaverFrame {
+        public static Vec3 offset(Quaternionf rotation, float yaw, double x, double y, double z) {
+            double a = Math.toRadians(yaw);
+            Vector3f v = rotation.transform(new Vector3f((float)(x * Math.cos(a) + z * Math.sin(a)),
+                (float)y, (float)(x * Math.sin(a) - z * Math.cos(a))));
+            return new Vec3(v.x, v.y, v.z);
+        }
+    }
+    public static Quaternionf rotation(Entity entity, float partial) {
+        if (entity.level().isClientSide()) return Client.rotation(entity, partial);
+        Controller c = entity instanceof Mob mob ? STATES.get(mob) : null;
+        return c != null && c.owns ? new Quaternionf(c.rotation) : new Quaternionf();
+    }
+    public static boolean attached(Entity entity) {
+        if (entity.level().isClientSide()) return Client.attached(entity);
+        return entity instanceof Mob mob && controlling(mob);
+    }
+    public static Vec3 up(Entity entity, float partial) {
+        Vector3f v = rotation(entity, partial).transform(new Vector3f(0, 1, 0));
+        return new Vec3(v.x, v.y, v.z);
+    }
+    public static double separation(Entity entity) {
+        if (entity.level().isClientSide()) return Client.separation(entity);
+        Controller c = entity instanceof Mob mob ? STATES.get(mob) : null;
+        return c != null && c.owns ? c.standoff : ROOT_HEIGHT;
+    }
+    public static Vec3 footPlane(Entity entity) {
+        return entity.position().add(0, ROOT_HEIGHT, 0).subtract(up(entity, 1).scale(separation(entity)));
+    }
+
+    @EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+    public static final class Client {
+        private static final Map<Integer, Pose> POSES = new HashMap<>();
+        private static Object levelIdentity;
+        private record Pose(UUID uuid, String dimension, Quaternionf from, Quaternionf to,
+                            double at, boolean active, float separation) {}
+        private static void receive(SurfacePacket packet) {
+            var level = net.minecraft.client.Minecraft.getInstance().level;
+            if (level == null || !packet.dimension.equals(level.dimension().identifier().toString())) return;
+            if (levelIdentity != level) { POSES.clear(); levelIdentity = level; }
+            Quaternionf q = new Quaternionf(packet.x, packet.y, packet.z, packet.w);
+            float length = q.lengthSquared();
+            if (!Float.isFinite(length) || length < 0.5 || length > 2 || !Float.isFinite(packet.stand)) return;
+            q.normalize();
+            Pose old = POSES.get(packet.id);
+            double now = level.getGameTime();
+            Quaternionf from = old != null && old.uuid.equals(packet.uuid) ? sample(old, now) : new Quaternionf();
+            if (POSES.size() >= 512 && !POSES.containsKey(packet.id)) POSES.remove(POSES.keySet().iterator().next());
+            POSES.put(packet.id, new Pose(packet.uuid, packet.dimension, from,
+                packet.active ? q : new Quaternionf(), now, packet.active, Mth.clamp(packet.stand, 2.0f, 4.0f)));
+        }
+        private static Pose pose(Entity entity) {
+            if (levelIdentity != entity.level()) { POSES.clear(); levelIdentity = entity.level(); return null; }
+            Pose p = POSES.get(entity.getId());
+            return p != null && p.uuid.equals(entity.getUUID()) ? p : null;
+        }
+        private static Quaternionf sample(Pose p, double now) {
+            return new Quaternionf(p.from).slerp(p.to, (float)Mth.clamp((now - p.at) / 4.0, 0, 1)).normalize();
+        }
+        private static Quaternionf rotation(Entity entity, float partial) {
+            Pose p = pose(entity);
+            return p == null ? new Quaternionf() : sample(p, entity.level().getGameTime() + partial);
+        }
+        private static boolean attached(Entity entity) {
+            Pose p = pose(entity);
+            return p != null && (p.active || entity.level().getGameTime() - p.at < 4);
+        }
+        private static double separation(Entity entity) {
+            Pose p = pose(entity);
+            if (p == null) return ROOT_HEIGHT;
+            return p.active ? p.separation : Mth.lerp(Mth.clamp((entity.level().getGameTime() - p.at) / 4.0, 0, 1), p.separation, ROOT_HEIGHT);
+        }
+        @SubscribeEvent public static void unload(net.neoforged.neoforge.event.level.LevelEvent.Unload event) {
+            if (event.getLevel() == levelIdentity) { POSES.clear(); levelIdentity = null; }
+        }
+        private static void forget(Entity entity) { Pose p = POSES.get(entity.getId()); if (p != null && p.uuid.equals(entity.getUUID())) POSES.remove(entity.getId()); }
+    }
+}
+// 26.1.2
+

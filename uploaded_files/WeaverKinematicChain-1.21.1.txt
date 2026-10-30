@@ -1,0 +1,569 @@
+package net.mcreator.thebackwoods;
+
+import net.minecraft.client.model.geom.ModelPart;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.util.Mth;
+import org.joml.Matrix4f;
+import org.joml.Matrix3f;
+import org.joml.Quaternionf;
+import org.joml.Vector3f;
+import net.minecraft.world.phys.AABB;
+import net.mcreator.thebackwoods.entity.WoodweaverEntity;
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * Analytical Inverse Kinematics solver for Woodweaver's 3-segment limbs.
+ * Aligns the flat foot segment perfectly horizontal on the ground surface without clipping.
+ */
+public class WeaverKinematicChain {
+
+    /**
+     * Solves Inverse Kinematics for a 3-segment leg and updates ModelPart rotations with angular limits.
+     * 
+     * @param hip             ModelPart for the hip joint (handles horizontal Yaw swing and vertical thigh Roll).
+     * @param thigh           ModelPart for the thigh joint (handles vertical knee bend Roll).
+     * @param shin            ModelPart for the shin joint (handles foot angle).
+     * @param hipWorldPos     Absolute world coordinate of the hip joint center.
+     * @param targetFootPos   Absolute world coordinate where the foot is planted.
+     * @param segment1Length  Length of thigh (Segment 1) in block units.
+     * @param segment2Length  Length of shin (Segment 2) in block units.
+     * @param isLeft          True if this is on the left side of the model (flips mirror axes).
+     * @param entityYaw       Current horizontal rotation of the entity in degrees.
+     * @param minYaw          Minimum horizontal rotation limit (radians) to prevent crossing.
+     * @param maxYaw          Maximum horizontal rotation limit (radians) to prevent crossing.
+     */
+    public static void solveIK(ModelPart hip, ModelPart thigh, ModelPart shin, 
+                               Vec3 hipWorldPos, Vec3 targetFootPos, 
+                               double segment1Length, double segment2Length, 
+                               boolean isLeft, float entityYaw,
+                               float minYaw, float maxYaw) {
+        
+        Vec3 relative = targetFootPos.add(0, 0.1875, 0).subtract(hipWorldPos);
+        double yaw = Math.toRadians(entityYaw), cos = Math.cos(yaw), sin = Math.sin(yaw);
+        solvePlanar(hip, thigh, shin, relative.x * cos + relative.z * sin, -relative.y,
+            relative.x * sin - relative.z * cos, segment1Length, segment2Length, isLeft, minYaw, maxYaw);
+    }
+
+    private static void solvePlanar(ModelPart hip, ModelPart thigh, ModelPart shin,
+                                    double x, double y, double z, double a, double b,
+                                    boolean isLeft, float minYaw, float maxYaw) {
+        solvePlanar(hip, thigh, shin, x, y, z, a, b, isLeft, minYaw, maxYaw, false);
+    }
+
+    private static void solvePlanar(ModelPart hip, ModelPart thigh, ModelPart shin,
+                                    double x, double y, double z, double a, double b,
+                                    boolean isLeft, float minYaw, float maxYaw, boolean narrow) {
+        double side = isLeft ? -1.0 : 1.0;
+        // atan2 already wraps the mirrored angle; never clamp an equivalent angle near 2 PI.
+        double yaw = Math.atan2(-side * z, side * x);
+        hip.xRot = 0;
+        double constrainedYaw = Mth.clamp(yaw, minYaw, maxYaw);
+        // Solve in the permitted yaw plane instead of using an unreachable radial distance.
+        double horizontal = Math.max(narrow ? 0.25 : (a + b) * 0.35, side * (x * Math.cos(constrainedYaw) - z * Math.sin(constrainedYaw)));
+        y = Math.max(-(a + b) * 0.40, y);
+        double distance = Mth.clamp(Math.hypot(horizontal, y),
+            Math.max(Math.abs(a - b) + 0.1, (a + b) * 0.45), (a + b) * 0.975);
+        double shoulder = Math.acos(Mth.clamp((a * a + distance * distance - b * b) / (2 * a * distance), -1.0, 1.0));
+        double knee = Math.acos(Mth.clamp((a * a + b * b - distance * distance) / (2 * a * b), -1.0, 1.0));
+        double hipRoll = -side * Mth.clamp(Math.atan2(-y, horizontal) + shoulder, -1.25, 1.25);
+        // The intended yaw-then-bend quaternion must be encoded in ModelPart's Z-Y-X order.
+        double sy = Math.sin(constrainedYaw * 0.5), cy = Math.cos(constrainedYaw * 0.5);
+        double sz = Math.sin(hipRoll * 0.5), cz = Math.cos(hipRoll * 0.5);
+        setEuler(hip, sy * sz, sy * cz, cy * sz, cy * cz);
+        thigh.xRot = thigh.yRot = 0;
+        thigh.zRot = (float) (side * (Math.PI - knee));
+        shin.xRot = shin.yRot = 0;
+        shin.zRot = (float) Mth.clamp(-(hipRoll + thigh.zRot), -1.57f, 1.57f);
+    }
+
+    private static void setEuler(ModelPart part, double x, double y, double z, double w) {
+        double sinPitch = 2 * (w * y - z * x);
+        if (sinPitch > 0.985) {
+            part.yRot = (float) (Math.PI / 2);
+            part.xRot = 0;
+            part.zRot = (float) (2 * Math.atan2(z, w));
+        } else if (sinPitch < -0.985) {
+            part.yRot = (float) (-Math.PI / 2);
+            part.xRot = 0;
+            part.zRot = (float) (-2 * Math.atan2(z, w));
+        } else {
+            part.xRot = (float) Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
+            part.yRot = (float) Math.asin(Mth.clamp(sinPitch, -1.0, 1.0));
+            part.zRot = (float) Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+        }
+    }
+
+    private static boolean segmentHitsBox(Vec3 from, Vec3 to, AABB box, double radius) {
+        AABB expanded = box.inflate(radius);
+        return expanded.contains(from) || expanded.contains(to) || expanded.clip(from, to).isPresent();
+    }
+
+    private static double segmentDistanceSquared(Vec3 p, Vec3 q, Vec3 r, Vec3 u) {
+        Vec3 d1 = q.subtract(p), d2 = u.subtract(r), offset = p.subtract(r);
+        double a = d1.dot(d1), e = d2.dot(d2), f = d2.dot(offset), s, t;
+        if (a < 1.0e-10 && e < 1.0e-10) return p.distanceToSqr(r);
+        if (a < 1.0e-10) { s = 0; t = Mth.clamp(f / e, 0, 1); }
+        else {
+            double c = d1.dot(offset);
+            if (e < 1.0e-10) { t = 0; s = Mth.clamp(-c / a, 0, 1); }
+            else {
+                double b = d1.dot(d2), denominator = a * e - b * b;
+                s = denominator > 1.0e-10 ? Mth.clamp((b * f - c * e) / denominator, 0, 1) : 0;
+                t = (b * s + f) / e;
+                if (t < 0) { t = 0; s = Mth.clamp(-c / a, 0, 1); }
+                else if (t > 1) { t = 1; s = Mth.clamp((b - c) / a, 0, 1); }
+            }
+        }
+        return p.add(d1.scale(s)).distanceToSqr(r.add(d2.scale(t)));
+    }
+
+    /** Scratch transforms belong to a renderer model, never to an individual rendered pose. */
+    public static final class PoseSolver {
+        private final Matrix4f toWorld = new Matrix4f();
+        private final Matrix4f toModel = new Matrix4f();
+        private final Quaternionf bodyRotation = new Quaternionf();
+        private final Quaternionf levelRotation = new Quaternionf();
+        private final Quaternionf footRotation = new Quaternionf();
+        private final Vector3f target = new Vector3f();
+        private final Matrix4f authoredChain = new Matrix4f();
+        private final Vector3f authoredOffset = new Vector3f();
+        private final Vector3f[] bindAnkles = new Vector3f[6];
+        private float bindRootY;
+        private final Quaternionf clearanceHip = new Quaternionf(), clearanceKnee = new Quaternionf();
+        private final Vector3f clearanceVector = new Vector3f();
+        private final List<AABB> clearanceBoxes = new ArrayList<>();
+
+        private Vec3 jointPosition(ModelPart hip, ModelPart knee, ModelPart foot, boolean ankle) {
+            clearanceHip.rotationZYX(hip.zRot, hip.yRot, hip.xRot);
+            clearanceVector.set(knee.x / 16, knee.y / 16, knee.z / 16);
+            clearanceHip.transform(clearanceVector);
+            Vec3 result = new Vec3(hip.x / 16.0 + clearanceVector.x,
+                hip.y / 16.0 + clearanceVector.y, hip.z / 16.0 + clearanceVector.z);
+            if (ankle) {
+                clearanceKnee.set(clearanceHip).rotateZYX(knee.zRot, knee.yRot, knee.xRot);
+                clearanceVector.set(foot.x / 16, foot.y / 16, foot.z / 16);
+                clearanceKnee.transform(clearanceVector);
+                result = result.add(clearanceVector.x, clearanceVector.y, clearanceVector.z);
+            }
+            return result;
+        }
+
+        private Vec3 worldJoint(Vec3 point, Vec3 origin) {
+            clearanceVector.set((float)point.x, (float)point.y, (float)point.z);
+            toWorld.transformPosition(clearanceVector);
+            return origin.add(clearanceVector.x, clearanceVector.y, clearanceVector.z);
+        }
+
+        private void avoidLegCollisions(LivingEntity entity, WeaverGait.EntityGaitState gait, int index,
+                ModelPart hip, ModelPart knee, ModelPart foot, Vec3 origin, float minYaw, float maxYaw,
+                double time, float weight) {
+            WeaverGait.LegState leg = gait.legs[index];
+            Vec3 root = new Vec3(hip.x / 16.0, hip.y / 16.0, hip.z / 16.0);
+            Vec3 baseKnee = jointPosition(hip, knee, foot, false);
+            Vec3 baseAnkle = jointPosition(hip, knee, foot, true);
+            boolean moving = entity.getDeltaMovement().horizontalDistanceSqr() >= 0.004;
+            if (!leg.grounded || (moving && leg.isStepping)) {
+                leg.recoveryRequested |= baseAnkle.subtract(root).distanceToSqr(new Vec3(target.x, target.y, target.z)) > 1.2 * 1.2;
+            }
+            Vec3 axis = baseAnkle.subtract(root).normalize();
+            Quaternionf base = new Quaternionf().rotationZYX(hip.zRot, hip.yRot, hip.xRot);
+            if (weight >= 0.5f && leg.clearanceTick != entity.tickCount) {
+                leg.previousKneeSwivel = leg.kneeSwivel;
+                leg.clearanceTick = entity.tickCount;
+                double step = 0.15;
+                float[] proposals = {leg.kneeSwivel, 0, -0.65f, -0.4f, 0.4f, 0.65f};
+                Vec3[] knees = new Vec3[proposals.length];
+                Vec3 worldHip = worldJoint(root, origin), worldAnkle = worldJoint(baseAnkle, origin);
+                AABB query = new AABB(worldHip, worldAnkle);
+                for (int i = 0; i < proposals.length; i++) {
+                    proposals[i] = (float)Mth.clamp(proposals[i], leg.kneeSwivel - step, leg.kneeSwivel + step);
+                    Quaternionf swivel = new Quaternionf().rotationAxis(proposals[i], (float)axis.x, (float)axis.y, (float)axis.z);
+                    clearanceVector.set((float)(baseKnee.x - root.x), (float)(baseKnee.y - root.y), (float)(baseKnee.z - root.z));
+                    swivel.transform(clearanceVector);
+                    knees[i] = root.add(clearanceVector.x, clearanceVector.y, clearanceVector.z);
+                    Vec3 w = worldJoint(knees[i], origin);
+                    query = query.minmax(new AABB(w, w));
+                }
+                // Query once per leg/tick, rather than once per candidate or render frame.
+                if (WoodweaverSurfaceNavigation.loadedBox(entity.level(), query.inflate(0.36))) {
+                    clearanceBoxes.clear();
+                    for (var shape : entity.level().getBlockCollisions(entity, query.inflate(0.36)))
+                        clearanceBoxes.addAll(shape.toAabbs());
+                    int bestCost = Integer.MAX_VALUE;
+                    float best = leg.kneeSwivel;
+                    for (int i = 0; i < proposals.length; i++) {
+                        Vec3 upper = knees[i].subtract(root);
+                        double side = index % 2 == 0 ? -1 : 1;
+                        double yaw = Math.atan2(-side * upper.z, side * upper.x);
+                        if (upper.x * side < 0.15 || yaw < minYaw - 0.05 || yaw > maxYaw + 0.05) continue;
+                        Vec3 wKnee = worldJoint(knees[i], origin);
+                        Vec3 upperStart = worldHip.lerp(wKnee, Math.min(1, 0.85 / Math.max(0.001, worldHip.distanceTo(wKnee))));
+                        // The sole owns the final contact zone; do not reject a planted foot for touching its support.
+                        Vec3 lowerEnd = worldAnkle.lerp(wKnee, Math.min(1, 0.35 / Math.max(0.001, worldAnkle.distanceTo(wKnee))));
+                        int cost = 0;
+                        for (AABB box : clearanceBoxes) {
+                            if (segmentHitsBox(upperStart, wKnee, box, 0.36)) cost++;
+                            if (segmentHitsBox(wKnee, lowerEnd, box, 0.32)) cost++;
+                        }
+                        AABB body = new AABB(-0.5, -1, -1, 0.5, 0, 1);
+                        Vec3 localStart = root.lerp(knees[i], Math.min(1, 0.85 / Math.max(0.001, root.distanceTo(knees[i]))));
+                        Vec3 localEnd = baseAnkle.lerp(knees[i], Math.min(1, 0.35 / Math.max(0.001, baseAnkle.distanceTo(knees[i]))));
+                        if (segmentHitsBox(localStart, knees[i], body, 0.36)) cost++;
+                        if (segmentHitsBox(knees[i], localEnd, body, 0.32)) cost++;
+                        for (int j = 0; j < gait.legs.length; j++) {
+                            WeaverGait.LegState other = gait.legs[j];
+                            if (j == index || other.clearanceHip == null || other.clearanceTick == Integer.MIN_VALUE
+                                || entity.tickCount - other.clearanceTick > 2) continue;
+                            Vec3 otherStart = other.clearanceHip.lerp(other.clearanceKnee, 0.28);
+                            Vec3 otherEnd = other.clearanceAnkle.lerp(other.clearanceKnee, 0.12);
+                            if (segmentDistanceSquared(upperStart, wKnee, otherStart, other.clearanceKnee) < 0.72 * 0.72
+                                || segmentDistanceSquared(upperStart, wKnee, other.clearanceKnee, otherEnd) < 0.68 * 0.68
+                                || segmentDistanceSquared(wKnee, lowerEnd, otherStart, other.clearanceKnee) < 0.68 * 0.68
+                                || segmentDistanceSquared(wKnee, lowerEnd, other.clearanceKnee, otherEnd) < 0.64 * 0.64
+                                || worldAnkle.distanceToSqr(other.clearanceAnkle) < 0.6 * 0.6) cost++;
+                        }
+                        if (cost < bestCost) { bestCost = cost; best = proposals[i]; }
+                    }
+                    leg.kneeSwivel = bestCost == Integer.MAX_VALUE
+                        ? (float)Mth.clamp(0, leg.kneeSwivel - step, leg.kneeSwivel + step) : best;
+                    leg.clearanceBlocked = bestCost != 0;
+                    if (leg.clearanceBlocked && leg.isStepping) {
+                        leg.avoidContactPos = leg.landingPos;
+                        leg.avoidContactUntil = entity.tickCount + 8;
+                    }
+                }
+            }
+            // Rotating the bend plane about the solved ankle axis preserves both link lengths and the ankle.
+            float swivel = Mth.lerp((float)Mth.clamp(time - entity.tickCount, 0, 1), leg.previousKneeSwivel, leg.kneeSwivel);
+            clearanceHip.rotationAxis(swivel, (float)axis.x, (float)axis.y, (float)axis.z).mul(base);
+        }
+
+        public void bind(ModelPart all, ModelPart[] hips, ModelPart[] knees, ModelPart[] feet) {
+            bindRootY = all.y;
+            for (int i = 0; i < 6; i++) {
+                bindAnkles[i] = new Vector3f();
+                anklePosition(hips[i], knees[i], feet[i], bindAnkles[i]);
+            }
+        }
+
+        private void anklePosition(ModelPart hip, ModelPart knee, ModelPart foot, Vector3f result) {
+            authoredChain.identity().translate(hip.x / 16, hip.y / 16, hip.z / 16)
+                .rotateZYX(hip.zRot, hip.yRot, hip.xRot).scale(hip.xScale, hip.yScale, hip.zScale)
+                .translate(knee.x / 16, knee.y / 16, knee.z / 16)
+                .rotateZYX(knee.zRot, knee.yRot, knee.xRot).scale(knee.xScale, knee.yScale, knee.zScale);
+            result.set(foot.x / 16, foot.y / 16, foot.z / 16);
+            authoredChain.transformPosition(result);
+        }
+        private final Matrix3f soleBasis = new Matrix3f();
+        private final Vector3f soleX = new Vector3f(), soleY = new Vector3f(), soleZ = new Vector3f();
+        private final Quaternionf soleWorld = new Quaternionf(), surfaceFrame = new Quaternionf();
+        private final Quaternionf blendA = new Quaternionf(), blendB = new Quaternionf();
+        private final double[] hipY = new double[6];
+        private final float[] authored = new float[9];
+        private static final float[] MIN_YAW = {-1.30f, 0.35f, -0.25f, -0.25f, 0.35f, -1.30f};
+        private static final float[] MAX_YAW = {-0.35f, 1.30f, 0.25f, 0.25f, 1.30f, -0.35f};
+
+        public void apply(LivingEntity entity, float partialTicks, ModelPart all,
+                          ModelPart[] hips, ModelPart[] knees, ModelPart[] feet) {
+            apply(entity, partialTicks, all, hips, knees, feet, false);
+        }
+
+        public void apply(LivingEntity entity, float partialTicks, ModelPart all,
+                          ModelPart[] hips, ModelPart[] knees, ModelPart[] feet, boolean preserveRoot) {
+            apply(entity, partialTicks, all, hips, knees, feet, preserveRoot, false);
+        }
+
+        public void apply(LivingEntity entity, float partialTicks, ModelPart all,
+                          ModelPart[] hips, ModelPart[] knees, ModelPart[] feet, boolean preserveRoot, boolean landingPose) {
+            float partial = Mth.clamp(partialTicks, 0, 1);
+            for (int i = 0; i < 6; i++)
+                hipY[i] = 1.501 - (all.y + hips[i].y) / 16.0;
+            WeaverGait.updateGait(entity, partial, hipY, preserveRoot, landingPose);
+            WeaverGait.EntityGaitState gait = WeaverGait.getOrCreateState(entity.getUUID());
+            double time = entity.tickCount + partial;
+            // Actions change the foot targets, never disable the terrain solve.
+            float weight = WeaverGait.transitionWeight(gait, time, true);
+            float actionWeight = WeaverGait.transitionActionWeight(gait, time, preserveRoot);
+            float approach = entity.onGround() ? 1 : gait.landingApproach;
+            float legTarget = entity.onGround() || WoodweaverSurfaceNavigation.attached(entity) ? 1 : approach;
+            float proceduralLegWeight = WeaverGait.transitionLegWeight(gait, time, legTarget);
+            double bodyX = Mth.lerp(partial, entity.xOld, entity.getX());
+            double bodyY = Mth.lerp(partial, entity.yOld, entity.getY());
+            double bodyZ = Mth.lerp(partial, entity.zOld, entity.getZ());
+            double supportHeight = Mth.lerp(partial, gait.previousBodyHeight, gait.bodyHeight);
+            float bodyYaw = entity.yBodyRotO + Mth.wrapDegrees(entity.yBodyRot - entity.yBodyRotO) * partial;
+            boolean floorPose = (entity.onGround() || gait.landingApproach > 0.2f || WoodweaverSurfaceNavigation.up(entity, partial).y > 0.35)
+                && WoodweaverSurfaceNavigation.up(entity, partial).y > 0.35;
+            // Terrain support is an offset on top of authored jump/landing compression.
+            gait.rootY = floorPose ? all.y + (float) Mth.clamp(32.016 - 16 * (supportHeight - bodyY), -48, 4) - bindRootY : all.y;
+            boolean terrainTilt = !WoodweaverSurfaceNavigation.attached(entity);
+            gait.rootPitch = all.xRot + (terrainTilt ? Mth.lerp(partial, gait.previousPitch, gait.pitch) : 0);
+            gait.rootRoll = all.zRot + (terrainTilt ? Mth.lerp(partial, gait.previousRoll, gait.roll) : 0);
+            all.y = Mth.lerp(weight, all.y, gait.rootY);
+            all.xRot = blendAngle(all.xRot, gait.rootPitch, weight);
+            all.zRot = blendAngle(all.zRot, gait.rootRoll, weight);
+
+            // Persist the body pose across animation boundaries before solving planted feet.
+            Vec3 rootTarget = new Vec3(all.x, all.y, all.z);
+            blendA.rotationZYX(all.zRot, all.yRot, all.xRot);
+            if (gait.renderedRoot == null) {
+                gait.renderedRoot = rootTarget;
+                gait.renderedRootRotation.set(blendA);
+            } else {
+                double elapsed = Math.max(0, time - gait.renderedRootAt);
+                float response = (float) (1 - Math.exp(-elapsed / 0.9));
+                gait.renderedRoot = gait.renderedRoot.lerp(rootTarget, response);
+                gait.renderedRootRotation.slerp(blendA, response).normalize();
+            }
+            gait.renderedRootAt = Double.isNaN(gait.renderedRootAt) ? time : Math.max(time, gait.renderedRootAt);
+            all.x = (float) gait.renderedRoot.x; all.y = (float) gait.renderedRoot.y; all.z = (float) gait.renderedRoot.z;
+            Quaternionf rootPose = gait.renderedRootRotation;
+            setEuler(all, rootPose.x, rootPose.y, rootPose.z, rootPose.w);
+            gait.rootY = all.y; gait.rootPitch = all.xRot; gait.rootRoll = all.zRot;
+            applySurfaceFrame(entity, partial, all, bodyYaw);
+
+            // Exact MobRenderer reflection/translation and ModelPart Z-Y-X order.
+            // Positions stay relative to the entity to avoid float precision loss far from spawn.
+            float rotation = (float) Math.toRadians(180.0 - bodyYaw);
+            toWorld.identity().rotateY(rotation).scale(-1, -1, 1).translate(0, -1.501f, 0)
+                .translate(all.x / 16, all.y / 16, all.z / 16)
+                .rotateZYX(all.zRot, all.yRot, all.xRot).scale(all.xScale, all.yScale, all.zScale);
+            toWorld.invert(toModel);
+            levelRotation.rotationY(rotation).rotateZ((float) Math.PI);
+            bodyRotation.set(levelRotation).rotateZYX(all.zRot, all.yRot, all.xRot);
+            for (int i = 0; i < 6; i++) {
+                ModelPart hip = hips[i], knee = knees[i], foot = feet[i];
+                authored[0] = hip.xRot; authored[1] = hip.yRot; authored[2] = hip.zRot;
+                authored[3] = knee.xRot; authored[4] = knee.yRot; authored[5] = knee.zRot;
+                authored[6] = foot.xRot; authored[7] = foot.yRot; authored[8] = foot.zRot;
+                Vec3 contact = gait.legs[i].sample(time);
+                Vec3 soleNormal = gait.legs[i].contactNormal;
+                Vec3 ankle = contact.add(soleNormal.scale(0.1875));
+                if (preserveRoot && !entity.onGround() && entity.getDeltaMovement().y < 0)
+                    ankle = ankle.add(0, Math.min(2.0, Math.max(0, entity.getY() - contact.y)) * (1 - approach), 0);
+                if (bindAnkles[i] != null && actionWeight > 0) {
+                    // Carry the animation's ankle displacement into the IK target in world space.
+                    int offset = i * 3;
+                    if (preserveRoot) {
+                        anklePosition(hip, knee, foot, authoredOffset);
+                        authoredOffset.sub(bindAnkles[i]);
+                        gait.actionOffsets[offset] = authoredOffset.x;
+                        gait.actionOffsets[offset + 1] = authoredOffset.y;
+                        gait.actionOffsets[offset + 2] = authoredOffset.z;
+                    }
+                    // Retain the last action target while its contribution fades out.
+                    float motionWeight = actionWeight * (landingPose ? 1 - approach : 1);
+                    authoredOffset.set(gait.actionOffsets[offset], gait.actionOffsets[offset + 1], gait.actionOffsets[offset + 2]).mul(motionWeight);
+                    toWorld.transformDirection(authoredOffset);
+                    Vec3 motion = new Vec3(authoredOffset.x, authoredOffset.y, authoredOffset.z);
+                    double lift = motion.dot(soleNormal);
+                    // Authored lifting is allowed; downward motion cannot push through the support face.
+                    if (lift < 0) motion = motion.subtract(soleNormal.scale(lift));
+                    ankle = ankle.add(motion);
+                }
+                WeaverGait.LegState leg = gait.legs[i];
+                double elapsed = Double.isNaN(leg.renderedAt) ? 0 : Math.max(0, time - leg.renderedAt);
+                leg.renderedAt = Double.isNaN(leg.renderedAt) ? time : Math.max(time, leg.renderedAt);
+                float response = (float) (1 - Math.exp(-elapsed / 0.15));
+                boolean isPlantedStance = !leg.isStepping && leg.grounded;
+                if (isPlantedStance || leg.isStepping) {
+                    // Stance: strictly locked to world terrain anchor (zero sliding)
+                    // Swing: directly tracks the smooth procedural spline arc sampled from fractional partial ticks (zero lag / pure fluid tweening)
+                    leg.renderedAnkle = ankle;
+                    leg.renderedNormal = soleNormal;
+                } else if (leg.renderedAnkle == null || (!entity.onGround() && leg.renderedAnkle.distanceToSqr(ankle) > 3.0 * 3.0)) {
+                    leg.renderedAnkle = ankle;
+                    leg.renderedNormal = soleNormal;
+                } else {
+                    leg.renderedAnkle = leg.renderedAnkle.lerp(ankle, response);
+                    blendA.rotationTo((float) leg.renderedNormal.x, (float) leg.renderedNormal.y, (float) leg.renderedNormal.z,
+                        (float) soleNormal.x, (float) soleNormal.y, (float) soleNormal.z);
+                    blendB.identity().slerp(blendA, response);
+                    soleY.set((float) leg.renderedNormal.x, (float) leg.renderedNormal.y, (float) leg.renderedNormal.z);
+                    blendB.transform(soleY).normalize();
+                    leg.renderedNormal = new Vec3(soleY.x, soleY.y, soleY.z);
+                }
+                float contactStep = (float) (elapsed / (landingPose ? 1.5 : 3.0));
+                leg.contactWeight += Mth.clamp((leg.contactAvailable ? 1f : 0f) - leg.contactWeight, -contactStep, contactStep);
+                ankle = leg.renderedAnkle;
+                soleNormal = leg.renderedNormal;
+
+                // Active terrain surface collision resolution (ArachnoMod): push foot out of solid blocks
+                Vec3 upVector = WoodweaverSurfaceNavigation.up(entity, partial);
+                BlockHitResult floorHit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+                    ankle.add(upVector.scale(1.2)), ankle.subtract(upVector.scale(0.35)));
+                if (floorHit != null && floorHit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
+                    Vec3 surfNorm = WoodweaverSurfaceNavigation.normal(floorHit.getDirection());
+                    double floorY = upVector.dot(floorHit.getLocation().add(surfNorm.scale(0.1875)));
+                    double currentY = upVector.dot(ankle);
+                    if (floorY > currentY) {
+                        ankle = ankle.add(upVector.scale(floorY - currentY));
+                        leg.renderedAnkle = ankle;
+                        if (surfNorm.lengthSqr() > 0.01) {
+                            soleNormal = surfNorm;
+                            leg.renderedNormal = soleNormal;
+                        }
+                    }
+                }
+
+                target.set((float) (ankle.x - bodyX), (float) (ankle.y - bodyY), (float) (ankle.z - bodyZ));
+                toModel.transformPosition(target);
+                target.sub(hip.x / 16, hip.y / 16, hip.z / 16);
+                double side = i % 2 == 0 ? -1 : 1;
+                double desiredYaw = Math.atan2(-side * target.z, side * target.x);
+                boolean narrow = gait.legs[i].narrow;
+                float minYaw = narrow ? (i < 2 ? (side < 0 ? -1.30f : 0.30f) : i < 4 ? -0.20f : (side < 0 ? 0.30f : -1.30f)) : MIN_YAW[i];
+                float maxYaw = narrow ? (i < 2 ? (side < 0 ? -0.30f : 1.30f) : i < 4 ? 0.20f : (side < 0 ? 1.30f : -0.30f)) : MAX_YAW[i];
+                if (Float.isNaN(leg.minYaw)) { leg.minYaw = minYaw; leg.maxYaw = maxYaw; }
+                leg.minYaw = Mth.lerp(response, leg.minYaw, minYaw);
+                leg.maxYaw = Mth.lerp(response, leg.maxYaw, maxYaw);
+                minYaw = Math.max(-1.30f, leg.minYaw);
+                maxYaw = Math.min(1.30f, leg.maxYaw);
+                boolean moving = entity.getDeltaMovement().horizontalDistanceSqr() >= 0.004;
+                if (moving || !gait.legs[i].grounded) {
+                    gait.legs[i].recoveryRequested = target.x * side < (narrow ? -0.5 : 0.45) || target.y < -4.2
+                        || target.lengthSquared() > 46.0f || desiredYaw < minYaw - 0.55 || desiredYaw > maxYaw + 0.55;
+                } else {
+                    gait.legs[i].recoveryRequested = target.lengthSquared() > 46.0f || desiredYaw < minYaw - 0.65 || desiredYaw > maxYaw + 0.65;
+                }
+                double a = Math.sqrt(knee.x * knee.x + knee.y * knee.y + knee.z * knee.z) / 16.0;
+                double b = Math.sqrt(foot.x * foot.x + foot.y * foot.y + foot.z * foot.z) / 16.0;
+                solvePlanar(hip, knee, foot, target.x, target.y, target.z, a, b, i % 2 == 0, minYaw, maxYaw, narrow);
+                avoidLegCollisions(entity, gait, i, hip, knee, foot, new Vec3(bodyX, bodyY, bodyZ),
+                    minYaw, maxYaw, time, proceduralLegWeight * leg.contactWeight);
+                // The sole follows the actual collision face, including bridge sides and ceilings.
+                soleX.set(1, 0, 0);
+                soleWorld.set(bodyRotation).rotateY((float)Mth.clamp(desiredYaw, minYaw, maxYaw)).transform(soleX);
+                soleY.set((float)-soleNormal.x, (float)-soleNormal.y, (float)-soleNormal.z).normalize();
+                float projection = soleX.dot(soleY);
+                soleX.fma(-projection, soleY);
+                if (soleX.lengthSquared() < 0.0001f) {
+                    soleX.set(0, 0, 1).cross(soleY);
+                    if (soleX.lengthSquared() < 0.0001f) soleX.set(1, 0, 0).cross(soleY);
+                }
+                soleX.normalize(); soleX.cross(soleY, soleZ).normalize();
+                soleBasis.setColumn(0, soleX).setColumn(1, soleY).setColumn(2, soleZ);
+                soleWorld.setFromNormalized(soleBasis).normalize();
+                footRotation.set(bodyRotation).rotateZYX(hip.zRot, hip.yRot, hip.xRot)
+                    .rotateZYX(knee.zRot, knee.yRot, knee.xRot).invert().mul(soleWorld);
+                float naturalZ = foot.zRot;
+                levelFoot(foot, footRotation);
+                float zDiff = Mth.wrapDegrees((float)Math.toDegrees(foot.zRot - naturalZ));
+                if (Math.abs(zDiff) > 60.0f) {
+                    foot.zRot = naturalZ;
+                } else {
+                    foot.zRot = Mth.clamp(foot.zRot, naturalZ - 0.75f, naturalZ + 0.75f);
+                }
+                foot.xRot = Mth.clamp(foot.xRot, -0.25f, 0.25f);
+                foot.yRot = 0;
+                cache(gait.jointPose, i * 9, hip);
+                cache(gait.jointPose, i * 9 + 3, knee);
+                cache(gait.jointPose, i * 9 + 6, foot);
+                float legWeight = (preserveRoot && !entity.onGround()) ? proceduralLegWeight * leg.contactWeight : Math.max(0.95f, proceduralLegWeight * leg.contactWeight);
+                blend(hip, 0, legWeight); blend(knee, 3, legWeight); blend(foot, 6, legWeight);
+                Vec3 origin = new Vec3(bodyX, bodyY, bodyZ);
+                leg.clearanceHip = worldJoint(new Vec3(hip.x / 16.0, hip.y / 16.0, hip.z / 16.0), origin);
+                leg.clearanceKnee = worldJoint(jointPosition(hip, knee, foot, false), origin);
+                leg.clearanceAnkle = worldJoint(jointPosition(hip, knee, foot, true), origin);
+            }
+            gait.hasPose = true;
+        }
+
+        public void release(LivingEntity entity, float partialTicks, ModelPart all,
+                            ModelPart[] hips, ModelPart[] knees, ModelPart[] feet) {
+            WeaverGait.EntityGaitState gait = WeaverGait.getState(entity.getUUID());
+            if (gait == null || !gait.hasPose) return;
+            float weight = WeaverGait.transitionWeight(gait, entity.tickCount + Mth.clamp(partialTicks, 0, 1), false);
+            float legWeight = WeaverGait.transitionLegWeight(gait,
+                entity.tickCount + Mth.clamp(partialTicks, 0, 1), 0);
+            WeaverGait.transitionActionWeight(gait, entity.tickCount + Mth.clamp(partialTicks, 0, 1), false);
+            // Keep the next grounded solve continuous with the last airborne/authored body pose.
+            if (weight <= 0 && legWeight <= 0) {
+                gait.renderedRoot = new Vec3(all.x, all.y, all.z);
+                gait.renderedRootRotation.rotationZYX(all.zRot, all.yRot, all.xRot);
+                gait.renderedRootAt = entity.tickCount + Mth.clamp(partialTicks, 0, 1);
+                return;
+            }
+            all.y = Mth.lerp(weight, all.y, gait.rootY);
+            all.xRot = blendAngle(all.xRot, gait.rootPitch, weight);
+            all.zRot = blendAngle(all.zRot, gait.rootRoll, weight);
+            float yaw = entity.yBodyRotO + Mth.wrapDegrees(entity.yBodyRot - entity.yBodyRotO) * Mth.clamp(partialTicks, 0, 1);
+            gait.renderedRoot = new Vec3(all.x, all.y, all.z);
+            gait.renderedRootRotation.rotationZYX(all.zRot, all.yRot, all.xRot);
+            gait.renderedRootAt = entity.tickCount + Mth.clamp(partialTicks, 0, 1);
+            applySurfaceFrame(entity, partialTicks, all, yaw);
+            for (int i = 0; i < 6; i++) {
+                restore(hips[i], gait.jointPose, i * 9, legWeight * gait.legs[i].contactWeight);
+                restore(knees[i], gait.jointPose, i * 9 + 3, legWeight * gait.legs[i].contactWeight);
+                restore(feet[i], gait.jointPose, i * 9 + 6, legWeight * gait.legs[i].contactWeight);
+            }
+        }
+
+        private void applySurfaceFrame(LivingEntity entity, float partial, ModelPart all, float yaw) {
+            surfaceFrame.set(WoodweaverSurfaceNavigation.rotation(entity, partial));
+            if (Math.abs(surfaceFrame.w) > 0.999999f) return;
+            float angle = (float)Math.toRadians(180 - yaw);
+            blendA.rotationY(angle).rotateZ((float)Math.PI);
+            blendB.set(blendA).conjugate().mul(surfaceFrame).mul(blendA).rotateZYX(all.zRot, all.yRot, all.xRot);
+            setEuler(all, blendB.x, blendB.y, blendB.z, blendB.w);
+        }
+
+        private static void cache(float[] pose, int offset, ModelPart part) {
+            pose[offset] = part.xRot; pose[offset + 1] = part.yRot; pose[offset + 2] = part.zRot;
+        }
+
+        private void restore(ModelPart part, float[] pose, int offset, float weight) {
+            blendRotation(part, pose[offset], pose[offset + 1], pose[offset + 2], weight);
+        }
+
+        private static void levelFoot(ModelPart foot, Quaternionf q) {
+            setEuler(foot, q.x, q.y, q.z, q.w);
+        }
+
+        private void blend(ModelPart part, int offset, float weight) {
+            blendA.rotationZYX(authored[offset + 2], authored[offset + 1], authored[offset]);
+            blendB.rotationZYX(part.zRot, part.yRot, part.xRot);
+            blendA.slerp(blendB, weight).normalize();
+            setEuler(part, blendA.x, blendA.y, blendA.z, blendA.w);
+        }
+
+        private void blendRotation(ModelPart part, float x, float y, float z, float weight) {
+            blendA.rotationZYX(part.zRot, part.yRot, part.xRot);
+            blendB.rotationZYX(z, y, x);
+            blendA.slerp(blendB, weight).normalize();
+            setEuler(part, blendA.x, blendA.y, blendA.z, blendA.w);
+        }
+
+        private static float blendAngle(float from, float to, float weight) {
+            return from + (float) Math.atan2(Math.sin(to - from), Math.cos(to - from)) * weight;
+        }
+
+        public void smoothHead(WoodweaverEntity entity, float partialTicks, ModelPart all, float trackingYaw, float trackingPitch) {
+            try {
+                if (all == null || entity == null) return;
+                ModelPart body2 = all.hasChild("body2") ? all.getChild("body2") : null;
+                if (body2 == null) return;
+                ModelPart upperBody = body2.hasChild("upper_body") ? body2.getChild("upper_body") : null;
+                if (upperBody == null) return;
+                ModelPart head = upperBody.hasChild("head") ? upperBody.getChild("head") : null;
+                if (head == null) return;
+                // Counteract procedural body/root pitch so terrain slopes or climbing tilt never force the head downward
+                float bodyPitch = all.xRot;
+                float targetYaw = (float) Math.toRadians(Mth.clamp(trackingYaw, -85.0f, 85.0f));
+                float targetPitch = (float) Math.toRadians(Mth.clamp(trackingPitch, -60.0f, 60.0f)) - bodyPitch;
+                head.yRot = blendAngle(head.yRot, targetYaw, 0.35f);
+                head.xRot = blendAngle(head.xRot, targetPitch, 0.35f);
+            } catch (Exception ignored) {}
+        }
+
+        public void smoothHead(LivingEntity entity, float partialTicks, ModelPart all, float trackingYaw, float trackingPitch) {
+            if (entity instanceof WoodweaverEntity weaver) {
+                smoothHead(weaver, partialTicks, all, trackingYaw, trackingPitch);
+            }
+        }
+
+    }
+}
+// 1.21.1

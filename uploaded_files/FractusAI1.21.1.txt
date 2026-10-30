@@ -1656,33 +1656,43 @@ public class FractusOnEntityTickUpdateProcedure {
 		if (!(entity instanceof Mob mob)) return false;
 		if (mob.hasCustomName() || mob.isPersistenceRequired()) return false;
 
-		// 1. Never despawn if assigned to or near a Verdant Engine orbital ring
-		if (persistentInt(mob, "fractus_verdant_slot", -1) >= 0) return false;
-		if (findNearestVerdantEngine(level, mob, FRACTUS_VERDANT_DETECTION_RANGE) != null) return false;
-
-		// 2. Never despawn during combat or active ability states
 		if (mob.getTarget() != null && mob.getTarget().isAlive()) return false;
 		if (retaliationTarget(mob) != null) return false;
+
 		if (isAngry(mob)) return false;
 		if (mob.tickCount - mob.getLastHurtByMobTimestamp() < 200) return false;
 		if (persistentInt(mob, K_VULNERABLE, 0) > 0) return false;
+
 		if (persistentInt(mob, K_SUMMON_ROLE, 0) > 0 || persistentInt(mob, K_SUMMON_TICKS, 0) > 0) return false;
 		if (persistentInt(mob, K_BURST_TIMER, 0) > 0 || persistentInt(mob, K_BURST_DEACT_DELAY, 0) > 0
 				|| persistentInt(mob, K_BURST_DEACT_PLAY, 0) > 0 || persistentInt(mob, K_LASER_DEACT_PLAY, 0) > 0) return false;
 		if (persistentBoolean(mob, "is_telekinesis_active", false)) return false;
 		if (persistentInt(mob, "fractus_sphere_timer", 0) > 0 || persistentInt(mob, "sphere_ticks", 0) > 0) return false;
 
-		// 3. Do not despawn merely because no player is logged in or present in the dimension (chunks unload safely)
+		if (findNearestVerdantEngine(level, mob, FRACTUS_VERDANT_DETECTION_RANGE) != null) return false;
+
 		Player nearestPlayer = level.getNearestPlayer(mob, -1.0);
 		if (nearestPlayer == null) {
-			return false;
+			mob.discard();
+			return true;
 		}
 
-		// 4. Truly idle stray check: Only discard wild unassigned strays wandering > 128 blocks away
 		double distSqr = mob.distanceToSqr(nearestPlayer);
 		if (distSqr > 128.0 * 128.0) {
 			mob.discard();
 			return true;
+		}
+
+		if (distSqr > 32.0 * 32.0) {
+			int idleTicks = persistentInt(mob, "fractus_idle_despawn_ticks", 0) + 1;
+			mob.getPersistentData().putInt("fractus_idle_despawn_ticks", idleTicks);
+
+			if (idleTicks > 1200 || (idleTicks > 600 && mob.getRandom().nextInt(20) == 0)) {
+				mob.discard();
+				return true;
+			}
+		} else {
+			mob.getPersistentData().putInt("fractus_idle_despawn_ticks", 0);
 		}
 
 		return false;
@@ -2731,7 +2741,6 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static double getTargetThreatReach(LivingEntity target) {
-		if (target == null) return 2.5;
 		if (target == null) return 3.0;
 		double reach = 3.0;
 		if (target instanceof Player player) {
@@ -2748,10 +2757,6 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static void moveCombat(Entity entity, LivingEntity target, boolean attacking, boolean angry, int cooldown, int angerRetreatTicks) {
-		if (target == null) {
-			driftIdleScan(entity);
-			return;
-		}
 		if (entity.level() instanceof ServerLevel serverLevel) {
 			Entity verdant = findNearestVerdantEngine(serverLevel, entity, FRACTUS_VERDANT_DETECTION_RANGE);
 			if (verdant != null && verdant.isAlive()) {
@@ -2801,10 +2806,6 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static void moveRetreat(Entity entity, LivingEntity target, boolean angry) {
-		if (target == null) {
-			driftIdleScan(entity);
-			return;
-		}
 		Vec3 targetCenter = target.position();
 		Vec3 away = entity.position().subtract(targetCenter);
 		Vec3 horizontalAway = new Vec3(away.x, 0.0, away.z);
@@ -2828,10 +2829,6 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static void moveCooldownReposition(Entity entity, LivingEntity target, boolean angry) {
-		if (target == null) {
-			driftIdleScan(entity);
-			return;
-		}
 		if (entity.level() instanceof ServerLevel level) {
 			Optional<Vec3> coverPoint = findCooldownCoverPoint(level, entity, target, angry);
 
@@ -2984,32 +2981,7 @@ public class FractusOnEntityTickUpdateProcedure {
 
 	private static boolean hasNearbyHarmfulBlock(ServerLevel level, Vec3 center, double radius) {
 		if (center == null) return false;
-		BlockPos centerPos = BlockPos.containing(center.x, center.y, center.z);
-		int blockRadius = (int) Math.ceil(radius);
-		int minChunkX = (centerPos.getX() - blockRadius) >> 4;
-		int minChunkZ = (centerPos.getZ() - blockRadius) >> 4;
-		int chunkWidth = ((centerPos.getX() + blockRadius) >> 4) - minChunkX + 1;
-		int chunkDepth = ((centerPos.getZ() + blockRadius) >> 4) - minChunkZ + 1;
-		net.minecraft.world.level.chunk.LevelChunk[] chunks = new net.minecraft.world.level.chunk.LevelChunk[chunkWidth * chunkDepth];
-		double radiusSqr = radius * radius;
-
-		for (BlockPos pos : BlockPos.betweenClosed(centerPos.offset(-blockRadius, -blockRadius, -blockRadius), centerPos.offset(blockRadius, blockRadius, blockRadius))) {
-			if (level.isOutsideBuildHeight(pos)) continue;
-			double dx = pos.getX() + 0.5 - center.x;
-			double dy = pos.getY() + 0.5 - center.y;
-			double dz = pos.getZ() + 0.5 - center.z;
-			if (dx * dx + dy * dy + dz * dz > radiusSqr) continue;
-			int index = ((pos.getZ() >> 4) - minChunkZ) * chunkWidth + ((pos.getX() >> 4) - minChunkX);
-			net.minecraft.world.level.chunk.LevelChunk chunk = chunks[index];
-			if (chunk == null) {
-				chunk = level.getChunk(pos.getX() >> 4, pos.getZ() >> 4);
-				chunks[index] = chunk;
-			}
-			if (isHarmfulBlock(chunk.getBlockState(pos))) {
-				return true;
-			}
-		}
-		return false;
+		return nearestHarmfulBlockCenter(level, center, radius).isPresent();
 	}
 
 	private static Optional<Vec3> nearestHarmfulBlockCenter(ServerLevel level, Vec3 center, double radius) {
@@ -3018,35 +2990,20 @@ public class FractusOnEntityTickUpdateProcedure {
 		int blockRadius = (int) Math.ceil(radius);
 		Vec3 nearest = null;
 		double nearestDistance = Double.MAX_VALUE;
-		double radiusSqr = radius * radius;
-		int minChunkX = (centerPos.getX() - blockRadius) >> 4;
-		int minChunkZ = (centerPos.getZ() - blockRadius) >> 4;
-		int chunkWidth = ((centerPos.getX() + blockRadius) >> 4) - minChunkX + 1;
-		int chunkDepth = ((centerPos.getZ() + blockRadius) >> 4) - minChunkZ + 1;
-		net.minecraft.world.level.chunk.LevelChunk[] chunks = new net.minecraft.world.level.chunk.LevelChunk[chunkWidth * chunkDepth];
 
 		for (BlockPos pos : BlockPos.betweenClosed(centerPos.offset(-blockRadius, -blockRadius, -blockRadius), centerPos.offset(blockRadius, blockRadius, blockRadius))) {
-			if (level.isOutsideBuildHeight(pos)) continue;
-			double dx = pos.getX() + 0.5 - center.x;
-			double dy = pos.getY() + 0.5 - center.y;
-			double dz = pos.getZ() + 0.5 - center.z;
-			double distance = dx * dx + dy * dy + dz * dz;
-			if (distance > radiusSqr) continue;
-			int index = ((pos.getZ() >> 4) - minChunkZ) * chunkWidth + ((pos.getX() >> 4) - minChunkX);
-			net.minecraft.world.level.chunk.LevelChunk chunk = chunks[index];
-			if (chunk == null) {
-				chunk = level.getChunk(pos.getX() >> 4, pos.getZ() >> 4);
-				chunks[index] = chunk;
-			}
-			BlockState state = chunk.getBlockState(pos);
+			BlockState state = level.getBlockState(pos);
 
 			if (!isHarmfulBlock(state)) {
 				continue;
 			}
 
-			if (distance < nearestDistance) {
+			Vec3 blockCenter = pos.getCenter();
+			double distance = blockCenter.distanceToSqr(center);
+
+			if (distance <= radius * radius && distance < nearestDistance) {
 				nearestDistance = distance;
-				nearest = pos.getCenter();
+				nearest = blockCenter;
 			}
 		}
 
@@ -3090,10 +3047,9 @@ public class FractusOnEntityTickUpdateProcedure {
 		double seed = persistentDouble(entity, K_ORBIT_SEED, 0.0);
 		double bob = Math.sin(entity.tickCount * BOB_SPEED + seed) * BOB_AMOUNT;
 		double preferredRange = angry ? ANGRY_PREFERRED_COMBAT_RANGE : PREFERRED_COMBAT_RANGE;
-		double ascendBonus = Math.min(2.0, currentHoverHeight(entity, angry) * 0.5);
 		Vec3 desired = targetCenter
 			.add(horizontalAway.scale(preferredRange * 0.75))
-			.add(0.0, currentHoverHeight(entity, angry) + ascendBonus + bob, 0.0);
+			.add(0.0, currentHoverHeight(entity, angry) + 4.5 + bob, 0.0);
 
 		moveToward(entity, desired, FLANK_REPOSITION_SPEED * 1.1);
 	}
@@ -3122,10 +3078,6 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static void moveLikeDrone(Entity entity, LivingEntity target, boolean attacking, boolean angry) {
-		if (target == null) {
-			driftIdleScan(entity);
-			return;
-		}
 		Vec3 targetCenter = target.position();
 		Vec3 away = entity.position().subtract(targetCenter);
 		Vec3 horizontalAway = new Vec3(away.x, 0.0, away.z);
@@ -3489,35 +3441,6 @@ public class FractusOnEntityTickUpdateProcedure {
 			next = new Vec3(next.x * scale, next.y, next.z * scale);
 		}
 
-		// Drone Overhead Ceiling Sensor & Anti-Latching Repulsion (Standard Fractus: 1x1x1):
-		double entityHeight = Math.max(1.0, entity.getBbHeight());
-		double topY = entity.getY() + entityHeight;
-		double overheadCeilingDist = Double.MAX_VALUE;
-		if (entity.level() instanceof ServerLevel sl) {
-			double halfW = Math.max(1.0, entity.getBbWidth()) * 0.35;
-			for (double dx : new double[] { 0.0, -halfW, halfW }) {
-				for (double dz : new double[] { 0.0, -halfW, halfW }) {
-					for (int dy = 1; dy <= 4; dy++) {
-						BlockPos ceilCheck = BlockPos.containing(entity.getX() + dx, topY + dy * 0.5, entity.getZ() + dz);
-						if (isObstacleBlock(sl, ceilCheck)) {
-							double dist = ceilCheck.getY() - topY;
-							if (dist < overheadCeilingDist) {
-								overheadCeilingDist = dist;
-							}
-							break;
-						}
-					}
-				}
-			}
-		}
-		if (entity.verticalCollision && entity.getDeltaMovement().y > 0.0) {
-			overheadCeilingDist = Math.min(overheadCeilingDist, 0.1);
-		}
-		if (overheadCeilingDist < 1.35) {
-			double repulsionForce = (1.35 - Math.max(0.0, overheadCeilingDist)) * 0.09;
-			next = new Vec3(next.x, Math.min(next.y, 0.0) - repulsionForce, next.z);
-		}
-
 		next = new Vec3(
 			next.x,
 			Mth.clamp(next.y, -currentVertLimit, currentVertLimit),
@@ -3558,9 +3481,9 @@ public class FractusOnEntityTickUpdateProcedure {
 		return Double.NEGATIVE_INFINITY;
 	}
 
-	private static double findCeilingY(ServerLevel level, double x, double startY, double z, int maxSearch) {
-		for (int dy = 1; dy <= maxSearch; dy++) {
-			BlockPos check = BlockPos.containing(x, startY + dy, z);
+	private static double findCeilingY(ServerLevel level, double x, double floorY, double z, int maxSearch) {
+		for (int dy = 2; dy <= maxSearch; dy++) {
+			BlockPos check = BlockPos.containing(x, floorY + dy, z);
 			if (level.isOutsideBuildHeight(check)) break;
 			if (isObstacleBlock(level, check)) {
 				return check.getY();
@@ -3573,33 +3496,28 @@ public class FractusOnEntityTickUpdateProcedure {
 	}
 
 	private static Vec3 adjustDesiredForCavesAndRavines(ServerLevel level, Entity entity, Vec3 desired) {
-		// Standard Fractus is exactly 1 block in size (1.0 width x 1.0 height)
 		double entityHeight = Math.max(1.0, entity.getBbHeight());
 		Vec3 currentPos = entity.position();
 
 		double floorY = findFloorY(level, desired.x, Math.max(currentPos.y, desired.y) + 1.5, desired.z, 48);
-		double ceilingAtDesired = findCeilingY(level, desired.x, floorY > Double.NEGATIVE_INFINITY ? floorY : currentPos.y - 0.5, desired.z, 36);
-		double ceilingAboveSelf = findCeilingY(level, currentPos.x, currentPos.y - 0.2, currentPos.z, 28);
-		double ceilingY = Math.min(ceilingAtDesired, ceilingAboveSelf);
+		double ceilingY = findCeilingY(level, desired.x, floorY > Double.NEGATIVE_INFINITY ? floorY : currentPos.y - 1.0, desired.z, 36);
 
 		boolean isDestroying = persistentInt(entity, K_DESTROYING_FIRE, 0) > 0;
 		double minGroundBuffer = isDestroying ? 3.0 : 1.75;
-		double minCeilingBuffer = 1.50;
+		double minCeilingBuffer = 1.25;
+
 		double clampedY = desired.y;
 
 		if (ceilingY < Double.MAX_VALUE) {
 			if (floorY > Double.NEGATIVE_INFINITY) {
 				double headroom = ceilingY - floorY;
-				double totalBuffer = entityHeight + minCeilingBuffer + minGroundBuffer;
-				if (headroom <= totalBuffer + 2.5) {
-					// Mid-corridor centerline: lock flight altitude to the center between floor and ceiling
-					clampedY = floorY + Math.max(minGroundBuffer * 0.4, (headroom - entityHeight) * 0.5);
+				if (headroom <= entityHeight + minCeilingBuffer + minGroundBuffer) {
+					clampedY = floorY + Math.max(0.3, (headroom - entityHeight) * 0.5);
 				} else {
 					double maxAllowedY = ceilingY - entityHeight - minCeilingBuffer;
 					double minAllowedY = floorY + minGroundBuffer;
 					double idealHover = isDestroying ? 4.0 : (IDLE_HOVER_HEIGHT + (isEscapedContainmentDimension(entity) ? ESCAPED_CONTAINMENT_HOVER_BONUS : 0.0));
-					double targetDesired = (desired.y <= minAllowedY + 0.5) ? (floorY + idealHover) : desired.y;
-					clampedY = Mth.clamp(targetDesired, minAllowedY, maxAllowedY);
+					clampedY = Mth.clamp(desired.y, minAllowedY, maxAllowedY);
 				}
 			} else {
 				clampedY = Math.min(desired.y, ceilingY - entityHeight - minCeilingBuffer);
@@ -3622,51 +3540,35 @@ public class FractusOnEntityTickUpdateProcedure {
 			Vec3 hitPoint = hit.getLocation();
 			Vec3 ray = hitPoint.subtract(eyePos);
 			double distToWall = ray.length();
-
 			if (distToWall > 1.4) {
 				Vec3 safeStep = eyePos.add(ray.normalize().scale(distToWall - 1.0));
 				desired = new Vec3(safeStep.x, desired.y, safeStep.z);
 			} else {
-				// Drone 3D obstacle avoidance: check if dipping down clears the overhead obstruction
-				double dipAmount = 1.1;
-				Vec3 dipEye = eyePos.subtract(0.0, dipAmount, 0.0);
-				Vec3 dipTarget = desired.subtract(0.0, dipAmount, 0.0);
-				BlockHitResult dipHit = level.clip(new ClipContext(dipEye, dipTarget, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, entity));
-				double floorBelow = findFloorY(level, desired.x, eyePos.y, desired.z, 12);
-				if (dipHit.getType() == HitResult.Type.MISS && (floorBelow > Double.NEGATIVE_INFINITY && dipTarget.y >= floorBelow + minGroundBuffer * 0.5)) {
-					desired = dipTarget;
-				} else {
-					Vec3 forward = new Vec3(ray.x, 0.0, ray.z);
-
-					if (forward.lengthSqr() < 0.001) {
-						forward = entity.getLookAngle();
-						forward = new Vec3(forward.x, 0.0, forward.z);
+				Vec3 forward = new Vec3(ray.x, 0.0, ray.z);
+				if (forward.lengthSqr() < 0.001) {
+					forward = entity.getLookAngle();
+					forward = new Vec3(forward.x, 0.0, forward.z);
+				}
+				if (forward.lengthSqr() > 0.001) {
+					forward = forward.normalize();
+					double bestDist = 0.0;
+					Vec3 bestCandidate = desired;
+					double[] testAngles = { Math.PI / 4.0, -Math.PI / 4.0, Math.PI / 2.0, -Math.PI / 2.0 };
+					for (double a : testAngles) {
+						double cos = Math.cos(a);
+						double sin = Math.sin(a);
+						Vec3 probeDir = new Vec3(forward.x * cos - forward.z * sin, 0.0, forward.x * sin + forward.z * cos);
+						Vec3 probeEnd = eyePos.add(probeDir.scale(4.0));
+						BlockHitResult probeHit = level.clip(new ClipContext(eyePos, probeEnd, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, entity));
+						double clearDist = probeHit.getType() == HitResult.Type.MISS ? 4.0 : probeHit.getLocation().distanceTo(eyePos);
+						if (clearDist > bestDist) {
+							bestDist = clearDist;
+							double step = Math.max(1.0, clearDist - 0.8);
+							bestCandidate = new Vec3(eyePos.x + probeDir.x * step, desired.y, eyePos.z + probeDir.z * step);
+						}
 					}
-
-					if (forward.lengthSqr() > 0.001) {
-						forward = forward.normalize();
-						double bestDist = 0.0;
-						Vec3 bestCandidate = desired;
-
-						double[] testAngles = { Math.PI / 4.0, -Math.PI / 4.0, Math.PI / 2.0, -Math.PI / 2.0 };
-						for (double a : testAngles) {
-							double cos = Math.cos(a);
-							double sin = Math.sin(a);
-							Vec3 probeDir = new Vec3(forward.x * cos - forward.z * sin, 0.0, forward.x * sin + forward.z * cos);
-							Vec3 probeEnd = eyePos.add(probeDir.scale(4.0));
-							BlockHitResult probeHit = level.clip(new ClipContext(eyePos, probeEnd, ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, entity));
-							double clearDist = probeHit.getType() == HitResult.Type.MISS ? 4.0 : probeHit.getLocation().distanceTo(eyePos);
-
-							if (clearDist > bestDist) {
-								bestDist = clearDist;
-								double step = Math.max(1.0, clearDist - 0.8);
-								bestCandidate = new Vec3(eyePos.x + probeDir.x * step, desired.y, eyePos.z + probeDir.z * step);
-							}
-						}
-
-						if (bestDist > 1.5) {
-							desired = bestCandidate;
-						}
+					if (bestDist > 1.5) {
+						desired = bestCandidate;
 					}
 				}
 			}
@@ -3682,16 +3584,10 @@ public class FractusOnEntityTickUpdateProcedure {
 			persistentDouble(entity, K_LAST_Y, position.y),
 			persistentDouble(entity, K_LAST_Z, position.z)
 		);
-		Vec3 step = desired.subtract(position).normalize().scale(0.6);
-		AABB nextBox = entity.getBoundingBox().move(step);
-		boolean blockedAhead = !level.noCollision(entity, nextBox);
-		if (blockedAhead && step.y > 0.0 && !level.noCollision(entity, entity.getBoundingBox().move(0.0, step.y, 0.0))) {
-			desired = new Vec3(desired.x, position.y, desired.z);
-			step = desired.subtract(position).normalize().scale(0.6);
-			blockedAhead = !level.noCollision(entity, entity.getBoundingBox().move(step));
-		}
 		boolean tryingToMove = desired.distanceToSqr(position) > 4.0;
 		boolean stuck = tryingToMove && movedSqr < 0.0125;
+		AABB nextBox = entity.getBoundingBox().move(desired.subtract(position).normalize().scale(0.6));
+		boolean blockedAhead = !level.noCollision(entity, nextBox);
 		int stuckTicks = stuck || blockedAhead ? persistentInt(entity, K_STUCK_TICKS, 0) + 1 : Math.max(0, persistentInt(entity, K_STUCK_TICKS, 0) - 1);
 
 		entity.getPersistentData().putInt(K_STUCK_TICKS, stuckTicks);
@@ -3713,7 +3609,7 @@ public class FractusOnEntityTickUpdateProcedure {
 		double seed = persistentDouble(entity, K_ORBIT_SEED, 0.0);
 		double entityHeight = Math.max(1.0, entity.getBbHeight());
 
-		double currentFloorY = findFloorY(level, origin.x, origin.y, origin.z, 16);
+		double currentFloorY = findFloorY(level, origin.x, origin.y + 1.0, origin.z, 16);
 		double currentCeilingY = findCeilingY(level, origin.x, currentFloorY, origin.z, 20);
 		boolean hasCeiling = currentCeilingY < Double.MAX_VALUE;
 
@@ -3738,9 +3634,6 @@ public class FractusOnEntityTickUpdateProcedure {
 						Mth.clamp(desired.y - origin.y + yOffset, -OPEN_SPACE_VERTICAL_RANGE, OPEN_SPACE_VERTICAL_RANGE),
 						Math.sin(angle) * radius
 					);
-					if (candidate.distanceToSqr(desired) + candidate.distanceToSqr(origin) * 0.25 - 2.0 >= bestScore) {
-						continue;
-					}
 
 					if (!isOpenForDrone(level, entity, candidate)) {
 						continue;
@@ -3751,7 +3644,7 @@ public class FractusOnEntityTickUpdateProcedure {
 						continue;
 					}
 
-					double candFloorY = findFloorY(level, candidate.x, candidate.y, candidate.z, 16);
+					double candFloorY = findFloorY(level, candidate.x, candidate.y + 1.0, candidate.z, 16);
 					double candCeilingY = findCeilingY(level, candidate.x, candFloorY, candidate.z, 20);
 
 					double score = candidate.distanceToSqr(desired) + candidate.distanceToSqr(origin) * 0.25;
@@ -4364,7 +4257,7 @@ public class FractusOnEntityTickUpdateProcedure {
 			return;
 		}
 
-		boolean shouldDrop = BURST_BLOCK_DROPS && level.getRandom().nextFloat() < 0.05f && level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, new AABB(pos).inflate(4.0)).size() < 3;
+		boolean shouldDrop = BURST_BLOCK_DROPS && level.getRandom().nextFloat() < 0.20f && level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, new AABB(pos).inflate(4.0)).size() < 12;
 		level.destroyBlock(pos, shouldDrop, entity);
 	}
 
@@ -4635,7 +4528,7 @@ public class FractusOnEntityTickUpdateProcedure {
 
 		if (progress >= 1.0f) {
 			level.destroyBlockProgress(pos.hashCode(), pos, -1);
-			boolean shouldDrop = BURST_BLOCK_DROPS && level.getRandom().nextFloat() < 0.05f && level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, new AABB(pos).inflate(4.0)).size() < 3;
+			boolean shouldDrop = level.getRandom().nextFloat() < 0.25f && level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class, new AABB(pos).inflate(4.0)).size() < 12;
 			level.destroyBlock(pos, shouldDrop, entity);
 			BURST_THERMAL_PROGRESS.remove(pos.immutable());
 			if (level.getRandom().nextFloat() < 0.09f) {
@@ -4908,7 +4801,6 @@ public class FractusOnEntityTickUpdateProcedure {
 		if (entity.level() instanceof ServerLevel level) {
 			BlockPos checkCenter = BlockPos.containing(referencePos.x, referencePos.y, referencePos.z);
 			BlockPos below = checkCenter.below();
-
 			for (int dy = 0; dy <= 4; dy++) {
 				BlockPos checkPos = below.below(dy);
 				if (!level.hasChunkAt(checkPos)) break;
@@ -4920,11 +4812,10 @@ public class FractusOnEntityTickUpdateProcedure {
 			}
 
 			// Ceiling & Enclosure Aware Hovering:
-			// Standard Fractus is exactly 1 block in size (1.0 width x 1.0 height)
+			// Standard Fractus hitbox is exactly 1 block in dimensions (1.0 width x 1.0 height).
 			double entityHeight = Math.max(1.0, entity.getBbHeight());
 			double floorY = referencePos.y;
-
-			for (int dy = 0; dy <= (isFractusPrime(entity) ? 10 : 8); dy++) {
+			for (int dy = 0; dy <= 8; dy++) {
 				BlockPos floorCheck = checkCenter.below(dy);
 				if (!level.hasChunkAt(floorCheck)) break;
 				BlockState fState = level.getBlockState(floorCheck);
@@ -4935,9 +4826,8 @@ public class FractusOnEntityTickUpdateProcedure {
 			}
 
 			double ceilingY = Double.MAX_VALUE;
-			int maxScan = (int) Math.ceil(height + entityHeight + 4.0);
-
-			for (int dy = 1; dy <= Math.max(14, maxScan); dy++) {
+			int maxScan = (int) Math.ceil(height + entityHeight + 3.0);
+			for (int dy = 1; dy <= Math.max(12, maxScan); dy++) {
 				BlockPos ceilCheck = BlockPos.containing(referencePos.x, floorY + dy, referencePos.z);
 				if (!level.hasChunkAt(ceilCheck)) break;
 				BlockState cState = level.getBlockState(ceilCheck);
@@ -4949,12 +4839,12 @@ public class FractusOnEntityTickUpdateProcedure {
 
 			if (ceilingY < Double.MAX_VALUE) {
 				double headroom = ceilingY - floorY;
-				double topCushion = 1.35;
-				double bottomCushion = 0.40;
+				double topCushion = 0.35;
+				double bottomCushion = 0.25;
 				double availableHover = headroom - entityHeight - topCushion;
 
 				if (availableHover <= bottomCushion) {
-					height = Math.max(bottomCushion, (headroom - entityHeight) * 0.5);
+					height = Math.max(0.1, (headroom - entityHeight) * 0.5);
 				} else {
 					height = Math.min(height, availableHover);
 					height = Math.max(bottomCushion, height);

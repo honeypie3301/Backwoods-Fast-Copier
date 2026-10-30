@@ -1,7 +1,5 @@
 package net.mcreator.thebackwoods.procedures;
 
-import net.mcreator.thebackwoods.procedures.SplinterOnEntityTickUpdateProcedure.SplinterHivemind;
-
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.mcreator.thebackwoods.entity.PetrifiedLogSplinterEntity;
 import net.mcreator.thebackwoods.init.TheBackwoodsModBlocks;
@@ -77,17 +75,6 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 	@SubscribeEvent
 	public static void onEntityTickAfterGoals(EntityTickEvent.Post event) {
 		if (event.getEntity() instanceof PetrifiedLogSplinterEntity member) {
-			if (!member.level().isClientSide() && Math.floorMod(member.tickCount + member.getId(), 5) == 0)
-				member.getEntityData().set(PetrifiedLogSplinterEntity.DATA_frozenByRose,
-						checkNearbyRoseBlocks(member.level(), member) ? 1 : 0);
-			if (member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
-				setSpeed(member, 0);
-				member.getNavigation().stop();
-				Vec3 motion = member.getDeltaMovement();
-				member.setDeltaMovement(0.0, motion.y, 0.0);
-				return;
-			}
-			if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.finishAction(member, member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress))) return;
 			SplinterHivemind.followFormationPost(member, member.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress));
 		}
 	}
@@ -207,14 +194,6 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             return;
         }
 
-        boolean retaliating = attacker != null && attacker.isAlive()
-                && petrified.getTarget() == attacker
-                && petrified.tickCount - petrified.getLastHurtByMobTimestamp() >= 0
-                && petrified.tickCount - petrified.getLastHurtByMobTimestamp() <= 200;
-        if (retaliating) {
-            petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_isEnraged, 1);
-            petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_watchTimer, 0);
-        }
         int isEnraged = petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_isEnraged);
         int watchTimer = petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_watchTimer);
 
@@ -239,8 +218,8 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             isWatched = foundPlayerDirect.getLookAngle().normalize().dot(toSplinter) > WATCH_DOT_THRESHOLD && foundPlayerDirect.hasLineOfSight(petrified);
         }
 
-        double distToPlayer = petrified.distanceTo(foundPlayer);
-        if (isEnraged == 1 && !retaliating && distToPlayer > RAGE_ESCAPE_RANGE) {
+        double distToPlayer = foundPlayerDirect != null ? petrified.position().distanceTo(foundPlayerDirect.position()) : Double.MAX_VALUE;
+        if (isEnraged == 1 && distToPlayer > RAGE_ESCAPE_RANGE) {
             resetState(petrified);
             isEnraged = 0;
         }
@@ -259,15 +238,10 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 
         SplinterHivemind.observe(petrified, foundPlayerDirect, petrified.getLastHurtByMob());
 
-        boolean heldRoseBeforeMove = foundPlayerDirect != null && checkHeldRose(foundPlayerDirect, petrified, world,
-                foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
-        if (heldRoseBeforeMove || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
-            setSpeed(petrified, 0); petrified.getNavigation().stop(); resetState(petrified); return;
-        }
-
-        // Enraged Petrified members pursue in melee; projectile immunity excludes bow evasions and cover.
+        // A raised bow briefly overrides the ordinary watched freeze; roses and mining take priority.
         if (foundPlayerDirect != null && petrified.getTarget() == foundPlayerDirect
                 && petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) != 1
+                && (petrified.tickCount % 5 != 0 || !checkNearbyRoseBlocks(world, petrified))
                 && SplinterHivemind.handleBowThreat(petrified, foundPlayerDirect,
                     petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_mineProgress), ACTIVE_MOVE_SPEED)) return;
 
@@ -290,11 +264,6 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
         if (hit.getType() == HitResult.Type.BLOCK) {
             BlockPos facePos = ((BlockHitResult) hit).getBlockPos();
             BlockPos feetPos = new BlockPos(facePos.getX(), Mth.floor(petrified.getY()), facePos.getZ());
-
-            if (SplinterOnEntityTickUpdateProcedure.AdaptiveHive.detourAroundCover(world, petrified, foundPlayer, feetPos, facePos)) {
-                petrified.getEntityData().set(PetrifiedLogSplinterEntity.DATA_mineProgress, 0);
-                return;
-            }
 
             boolean canMineFeet = canMine(world, feetPos, foundPlayer);
             boolean canMineFace = canMine(world, facePos, foundPlayer);
@@ -321,8 +290,6 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
                     speedRef = world.getBlockState(facePos).getDestroySpeed(world, facePos);
                 }
 
-                SplinterOnEntityTickUpdateProcedure.AdaptiveHive.showMiningCracks(petrified, mineProgress,
-                        speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE, canMineDown ? downPos : null, canMineFeet ? feetPos : null, canMineFace ? facePos : null);
                 if (mineProgress > (speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE)) {
                     if (canMineDown) world.destroyBlock(downPos, false);
                     if (canMineFeet) world.destroyBlock(feetPos, false);
@@ -341,13 +308,12 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
 
         boolean foundRose = false;
         if (foundPlayerDirect != null) {
-            foundRose = heldRoseBeforeMove;
+            foundRose = checkHeldRose(foundPlayerDirect, petrified, world, foundPlayerDirect.getX(), foundPlayerDirect.getY(), foundPlayerDirect.getZ());
         }
-		if (foundRose || petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1) {
+        if (foundRose || (petrified.tickCount % 5 == 0 && checkNearbyRoseBlocks(world, petrified))) {
             setSpeed(petrified, 0);
             resetState(petrified);
             petrified.getPersistentData().putInt(K_RAGE_BONUS, 0);
-			return;
         }
 
         if (!foundRose && petrified.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) != 1) {
@@ -379,14 +345,9 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
         double horizontalDist = splinter.position().distanceTo(foundPlayer.position());
         if (heightDiff >= 1.4 && horizontalDist < 12) {
             if (world instanceof ServerLevel serverLevel) {
-                BlockPos under = BlockPos.containing(splinter.getX(), splinter.getY() - 1, splinter.getZ());
-                boolean placing = serverLevel.getBlockState(under).isAir();
                 CommandSourceStack src = new CommandSourceStack(CommandSource.NULL, new Vec3(splinter.getX(), splinter.getY(), splinter.getZ()), Vec2.ZERO, serverLevel, 4, "", Component.literal(""), serverLevel.getServer(), null).withSuppressedOutput();
                 serverLevel.getServer().getCommands().performPrefixedCommand(src, "fill ~ ~-1 ~ ~ ~-1 ~ the_backwoods:petrified_splintered_oak_wood replace minecraft:air");
-                if (placing && serverLevel.getBlockState(under).is(TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get())) {
-                    SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
-                    trackPlacedBlock(splinter, under);
-                }
+                trackPlacedBlock(splinter, BlockPos.containing(splinter.getX(), splinter.getY() - 1, splinter.getZ()));
             }
             if (splinter.onGround()) splinter.setDeltaMovement(new Vec3(splinter.getDeltaMovement().x(), 0.4, splinter.getDeltaMovement().z()));
             splinter.fallDistance = 0;
@@ -394,10 +355,8 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
             Vec3 look = splinter.getLookAngle();
             BlockPos bridgePos = BlockPos.containing(splinter.getX() + look.x, splinter.getY() - 1, splinter.getZ() + look.z);
             if (!(world.getBlockFloorHeight(bridgePos) > 0)) {
-                if (world.setBlock(bridgePos, TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3)) {
-                    SplinterOnEntityTickUpdateProcedure.AdaptiveHive.swingBuild(splinter);
-                    trackPlacedBlock(splinter, bridgePos);
-                }
+                world.setBlock(bridgePos, TheBackwoodsModBlocks.PETRIFIED_SPLINTERED_OAK_WOOD.get().defaultBlockState(), 3);
+                trackPlacedBlock(splinter, bridgePos);
             }
         }
     }
@@ -463,17 +422,10 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
     }
 
     private static boolean checkNearbyRoseBlocks(LevelAccessor world, PetrifiedLogSplinterEntity splinter) {
-        BlockPos base = splinter.blockPosition();
-        BlockPos.MutableBlockPos check = new BlockPos.MutableBlockPos();
         for (int sx = -ROSE_SCAN_XZ; sx < ROSE_SCAN_XZ; sx++) {
-            for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
-                check.set(base.getX() + sx, base.getY(), base.getZ() + sz);
-                if (world instanceof Level level && !level.hasChunkAt(check)) continue;
-                for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
-                    check.set(base.getX() + sx, base.getY() + sy, base.getZ() + sz);
-					BlockState roseState = world.getBlockState(check);
-					if (roseState.is(TheBackwoodsModBlocks.ASH_ROSE.get())
-							|| roseState.is(TheBackwoodsModBlocks.POTTED_ASH_ROSE.get())) return true;
+            for (int sy = -ROSE_SCAN_Y; sy < ROSE_SCAN_Y; sy++) {
+                for (int sz = -ROSE_SCAN_XZ; sz < ROSE_SCAN_XZ; sz++) {
+                    if (world.getBlockState(BlockPos.containing(splinter.getX() + sx, splinter.getY() + sy, splinter.getZ() + sz)).getBlock() == TheBackwoodsModBlocks.ASH_ROSE.get()) return true;
                 }
             }
         }
@@ -563,6 +515,630 @@ public class PetrifiedLogSplinterOnEntityTickUpdateProcedure {
     }
 
 	/** Short-lived, local coordination across the four Splinter variants. Server side only. */
+	private static final class SplinterHivemind {
+	    private static final int ALERT_TICKS = 120;
+	    private static final double ALERT_RADIUS = 28.0;
+	    private static final String ID = "hive_target_uuid";
+	    private static final String DIM = "hive_dimension";
+	    private static final String UNTIL = "hive_until";
+	    private static final String X = "hive_x";
+	    private static final String Y = "hive_y";
+	    private static final String Z = "hive_z";
 
+	    private SplinterHivemind() { }
+
+	    public static void allowPost(Mob self) {
+	        self.getPersistentData().putLong("hive_post_time", self.level().getGameTime());
+	    }
+
+	    /** Reassert a flanking route after the vanilla melee goal updates navigation. */
+	    public static void followFormationPost(Mob self, int mineProgress) {
+	        if (!(self.level() instanceof ServerLevel) || frozen(self) || mineProgress != 0
+	                || (self.getPersistentData().getLong("hive_post_time") != self.level().getGameTime()
+	                    && self.getPersistentData().getLong("hive_bow_post_time") != self.level().getGameTime())
+	                || !self.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED)
+	                || self.getAttribute(Attributes.MOVEMENT_SPEED).getBaseValue() <= 0.01) return;
+	        if (!(self.getTarget() instanceof Player target) || !target.isAlive()
+	                || target.isCreative() || target.isSpectator()) return;
+	        if (self.getPersistentData().getLong("hive_bow_post_time") == self.level().getGameTime()) {
+	            if (self.getPersistentData().getInt("hive_bow_state") == BOW_SEEK || self.getPersistentData().getInt("hive_bow_state") == BOW_FLANK) {
+	                Vec3 point = bowPoint(self);
+	                self.getNavigation().moveTo(point.x, point.y, point.z, 1.0);
+	            } else {
+	                self.getNavigation().stop();
+	            }
+	            return;
+	        }
+	        Vec3 destination = approach(self, target);
+	        if (destination.distanceToSqr(target.position()) < 1.0
+	                || self.distanceToSqr(target) < 16.0) return;
+	        if ((self.tickCount + self.getId()) % 3 == 0 || self.getNavigation().isDone()) {
+	            self.getNavigation().moveTo(destination.x, destination.y, destination.z, 1.05);
+	        }
+	    }
+
+	    private static boolean member(Entity e) {
+	        return e instanceof SplinterEntity || e instanceof BlindspotSplinterEntity
+	            || e instanceof LogSplinterEntity || e instanceof PetrifiedLogSplinterEntity;
+	    }
+
+	    private static boolean frozen(Mob e) {
+	        if (e instanceof SplinterEntity s) return s.getEntityData().get(SplinterEntity.DATA_frozenByRose) == 1;
+	        if (e instanceof BlindspotSplinterEntity s) return s.getEntityData().get(BlindspotSplinterEntity.DATA_frozenByRose) == 1;
+	        if (e instanceof LogSplinterEntity s) return s.getEntityData().get(LogSplinterEntity.DATA_frozenByRose) == 1;
+	        if (e instanceof PetrifiedLogSplinterEntity s) return s.getEntityData().get(PetrifiedLogSplinterEntity.DATA_frozenByRose) == 1;
+	        return true;
+	    }
+
+	    private static String dimension(ServerLevel level) {
+	        return level.dimension().location().toString();
+	    }
+
+	    private static boolean current(Mob e, Player player, ServerLevel level) {
+	        return dimension(level).equals(e.getPersistentData().getString(DIM))
+	            && player.getUUID().toString().equals(e.getPersistentData().getString(ID))
+	            && level.getGameTime() < e.getPersistentData().getLong(UNTIL);
+	    }
+
+	    private static void remember(Mob e, Player target, ServerLevel level) {
+	        e.getPersistentData().putString(ID, target.getUUID().toString());
+	        e.getPersistentData().putString(DIM, dimension(level));
+	        e.getPersistentData().putLong(UNTIL, level.getGameTime() + ALERT_TICKS);
+	        e.getPersistentData().putDouble(X, target.getX());
+	        e.getPersistentData().putDouble(Y, target.getY());
+	        e.getPersistentData().putDouble(Z, target.getZ());
+	    }
+
+	    /** A true sighting or attack shares the last known position with loaded neighbors. */
+	    public static void observe(Mob source, Player visible, Entity attacker) {
+	        if (!(source.level() instanceof ServerLevel level) || frozen(source)) return;
+	        if ((source.tickCount + source.getId()) % 10 != 0) return;
+	        Player target = null;
+	        if (attacker instanceof Player p && p.isAlive() && !p.isCreative() && !p.isSpectator()
+	                && source.distanceToSqr(p) <= 32 * 32 && source.hurtTime > 0) target = p;
+	        else if (visible != null && visible.isAlive() && !visible.isCreative() && !visible.isSpectator()
+	                && source.distanceToSqr(visible) <= 48 * 48
+	                && source.hasLineOfSight(visible)) target = visible;
+	        if (target == null) return;
+	        if (target.getMainHandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()
+	                || target.getOffhandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()) return;
+
+	        AABB area = source.getBoundingBox().inflate(ALERT_RADIUS, 12, ALERT_RADIUS);
+	        List<Mob> neighbors = level.getEntitiesOfClass(Mob.class, area,
+	            e -> e != source && e.isAlive() && member(e) && !frozen(e)
+	                && e.distanceToSqr(source) <= ALERT_RADIUS * ALERT_RADIUS);
+	        if (neighbors.isEmpty()) return;
+
+	        boolean newAlarm = !current(source, target, level);
+	        if (newAlarm) source.getPersistentData().putLong("hive_engage_until", level.getGameTime() + 160);
+	        remember(source, target, level);
+	        for (Mob neighbor : neighbors) {
+	            // Sharing a report never sets rage, personality, melee timing, or a live target.
+	            if (!current(neighbor, target, level)) {
+	                newAlarm = true;
+	                neighbor.getPersistentData().putLong("hive_engage_until", level.getGameTime() + 160);
+	            }
+	            remember(neighbor, target, level);
+	        }
+	        long lastCue = source.getPersistentData().getLong("hive_last_cue");
+	        if (newAlarm && (lastCue == 0 || level.getGameTime() - lastCue >= 160)) {
+	            source.getPersistentData().putLong("hive_last_cue", level.getGameTime());
+	            level.playSound(null, source.blockPosition(), SoundEvents.FIRE_EXTINGUISH,
+	                SoundSource.HOSTILE, 1.2f, 0.55f);
+	        }
+	    }
+
+	    /** Apply the group alert once; leave rage and individual attack timing alone. */
+	    public static boolean beginGroupHunt(Mob self, Entity target) {
+	        if (!(target instanceof Player player) || !(self.level() instanceof ServerLevel level)
+	                || !current(self, player, level) || frozen(self)) return false;
+	        long epoch = self.getPersistentData().getLong("hive_engage_until");
+	        if (epoch <= level.getGameTime() || self.getPersistentData().getLong("hive_hunt_used") == epoch) return false;
+	        self.getPersistentData().putLong("hive_hunt_used", epoch);
+	        return true;
+	    }
+
+	    /** A lost target yields a brief, fallible search around the last reported position. */
+	    public static boolean search(Mob self) {
+	        if (!(self.level() instanceof ServerLevel level) || frozen(self)) return false;
+	        long until = self.getPersistentData().getLong(UNTIL);
+	        if (until <= level.getGameTime() || !dimension(level).equals(self.getPersistentData().getString(DIM))) return false;
+	        try {
+	            Entity target = level.getEntity(UUID.fromString(self.getPersistentData().getString(ID)));
+	            if (!(target instanceof Player p) || !p.isAlive() || p.isCreative() || p.isSpectator()) return false;
+	        } catch (IllegalArgumentException ex) {
+	            return false;
+	        }
+	        double x = self.getPersistentData().getDouble(X);
+	        double y = self.getPersistentData().getDouble(Y);
+	        double z = self.getPersistentData().getDouble(Z);
+	        if (self.distanceToSqr(x, y, z) > 48 * 48) return false;
+	        if (self.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED)) {
+	            self.getAttribute(Attributes.MOVEMENT_SPEED).setBaseValue(0.23);
+	        }
+	        int slot = Math.floorMod(self.getUUID().hashCode(), 4);
+	        double sx = x + (slot == 0 ? 4 : slot == 1 ? -4 : 0);
+	        double sz = z + (slot == 2 ? 4 : slot == 3 ? -4 : 0);
+	        if ((self.tickCount + self.getId()) % 12 == 0 || self.getNavigation().isDone()) {
+	            self.getNavigation().moveTo(sx, y, sz, 1.0);
+	        }
+	        return true;
+	    }
+
+
+	    private static double facing(Mob self, Player player) {
+	        Vec3 toward = self.getEyePosition().subtract(player.getEyePosition());
+	        if (toward.lengthSqr() < 0.01) return 1.0;
+	        return player.getLookAngle().normalize().dot(toward.normalize());
+	    }
+
+	    /** Strafe around a raised shield, then commit to the ordinary melee goal. */
+	    private static Vec3 shieldRoute(Mob self, Player player, ServerLevel level) {
+	        long now = level.getGameTime();
+	        if (self.getPersistentData().getLong("hive_shield_strike") > now) return player.position();
+	        double distance = self.distanceToSqr(player);
+	        if (distance < 4 || distance > 100 || facing(self, player) < 0.25
+	                || !player.isBlocking() || !player.getUseItem().is(Items.SHIELD)) return null;
+	        Vec3 forward = player.getLookAngle();
+	        double length = Math.hypot(forward.x, forward.z);
+	        if (length < 0.01) return null;
+	        double side = (self.getUUID().hashCode() & 1) == 0 ? 1 : -1;
+	        Vec3 goal = player.position().add(-forward.x / length * 2 + side * forward.z / length * 3,
+	            0, -forward.z / length * 2 - side * forward.x / length * 3);
+	        long deadline = self.getPersistentData().getLong("hive_shield_side_until");
+	        if (deadline <= now) {
+	            self.getPersistentData().putLong("hive_shield_side_until", now + 32);
+	            deadline = now + 32;
+	        }
+	        if (self.distanceToSqr(goal) < 6.25 || deadline - now <= 1) {
+	            self.getPersistentData().putLong("hive_shield_strike", now + 18);
+	            self.getPersistentData().putLong("hive_shield_side_until", 0);
+	            return player.position();
+	        }
+	        return goal;
+	    }
+
+	    // Bow movement has one owner: seek cover, assess it, then take a screened exit.
+	    private static final int BOW_SEEK = 1;
+	    private static final int BOW_COVER = 2;
+	    private static final int BOW_FLANK = 3;
+	    private static final int BOW_COMMIT_TICKS = 45;
+	    private static final int BOW_COOLDOWN_TICKS = 120;
+
+	    private static boolean bowDrawn(Player player) {
+	        return player != null && player.isAlive() && !player.isCreative() && !player.isSpectator()
+	            && player.isUsingItem() && player.getUseItem().is(Items.BOW);
+	    }
+
+	    public static boolean bowCommitActive(Mob self, Player player) {
+	        return self.level() instanceof ServerLevel level && bowDrawn(player)
+	            && level.getGameTime() < self.getPersistentData().getLong("hive_bow_commit_until")
+	            && player.getUUID().toString().equals(self.getPersistentData().getString("hive_bow_target"));
+	    }
+
+	    private static void commitBow(Mob self, Player player, long now) {
+	        int previousState = self.getPersistentData().getInt("hive_bow_state");
+	        self.getPersistentData().putInt("hive_bow_state", 0);
+	        self.getPersistentData().putLong("hive_bow_commit_until", now + BOW_COMMIT_TICKS);
+	        self.getPersistentData().putLong("hive_bow_cooldown", now + BOW_COOLDOWN_TICKS);
+	        self.getPersistentData().putString("hive_bow_target", player.getUUID().toString());
+	        self.getPersistentData().putLong("hive_bow_pressure_until", 0);
+	        if (previousState != BOW_FLANK && self.level() instanceof ServerLevel level
+	                && bowDrawn(player) && facing(self, player) >= 0.70
+	                && blockedShot(self, player, level, self.position())) {
+	            Vec3 exit = pressureExit(self, player, level);
+	            if (exit != null) {
+	                self.getPersistentData().putDouble("hive_bow_pressure_x", exit.x);
+	                self.getPersistentData().putDouble("hive_bow_pressure_y", exit.y);
+	                self.getPersistentData().putDouble("hive_bow_pressure_z", exit.z);
+	                self.getPersistentData().putLong("hive_bow_pressure_until", now + BOW_COMMIT_TICKS);
+	            }
+	        }
+	    }
+
+	    private static Vec3 bowPoint(Mob self) {
+	        return new Vec3(self.getPersistentData().getDouble("hive_bow_x"),
+	            self.getPersistentData().getDouble("hive_bow_y"), self.getPersistentData().getDouble("hive_bow_z"));
+	    }
+
+	    /** Check the whole actual collision box, including headroom and solid footing. */
+	    private static boolean clearStandingRoom(Mob self, ServerLevel level, BlockPos pos) {
+	        Vec3 point = new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+	        return !level.getBlockState(pos.below()).getCollisionShape(level, pos.below()).isEmpty()
+	            && level.getFluidState(pos).isEmpty() && level.getFluidState(pos.above()).isEmpty()
+	            && level.noCollision(self, self.getBoundingBox().move(point.subtract(self.position())));
+	    }
+
+	    private static boolean blockedShot(Mob self, Player player, ServerLevel level, Vec3 point) {
+	        double height = self.getBbHeight();
+	        double width = self.getBbWidth() * 0.35;
+	        Vec3 toward = point.subtract(player.position());
+	        double span = Math.hypot(toward.x, toward.z);
+	        if (span < 0.01) return false;
+	        double lateralX = -toward.z / span * width;
+	        double lateralZ = toward.x / span * width;
+	        Vec3 start = player.getEyePosition();
+	        Vec3[] silhouette = {
+	            point.add(0, Math.min(height - 0.12, self.getEyeHeight()), 0),
+	            point.add(0, height * 0.55, 0),
+	            point.add(0, 0.22, 0),
+	            point.add(lateralX, height * 0.55, lateralZ),
+	            point.add(-lateralX, height * 0.55, -lateralZ)
+	        };
+	        for (Vec3 sample : silhouette) {
+	            HitResult hit = level.clip(new ClipContext(start, sample,
+	                ClipContext.Block.COLLIDER, ClipContext.Fluid.NONE, self));
+	            if (hit.getType() != HitResult.Type.BLOCK
+	                    || hit.getLocation().distanceToSqr(sample) < 0.16) return false;
+	        }
+	        return true;
+	    }
+
+	    /** Scan local terrain; discard the last shelter when changing cover. */
+	    private static Vec3 nearbyCover(Mob self, Player player, ServerLevel level, Vec3 avoid) {
+	        Vec3 origin = self.position();
+	        for (int radius = 2; radius <= 8; radius++) {
+	            for (int vertical : new int[] {0, -1, 1}) {
+	                for (int direction = 0; direction < 16; direction++) {
+	                    double angle = direction * Math.PI / 8.0;
+	                    BlockPos pos = BlockPos.containing(origin.x + Math.cos(angle) * radius,
+	                        origin.y + vertical, origin.z + Math.sin(angle) * radius);
+	                    Vec3 point = new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+	                    if (avoid != null && point.distanceToSqr(avoid) < 9.0) continue;
+	                    if (!blockedShot(self, player, level, point)
+	                            || !clearStandingRoom(self, level, pos)) continue;
+	                    net.minecraft.world.level.pathfinder.Path path = self.getNavigation().createPath(pos, 0);
+	                    if (path != null && path.canReach()) return point;
+	                }
+	            }
+	        }
+	        return null;
+	    }
+
+	    private static Vec3 shortDodge(Mob self, Player player, ServerLevel level) {
+	        Vec3 away = self.position().subtract(player.position());
+	        double span = Math.hypot(away.x, away.z);
+	        if (span < 0.01) return null;
+	        double side = (self.getUUID().hashCode() & 1) == 0 ? 1.0 : -1.0;
+	        for (int attempt = 0; attempt < 2; attempt++, side = -side) {
+	            BlockPos pos = BlockPos.containing(self.getX() - away.z / span * side * 3,
+	                self.getY(), self.getZ() + away.x / span * side * 3);
+	            if (!clearStandingRoom(self, level, pos)) continue;
+	            net.minecraft.world.level.pathfinder.Path path = self.getNavigation().createPath(pos, 0);
+	            if (path != null && path.canReach())
+	                return new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+	        }
+	        return null;
+	    }
+
+	    /** Choose a flank with a screened approach, favoring a different exit next time. */
+	    private static Vec3 screenedFlank(Mob self, Player player, ServerLevel level) {
+	        Vec3 toward = player.position().subtract(self.position());
+	        double span = Math.hypot(toward.x, toward.z);
+	        if (span < 1.0) return null;
+	        Vec3 along = new Vec3(toward.x / span, 0, toward.z / span);
+	        Vec3 lateral = new Vec3(-along.z, 0, along.x);
+	        int lastSide = self.getPersistentData().getInt("hive_bow_last_side");
+	        int variation = self.getUUID().hashCode() ^ player.getUUID().hashCode()
+	            ^ (int) (level.getGameTime() / 80);
+	        int preferred = lastSide != 0 && (variation & 3) != 0
+	            ? -lastSide : (variation & 4) == 0 ? 1 : -1;
+	        for (int order = 0; order < 2; order++) {
+	            int side = order == 0 ? preferred : -preferred;
+	            for (int offset = 2; offset <= 6; offset++) {
+	                for (int advance = 1; advance <= 3; advance++) {
+	                    Vec3 desired = self.position().add(lateral.scale(side * offset)).add(along.scale(advance));
+	                    for (int vertical : new int[] {0, -1, 1}) {
+	                        BlockPos pos = BlockPos.containing(desired.x, desired.y + vertical, desired.z);
+	                        Vec3 point = new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+	                        if (point.distanceToSqr(player.position()) >= self.distanceToSqr(player) - 2.0
+	                                || !blockedShot(self, player, level, point)
+	                                || !clearStandingRoom(self, level, pos)) continue;
+	                        boolean screened = true;
+	                        for (double step : new double[] {0.25, 0.5, 0.75}) {
+	                            if (!blockedShot(self, player, level, self.position().lerp(point, step))) {
+	                                screened = false;
+	                                break;
+	                            }
+	                        }
+	                        if (!screened) continue;
+	                        net.minecraft.world.level.pathfinder.Path path = self.getNavigation().createPath(pos, 0);
+	                        if (path != null && path.canReach() && mostlyScreenedPath(self, player, level, path)) {
+	                            self.getPersistentData().putInt("hive_bow_last_side", side);
+	                            return point;
+	                        }
+	                    }
+	                }
+	            }
+	        }
+	        return null;
+	    }
+
+	    /** The actual navigation path matters; a straight line can hide an exposed detour. */
+	    private static boolean mostlyScreenedPath(Mob self, Player player, ServerLevel level,
+	            net.minecraft.world.level.pathfinder.Path path) {
+	        int visible = 0;
+	        int checked = 0;
+	        int stride = Math.max(1, path.getNodeCount() / 7);
+	        for (int i = path.getNextNodeIndex(); i < path.getNodeCount(); i += stride) {
+	            net.minecraft.world.level.pathfinder.Node node = path.getNode(i);
+	            Vec3 point = new Vec3(node.x + 0.5, node.y, node.z + 0.5);
+	            if (!blockedShot(self, player, level, point)) visible++;
+	            checked++;
+	        }
+	        return checked > 0 && visible <= Math.max(1, checked / 4);
+	    }
+
+	    /** If safety is impossible, leave cover around a side rather than retracing entry. */
+	    private static Vec3 pressureExit(Mob self, Player player, ServerLevel level) {
+	        Vec3 toward = player.position().subtract(self.position());
+	        double span = Math.hypot(toward.x, toward.z);
+	        if (span < 1.0) return null;
+	        Vec3 along = new Vec3(toward.x / span, 0, toward.z / span);
+	        Vec3 lateral = new Vec3(-along.z, 0, along.x);
+	        int previous = self.getPersistentData().getInt("hive_bow_last_side");
+	        int variation = self.getUUID().hashCode() ^ player.getUUID().hashCode()
+	            ^ (int) (level.getGameTime() / 80);
+	        int first = previous != 0 && (variation & 3) != 0
+	            ? -previous : (variation & 4) == 0 ? 1 : -1;
+	        for (int order = 0; order < 2; order++) {
+	            int side = order == 0 ? first : -first;
+	            for (int offset = 3; offset <= 6; offset++) {
+	                Vec3 goal = self.position().add(lateral.scale(side * offset)).add(along.scale(2));
+	                for (int vertical : new int[] {0, -1, 1}) {
+	                    BlockPos pos = BlockPos.containing(goal.x, goal.y + vertical, goal.z);
+	                    if (!clearStandingRoom(self, level, pos)) continue;
+	                    net.minecraft.world.level.pathfinder.Path path = self.getNavigation().createPath(pos, 0);
+	                    if (path == null || !path.canReach()) continue;
+	                    boolean usesSide = false;
+	                    for (int i = path.getNextNodeIndex(); i < path.getNodeCount(); i++) {
+	                        net.minecraft.world.level.pathfinder.Node node = path.getNode(i);
+	                        Vec3 step = new Vec3(node.x + 0.5, node.y, node.z + 0.5).subtract(self.position());
+	                        if (step.dot(lateral) * side > 1.0) { usesSide = true; break; }
+	                    }
+	                    if (!usesSide) continue;
+	                    self.getPersistentData().putInt("hive_bow_last_side", side);
+	                    return new Vec3(pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5);
+	                }
+	            }
+	        }
+	        return null;
+	    }
+
+	    private static void bowDestination(Mob self, Vec3 point, int state, long now) {
+	        self.getPersistentData().putInt("hive_bow_state", state);
+	        self.getPersistentData().putDouble("hive_bow_x", point.x);
+	        self.getPersistentData().putDouble("hive_bow_y", point.y);
+	        self.getPersistentData().putDouble("hive_bow_z", point.z);
+	        self.getPersistentData().putDouble("hive_bow_progress", self.distanceToSqr(point));
+	        self.getPersistentData().putInt("hive_bow_stalls", 0);
+	        self.getPersistentData().putLong("hive_bow_path_check", now + 12);
+	    }
+
+	    /** The main AI yields navigation to this state before its watched/phase rules. */
+	    public static boolean handleBowThreat(Mob self, Player player, int mineProgress, double speed) {
+	        if (!(self.level() instanceof ServerLevel level) || frozen(self) || mineProgress != 0
+	                || player == null || self.getTarget() != player) return false;
+	        long now = level.getGameTime();
+	        int state = self.getPersistentData().getInt("hive_bow_state");
+	        if (!bowDrawn(player)) {
+	            if (state != 0) commitBow(self, player, now);
+	            return false;
+	        }
+	        if (player.getMainHandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()
+	                || player.getOffhandItem().getItem() == TheBackwoodsModBlocks.ASH_ROSE.get().asItem()) return false;
+	        if (state != 0 && !player.getUUID().toString().equals(self.getPersistentData().getString("hive_bow_target"))) {
+	            self.getPersistentData().putInt("hive_bow_state", 0);
+	            state = 0;
+	        }
+	        if (state == 0) {
+	            if (self.getPersistentData().getLong("hive_bow_cooldown") > now || self.distanceToSqr(player) < 16
+	                    || self.distanceToSqr(player) > 28 * 28 || player.getTicksUsingItem() < 4
+	                    || facing(self, player) < 0.84 || !self.hasLineOfSight(player)) return false;
+	            Vec3 lastCover = self.getPersistentData().getInt("hive_bow_has_last_cover") != 0
+	                ? new Vec3(self.getPersistentData().getDouble("hive_bow_last_cover_x"), self.getPersistentData().getDouble("hive_bow_last_cover_y"), self.getPersistentData().getDouble("hive_bow_last_cover_z")) : null;
+	            Vec3 point = nearbyCover(self, player, level, lastCover);
+	            if (point == null && lastCover != null) point = nearbyCover(self, player, level, null);
+	            boolean hasCover = point != null;
+	            if (!hasCover) point = shortDodge(self, player, level);
+	            if (point == null) {
+	                commitBow(self, player, now);
+	                return false;
+	            }
+	            self.getPersistentData().putString("hive_bow_target", player.getUUID().toString());
+	            self.getPersistentData().putInt("hive_bow_changes", 0);
+	            self.getPersistentData().putInt("hive_bow_failed_choices", 0);
+	            self.getPersistentData().putInt("hive_bow_cover", hasCover ? 1 : 0);
+	            bowDestination(self, point, BOW_SEEK, now);
+	            state = BOW_SEEK;
+	        }
+
+	        if (self.distanceToSqr(player) < 9) {
+	            commitBow(self, player, now);
+	            return false;
+	        }
+	        Vec3 point = bowPoint(self);
+	        boolean protectedNow = blockedShot(self, player, level, self.position());
+	        if (state == BOW_SEEK && protectedNow) {
+	            bowDestination(self, self.position(), BOW_COVER, now);
+	            self.getPersistentData().putInt("hive_bow_has_last_cover", 1);
+	            self.getPersistentData().putDouble("hive_bow_last_cover_x", self.getX());
+	            self.getPersistentData().putDouble("hive_bow_last_cover_y", self.getY());
+	            self.getPersistentData().putDouble("hive_bow_last_cover_z", self.getZ());
+	            state = BOW_COVER;
+	        }
+	        if (state == BOW_FLANK && !protectedNow && facing(self, player) >= 0.84
+	                && self.getPersistentData().getInt("hive_bow_changes") < 2 && now >= self.getPersistentData().getLong("hive_bow_next_choice")) {
+	            self.getPersistentData().putLong("hive_bow_next_choice", now + 12);
+	            Vec3 other = nearbyCover(self, player, level, point);
+	            if (other != null) {
+	                self.getPersistentData().putInt("hive_bow_changes", self.getPersistentData().getInt("hive_bow_changes") + 1);
+	                bowDestination(self, other, BOW_SEEK, now);
+	                state = BOW_SEEK;
+	                point = other;
+	            }
+	        }
+	        if (state == BOW_SEEK || state == BOW_FLANK) {
+	            if (state == BOW_FLANK && self.distanceToSqr(point) < 2.25) {
+	                commitBow(self, player, now);
+	                return false;
+	            }
+	            if (state == BOW_SEEK && self.distanceToSqr(point) < 2.25 && !protectedNow) {
+	                // The spot was screened when picked but the player moved: reconsider.
+	                if (self.getPersistentData().getInt("hive_bow_changes") >= 2) {
+	                    commitBow(self, player, now);
+	                    return false;
+	                }
+	                Vec3 other = nearbyCover(self, player, level, point);
+	                if (other == null) {
+	                    commitBow(self, player, now);
+	                    return false;
+	                }
+	                self.getPersistentData().putInt("hive_bow_changes", self.getPersistentData().getInt("hive_bow_changes") + 1);
+	                bowDestination(self, other, BOW_SEEK, now);
+	            }
+	            if (now >= self.getPersistentData().getLong("hive_bow_path_check")) {
+	                double remaining = self.distanceToSqr(bowPoint(self));
+	                int stalls = remaining >= self.getPersistentData().getDouble("hive_bow_progress") - 0.4 ? self.getPersistentData().getInt("hive_bow_stalls") + 1 : 0;
+	                self.getPersistentData().putInt("hive_bow_stalls", stalls);
+	                self.getPersistentData().putDouble("hive_bow_progress", remaining);
+	                self.getPersistentData().putLong("hive_bow_path_check", now + 12);
+	                if (stalls >= 2) {
+	                    if (state == BOW_SEEK && self.getPersistentData().getInt("hive_bow_changes") < 2) {
+	                        Vec3 other = nearbyCover(self, player, level, bowPoint(self));
+	                        if (other != null) {
+	                            self.getPersistentData().putInt("hive_bow_changes", self.getPersistentData().getInt("hive_bow_changes") + 1);
+	                            bowDestination(self, other, BOW_SEEK, now);
+	                        } else {
+	                            commitBow(self, player, now);
+	                            return false;
+	                        }
+	                    } else {
+	                        commitBow(self, player, now);
+	                        return false;
+	                    }
+	                }
+	            }
+	        } else if (state == BOW_COVER) {
+	            if (facing(self, player) < 0.70) {
+	                commitBow(self, player, now); // The archer looks away: exploit the opening.
+	                return false;
+	            }
+	            if (!protectedNow) {
+	                Vec3 other = self.getPersistentData().getInt("hive_bow_changes") < 2 ? nearbyCover(self, player, level, self.position()) : null;
+	                if (other == null) {
+	                    commitBow(self, player, now);
+	                    return false;
+	                }
+	                self.getPersistentData().putInt("hive_bow_changes", self.getPersistentData().getInt("hive_bow_changes") + 1);
+	                bowDestination(self, other, BOW_SEEK, now);
+	            } else if (now >= self.getPersistentData().getLong("hive_bow_next_choice")) {
+	                self.getPersistentData().putLong("hive_bow_next_choice", now + 12 + (self.getId() & 7));
+	                Vec3 flank = screenedFlank(self, player, level);
+	                if (flank != null) {
+	                    bowDestination(self, flank, BOW_FLANK, now);
+	                } else {
+	                    int failures = self.getPersistentData().getInt("hive_bow_failed_choices") + 1;
+	                    self.getPersistentData().putInt("hive_bow_failed_choices", failures);
+	                    Vec3 other = failures == 1 && self.getPersistentData().getInt("hive_bow_changes") < 2
+	                        ? nearbyCover(self, player, level, self.position()) : null;
+	                    if (other != null) {
+	                        self.getPersistentData().putInt("hive_bow_changes", self.getPersistentData().getInt("hive_bow_changes") + 1);
+	                        bowDestination(self, other, BOW_SEEK, now);
+	                    } else if (failures >= 2) {
+	                        commitBow(self, player, now); // No safe route: pressure instead of camping.
+	                        return false;
+	                    }
+	                }
+	            }
+	        }
+	        setSpeed(self, speed);
+	        self.getPersistentData().putLong("hive_bow_post_time", now);
+	        return true;
+	    }
+
+	    /** Preserve ordinary movement for lone members and for non-player targets. */
+	    public static Vec3 approach(Mob self, Entity target) {
+	        Vec3 direct = target.position();
+	        if (!(target instanceof Player player) || !(self.level() instanceof ServerLevel level)
+	                || frozen(self)) return direct;
+	        Vec3 shield = shieldRoute(self, player, level);
+	        if (shield != null) return shield;
+	        if (bowCommitActive(self, player)) {
+            if (self.getPersistentData().getLong("hive_bow_pressure_until") > level.getGameTime()) {
+                Vec3 exit = new Vec3(self.getPersistentData().getDouble("hive_bow_pressure_x"), self.getPersistentData().getDouble("hive_bow_pressure_y"), self.getPersistentData().getDouble("hive_bow_pressure_z"));
+                if (self.distanceToSqr(exit) > 2.25) return exit;
+            }
+            return direct;
+        }
+	        if (!current(self, player, level) || self.distanceToSqr(player) < 16) return direct;
+	        if (self.getPersistentData().getLong("hive_commit_until") > level.getGameTime()) return direct;
+	        long huntUntil = self.getPersistentData().getLong("hive_engage_until");
+	        if (huntUntil > level.getGameTime() && huntUntil - level.getGameTime() < 110) {
+	            self.getPersistentData().putLong("hive_commit_until", level.getGameTime() + 70);
+	            return direct;
+	        }
+
+	        long cachedUntil = self.getPersistentData().getLong("hive_route_until");
+	        if (cachedUntil > level.getGameTime()) {
+	            Vec3 cachedPoint = new Vec3(self.getPersistentData().getDouble("hive_route_x"),
+	                self.getPersistentData().getDouble("hive_route_y"),
+	                self.getPersistentData().getDouble("hive_route_z"));
+	            if (self.distanceToSqr(cachedPoint) < 9.0) {
+	                self.getPersistentData().putLong("hive_commit_until", level.getGameTime() + 70);
+	                return direct;
+	            }
+	            return cachedPoint;
+	        }
+
+	        List<Mob> team = new ArrayList<>();
+	        team.add(self);
+	        for (Mob e : level.getEntitiesOfClass(Mob.class, self.getBoundingBox().inflate(24, 12, 24),
+	                other -> other != self && other.isAlive() && member(other) && !frozen(other))) {
+	            if (current(e, player, level) && e.distanceToSqr(player) <= 32 * 32
+	                    && e.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED)
+	                    && e.getAttribute(Attributes.MOVEMENT_SPEED).getBaseValue() > 0.01) team.add(e);
+	        }
+	        if (team.size() < 2) return direct;
+
+	        // Tank takes pressure when present; otherwise the closest member does.
+	        Mob pursuer = team.stream().min(Comparator.comparingDouble(e ->
+	            e.distanceToSqr(player) - (e instanceof PetrifiedLogSplinterEntity ? 100.0 : 0.0))).orElse(self);
+	        if (self == pursuer) return direct;
+	        team.remove(pursuer);
+	        team.sort(Comparator.comparing(Entity::getUUID));
+	        int index = team.indexOf(self);
+	        if (index < 0) return direct;
+
+	        Vec3 facing = player.getLookAngle();
+	        double length = Math.hypot(facing.x, facing.z);
+	        if (length < 0.01) return direct;
+	        double fx = facing.x / length;
+	        double fz = facing.z / length;
+	        double side = index % 2 == 0 ? 1.0 : -1.0;
+	        Vec3 approach;
+	        if (index >= 2 && player.getDeltaMovement().horizontalDistanceSqr() > 0.003) {
+	            Vec3 velocity = player.getDeltaMovement();
+	            approach = direct.add(Math.max(-6, Math.min(6, velocity.x * 12)) + side * fz * 3,
+	                0, Math.max(-6, Math.min(6, velocity.z * 12)) - side * fx * 3);
+	        } else {
+	            approach = direct.add(-fx * 3 + side * fz * 6, 0, -fz * 3 - side * fx * 6);
+	        }
+	        self.getPersistentData().putLong("hive_route_until", level.getGameTime() + 10);
+	        self.getPersistentData().putDouble("hive_route_x", approach.x);
+	        self.getPersistentData().putDouble("hive_route_y", approach.y);
+	        self.getPersistentData().putDouble("hive_route_z", approach.z);
+	        if (self.distanceToSqr(approach) < 9.0) {
+	            self.getPersistentData().putLong("hive_commit_until", level.getGameTime() + 70);
+	            return direct;
+	        }
+	        return approach;
+	    }
+
+	    public static Vec3 stalkPoint(Mob self, Entity target) {
+	        Vec3 approach = approach(self, target);
+	        return approach.distanceToSqr(target.position()) > 1 ? approach : null;
+	    }
+	}
 
 }

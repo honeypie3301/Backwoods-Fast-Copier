@@ -22,6 +22,8 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.neoforge.client.event.EntityRenderersEvent;
 import org.joml.Matrix4f;
+import org.joml.Vector3f;
+import net.mcreator.thebackwoods.client.model.ModelWoodweaver;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -34,7 +36,7 @@ import java.util.Map;
  * - Configurable peak opacity and color constants
  * - Smooth client-side opacity transition (delayed fade-in, early fade-out)
  * - Exact single-vector target bounding box center tracking (no vertical drift during lift)
- * - Calibrated orb origin (height 4.2 in model space, forward 1.9)
+ * - Animated head-orb origin, with legacy calibration as a fallback
  */
 @EventBusSubscriber(value = Dist.CLIENT)
 public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends EntityModel<T>> extends RenderLayer<T, M> {
@@ -45,7 +47,8 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 	// CONFIGURATION & CUSTOMIZATION SETTINGS
 	// =========================================================================
 
-	// 1. POSITION CALIBRATION (Blocks relative to Woodweaver entity model origin)
+	// 1. ANIMATED ORB ATTACHMENT (legacy offsets are used only when bone tracking is disabled/unavailable)
+	public static boolean FOLLOW_ANIMATED_ORB = true;
 	public static double ORB_HEIGHT = 4.20;       // Vertical height of the chest orb center in model space
 	public static double ORB_FORWARD = 1.90;      // Forward distance from entity origin to orb center
 
@@ -80,6 +83,9 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 		int startTick;
 		int lastActiveTick;
 		boolean wasClosing;
+		float currentRed = COLOR_RED;
+		float currentGreen = COLOR_GREEN;
+		float currentBlue = COLOR_BLUE;
 		int closingStartTick = -1;
 	}
 
@@ -161,7 +167,7 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 
 		ClientHypnoTracker tracker = CLIENT_TRACKERS.get(entityId);
 
-		if (!isActivelyHypnotizing && !isClosingOrInterrupted && stareTicks <= 0) {
+		if (!isActivelyHypnotizing && !isClosingOrInterrupted) {
 			if (tracker != null && (currentTick - tracker.lastActiveTick > 20)) {
 				CLIENT_TRACKERS.remove(entityId);
 			}
@@ -177,6 +183,10 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 
 		if (isActivelyHypnotizing) {
 			tracker.lastActiveTick = currentTick;
+			if (!isClosingOrInterrupted) {
+				tracker.wasClosing = false;
+				tracker.closingStartTick = -1;
+			}
 		}
 
 		if (isClosingOrInterrupted && !tracker.wasClosing) {
@@ -184,30 +194,52 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 			tracker.closingStartTick = currentTick;
 		}
 
+		// --- Dynamic Color Fading Logic ---
+		float targetRed = COLOR_RED;
+		float targetGreen = COLOR_GREEN;
+		float targetBlue = COLOR_BLUE;
+
+		String hypnoMode = (entity != null) ? entity.getPersistentData().getString("hypno_mode") : "";
+		boolean isVaporize = (entity != null && entity.hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) || "vaporize".equals(hypnoMode) || weaponFlashPhase > 0;
+		boolean isIncinerate = (entity != null && entity.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE)) || "incinerate".equals(hypnoMode) || (entity != null && entity.isOnFire());
+
+		if (isVaporize) {
+			// Flash Vaporize: Vibrant fiery Orange
+			targetRed = 1.00F;
+			targetGreen = 0.45F;
+			targetBlue = 0.00F;
+		} else if (isIncinerate) {
+			// Incinerate: Deep intense glowing Red
+			targetRed = 1.00F;
+			targetGreen = 0.04F;
+			targetBlue = 0.02F;
+		} else {
+			// Infect (Default): Classic Golden Yellow
+			targetRed = 1.00F;
+			targetGreen = 0.88F;
+			targetBlue = 0.30F;
+		}
+
+		float lerpFactor = 0.18F;
+		tracker.currentRed = Mth.lerp(lerpFactor, tracker.currentRed, targetRed);
+		tracker.currentGreen = Mth.lerp(lerpFactor, tracker.currentGreen, targetGreen);
+		tracker.currentBlue = Mth.lerp(lerpFactor, tracker.currentBlue, targetBlue);
+
 		// 2. Compute Smooth Opacity Transition (0.0 to 1.0 multiplier)
 		float alphaMultiplier = 0.0F;
 
 		if (tracker.wasClosing && tracker.closingStartTick > 0) {
 			float closingProgress = (currentTick - tracker.closingStartTick + partialTicks) / (float) INTERRUPT_FADE_TICKS;
 			alphaMultiplier = 1.0F - Mth.clamp(closingProgress, 0.0F, 1.0F);
-		} else if (isOrbLooping) {
-			// Instant full beam rendering during peak weaponized flash!
+		} else if (isOrbLooping || hypnoPhase == 2 || weaponFlashPhase == 2) {
+			// Continuous full beam rendering during active hypnosis hold / weaponized flash!
 			alphaMultiplier = 1.0F;
-		} else {
+		} else if (isActivelyHypnotizing) {
+			// Smooth opening fade-in during Phase 1
 			float elapsedTicks = (currentTick - tracker.startTick) + partialTicks;
-
-			if (elapsedTicks < FADE_IN_START_TICK) {
-				alphaMultiplier = Mth.clamp(elapsedTicks / (float) FADE_IN_START_TICK, 0.0F, 1.0F);
-			} else if (elapsedTicks < FADE_IN_FULL_TICK) {
-				alphaMultiplier = (elapsedTicks - FADE_IN_START_TICK) / (float) (FADE_IN_FULL_TICK - FADE_IN_START_TICK);
-			} else if (elapsedTicks < FADE_OUT_START_TICK) {
-				alphaMultiplier = 1.0F;
-			} else if (elapsedTicks < FADE_OUT_END_TICK) {
-				float fadeProgress = (elapsedTicks - FADE_OUT_START_TICK) / (float) (FADE_OUT_END_TICK - FADE_OUT_START_TICK);
-				alphaMultiplier = 1.0F - Mth.clamp(fadeProgress, 0.0F, 1.0F);
-			} else {
-				alphaMultiplier = 0.0F;
-			}
+			alphaMultiplier = Mth.clamp(elapsedTicks / (float) FADE_IN_FULL_TICK, 0.0F, 1.0F);
+		} else {
+			alphaMultiplier = 0.0F;
 		}
 
 		float currentAlpha = BEAM_MAX_OPACITY * Mth.clamp(alphaMultiplier, 0.0F, 1.0F);
@@ -225,7 +257,7 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 			targetEntity = mob.getTarget();
 		}
 		if (targetEntity == null && entity.level() != null) {
-			targetEntity = entity.level().getNearestPlayer(entity, 32.0);
+			targetEntity = entity.level().getNearestPlayer(entity, 64.0);
 		}
 
 		// 4. Calculate Exact World Coordinates for True Orb Visual Origin and Target Aim Point
@@ -237,13 +269,10 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 		double weaverY = Mth.lerp(partialTicks, entity.yOld, entity.getY());
 		double weaverZ = Mth.lerp(partialTicks, entity.zOld, entity.getZ());
 
-		// In LivingEntityRenderer, the model pivot is translated by +1.501 blocks above entity.getY().
-		// Adding 1.501 ensures the vector origin matches the exact 3D render matrix pivot of the orb.
-		double yawRad = Math.toRadians(bodyYaw);
-		double forwardX = -Math.sin(yawRad) * ORB_FORWARD;
-		double forwardZ = Math.cos(yawRad) * ORB_FORWARD;
-		double orbWorldY = weaverY + 1.501 + ORB_HEIGHT;
-		Vec3 orbWorldPos = new Vec3(weaverX + forwardX, orbWorldY, weaverZ + forwardZ);
+		Vec3 orbModelPos = orbModelPosition();
+		double yawRad = Math.toRadians(bodyYaw), cos = Math.cos(yawRad), sin = Math.sin(yawRad);
+		Vec3 orbWorldPos = new Vec3(weaverX + orbModelPos.x * cos + orbModelPos.z * sin,
+			weaverY + 1.501 - orbModelPos.y, weaverZ + orbModelPos.x * sin - orbModelPos.z * cos);
 
 		float beamLength = MIN_BEAM_LENGTH;
 		float targetPitch = 0.0F;
@@ -272,8 +301,8 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 		// 5. Render Geometry in Model Space
 		poseStack.pushPose();
 
-		// Origin centered at chest orb (-Y is up in model space after 180 flip, -Z is forward)
-		poseStack.translate(0.0, -ORB_HEIGHT, -ORB_FORWARD);
+		// Follow the animated core translation while keeping target aim independent of head rotation.
+		poseStack.translate(orbModelPos.x, orbModelPos.y, orbModelPos.z);
 
 		// Aim towards target relative to current body rotation
 		float relYaw = targetYaw - bodyYaw;
@@ -285,13 +314,30 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 		// True translucent glowing quad buffer (translucent = true enables alpha blending and disables depth blocking)
 		VertexConsumer vertexConsumer = bufferSource.getBuffer(RenderType.beaconBeam(PLAIN_TEXTURE, true));
 
-		// End half-width based on beam length
-		float endSize = BEAM_START_HALF_SIZE + (beamLength * BEAM_SPREAD_RATE);
+		// End half-width based on beam length (clamped to prevent screen covering)
+		float endSize = Math.min(2.5F, BEAM_START_HALF_SIZE + (beamLength * BEAM_SPREAD_RATE));
 
 		renderSquarePyramidBeam(poseStack, vertexConsumer, BEAM_START_HALF_SIZE, endSize, beamLength,
-				COLOR_RED, COLOR_GREEN, COLOR_BLUE, currentAlpha);
+				tracker.currentRed, tracker.currentGreen, tracker.currentBlue, currentAlpha);
 
 		poseStack.popPose();
+	}
+
+	private Vec3 orbModelPosition() {
+		if (FOLLOW_ANIMATED_ORB && getParentModel() instanceof ModelWoodweaver<?> model)
+			return animatedOrb(model);
+		return new Vec3(0, -ORB_HEIGHT, -ORB_FORWARD);
+	}
+
+	private static Vec3 animatedOrb(ModelWoodweaver<?> model) {
+		PoseStack local = new PoseStack();
+		model.all.translateAndRotate(local);
+		model.body2.translateAndRotate(local);
+		model.upper_body.translateAndRotate(local);
+		model.head.translateAndRotate(local);
+		model.orb.translateAndRotate(local);
+		Vector3f origin = local.last().pose().transformPosition(new Vector3f());
+		return new Vec3(origin.x, origin.y, origin.z);
 	}
 
 	/**
@@ -372,6 +418,7 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
 		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
 		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
-	}
+	} // 1.21.1
 }
-// Version: WoodweaverTractorBeamLayer-1.21.1-v3.5 (Minecraft 1.21.1 NeoForge)
+// 1.21.1
+

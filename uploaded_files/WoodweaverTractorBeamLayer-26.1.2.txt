@@ -1,0 +1,565 @@
+package net.mcreator.thebackwoods;
+
+import com.mojang.blaze3d.vertex.PoseStack;
+import com.mojang.blaze3d.vertex.VertexConsumer;
+import com.mojang.math.Axis;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.renderer.SubmitNodeCollector;
+import net.minecraft.client.renderer.rendertype.RenderType;
+import net.minecraft.client.renderer.entity.RenderLayerParent;
+import net.minecraft.client.renderer.entity.LivingEntityRenderer;
+import net.minecraft.client.renderer.entity.layers.RenderLayer;
+import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.client.renderer.texture.OverlayTexture;
+import net.minecraft.client.model.EntityModel;
+import net.minecraft.resources.Identifier;
+import net.minecraft.util.Mth;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.Mob;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.nbt.CompoundTag;
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.client.event.EntityRenderersEvent;
+import org.joml.Matrix4f;
+import org.joml.Vector3f;
+import net.mcreator.thebackwoods.client.model.ModelWoodweaver;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Custom Element: WoodweaverTractorBeamLayer (Minecraft NeoForge 26.1.2)
+ *
+ * Authentic Wither Storm-style 4-sided square geometric tractor beam cone.
+ * - True alpha blending / translucency (no solid opaque rendering)
+ * - Configurable peak opacity and color constants
+ * - Smooth client-side opacity transition (delayed fade-in, early fade-out)
+ * - Exact single-vector target bounding box center tracking (no vertical drift during lift)
+ * - Animated head-orb origin, with legacy calibration as a fallback
+ * - 26.1.2 RenderState entity rendering pipeline compatible
+ */
+@EventBusSubscriber(value = Dist.CLIENT)
+public class WoodweaverTractorBeamLayer<S extends LivingEntityRenderState, M extends EntityModel<S>> extends RenderLayer<S, M> {
+
+	private static final Identifier PLAIN_TEXTURE = Identifier.parse("the_backwoods:textures/white.png");
+
+	// =========================================================================
+	// CONFIGURATION & CUSTOMIZATION SETTINGS
+	// =========================================================================
+
+	// 1. ANIMATED ORB ATTACHMENT (legacy offsets are used only when bone tracking is disabled/unavailable)
+	public static boolean FOLLOW_ANIMATED_ORB = true;
+	public static double ORB_HEIGHT = 4.20;       // Vertical height of the chest orb center in model space
+	public static double ORB_FORWARD = 1.90;      // Forward distance from entity origin to orb center
+
+	// 2. TARGET AIM POINT CALIBRATION
+	// Height ratio on target bounding box: 0.50 = exact geometric torso/center, 0.0 = feet, 1.0 = top of head
+	public static double TARGET_AIM_HEIGHT_RATIO = 0.50;
+
+	// 3. BEAM DIMENSIONS & PROPORTIONS
+	public static float BEAM_START_HALF_SIZE = 0.28F; // Half-width at the orb (0.56x0.56 block square origin)
+	public static float BEAM_SPREAD_RATE = 0.070F;    // Expansion rate per block of distance
+	public static float MIN_BEAM_LENGTH = 45.0F;      // Minimum distance the beam shoots into the world
+
+	// 4. COLOR & OPACITY
+	// Opacity range: 0.0F (invisible) to 1.0F (completely solid). Recommended: 0.30F - 0.45F
+	public static float BEAM_MAX_OPACITY = 0.38F;
+	public static float COLOR_RED = 1.00F;        // Red channel (0.0 to 1.0)
+	public static float COLOR_GREEN = 0.88F;      // Green channel (0.0 to 1.0)
+	public static float COLOR_BLUE = 0.30F;       // Blue channel (0.0 to 1.0)
+
+	// 5. TIMING & FADE TRANSITION (In ticks, 20 ticks = 1 second)
+	// Opening phase is 60 ticks (3.0s). Hold phase is 160 ticks (8.0s). Total cycle = 220 ticks.
+	public static int FADE_IN_START_TICK = 35;    // Beam stays hidden until tick 35, then fades in
+	public static int FADE_IN_FULL_TICK = 55;     // Reaches full BEAM_MAX_OPACITY at tick 55
+	public static int FADE_OUT_START_TICK = 185;  // Starts fading out at tick 185 (before loop finishes)
+	public static int FADE_OUT_END_TICK = 215;    // Completely faded out by tick 215
+	public static int INTERRUPT_FADE_TICKS = 8;   // Rapid fade-out duration if hypnosis is canceled/closing
+
+	// =========================================================================
+
+	// Client-side tracking to ensure smooth frame-rate independent fade transitions
+	private static class ClientHypnoTracker {
+		int startTick;
+		int lastActiveTick;
+		boolean wasClosing;
+		float currentRed = COLOR_RED;
+		float currentGreen = COLOR_GREEN;
+		float currentBlue = COLOR_BLUE;
+		int closingStartTick = -1;
+	}
+
+	private static final Map<Integer, ClientHypnoTracker> CLIENT_TRACKERS = new HashMap<>();
+
+	public WoodweaverTractorBeamLayer(RenderLayerParent<S, M> renderer) {
+		super(renderer);
+	}
+
+	@SuppressWarnings({"rawtypes", "unchecked"})
+	@SubscribeEvent
+	public static void onAddLayers(EntityRenderersEvent.AddLayers event) {
+		for (var entityType : event.getEntityTypes()) {
+			String descId = entityType.getDescriptionId().toLowerCase();
+			if (descId.contains("woodweaver") || descId.contains("weaver")) {
+				var renderer = event.getRenderer(entityType);
+				if (renderer instanceof LivingEntityRenderer livingRenderer) {
+					livingRenderer.addLayer(new WoodweaverTractorBeamLayer(livingRenderer));
+				}
+			}
+		}
+	}
+
+	private static int getTagInt(CompoundTag tag, String key) {
+		if (tag == null) return 0;
+		try {
+			if (tag.contains(key)) {
+				Object val = tag.getInt(key);
+				if (val instanceof java.util.Optional<?> opt) {
+					if (opt.isPresent()) {
+						Object inner = opt.get();
+						if (inner instanceof Number n) return n.intValue();
+					}
+				} else if (val instanceof Number n) {
+					return n.intValue();
+				}
+			}
+		} catch (Throwable ignored) {}
+		return 0;
+	}
+
+	private static boolean getTagBoolean(CompoundTag tag, String key) {
+		if (tag == null) return false;
+		try {
+			if (tag.contains(key)) {
+				Object val = tag.getBoolean(key);
+				if (val instanceof java.util.Optional<?> opt) {
+					if (opt.isPresent()) {
+						Object inner = opt.get();
+						if (inner instanceof Boolean b) return b;
+					}
+				} else if (val instanceof Boolean b) {
+					return b;
+				}
+			}
+		} catch (Throwable ignored) {}
+		return false;
+	}
+
+	private static String getTagString(CompoundTag tag, String key) {
+		if (tag == null) return "";
+		try {
+			if (tag.contains(key)) {
+				Object val = tag.getString(key);
+				if (val instanceof java.util.Optional<?> opt) {
+					if (opt.isPresent()) {
+						Object inner = opt.get();
+						if (inner instanceof String s) return s;
+					}
+				} else if (val instanceof String s) {
+					return s;
+				}
+			}
+		} catch (Throwable ignored) {}
+		return "";
+	}
+
+	private static Vec3 currentCameraPosition(Minecraft mc, float partialTicks) {
+		try {
+			var field = net.minecraft.client.renderer.LevelRenderer.class.getDeclaredField("levelRenderState");
+			field.setAccessible(true);
+			var levelState = (net.minecraft.client.renderer.state.level.LevelRenderState) field.get(mc.levelRenderer);
+			return levelState.cameraRenderState.pos;
+		} catch (ReflectiveOperationException | ClassCastException ex) {
+			Entity cameraEntity = mc.getCameraEntity();
+			return cameraEntity != null ? cameraEntity.getEyePosition(partialTicks) : Vec3.ZERO;
+		}
+	}
+
+	@Override
+	public void submit(PoseStack poseStack, SubmitNodeCollector bufferSource, int packedLight, S state,
+					   float yRot, float xRot) {
+
+		Minecraft mc = Minecraft.getInstance();
+		if (mc.level == null) {
+			return;
+		}
+
+		double stateX = state.x;
+		double stateY = state.y;
+		double stateZ = state.z;
+
+		float partialTicks = Mth.clamp(state.ageInTicks - (int) state.ageInTicks, 0.0F, 1.0F);
+		Vec3 cameraPos = currentCameraPosition(mc, partialTicks);
+
+		// Robust Entity Resolution matching Woodweaver entity in client world
+		LivingEntity entity = state instanceof RendererWeaverOverrider.CustomWoodweaverRenderer.WeaverRenderState weaverState
+			? weaverState.entity : null;
+		double bestDistSqr = 100000.0;
+
+		if (entity == null) for (Entity e : mc.level.entitiesForRendering()) {
+			if (e instanceof LivingEntity living) {
+				String descId = e.getType().getDescriptionId().toLowerCase();
+				String className = e.getClass().getName().toLowerCase();
+				boolean isWeaverType = descId.contains("weaver") || descId.contains("woodweaver") || className.contains("weaver") || className.contains("woodweaver");
+
+				double ex = Mth.lerp(partialTicks, e.xOld, e.getX());
+				double ey = Mth.lerp(partialTicks, e.yOld, e.getY());
+				double ez = Mth.lerp(partialTicks, e.zOld, e.getZ());
+
+				double d1 = (ex - stateX) * (ex - stateX) + (ey - stateY) * (ey - stateY) + (ez - stateZ) * (ez - stateZ);
+				double d2 = (ex - (stateX + cameraPos.x)) * (ex - (stateX + cameraPos.x)) + (ey - (stateY + cameraPos.y)) * (ey - (stateY + cameraPos.y)) + (ez - (stateZ + cameraPos.z)) * (ez - (stateZ + cameraPos.z));
+				double dist = Math.min(d1, d2);
+
+				if (isWeaverType) {
+					if (dist < bestDistSqr) {
+						bestDistSqr = dist;
+						entity = living;
+					}
+				}
+			}
+		}
+
+		if (entity == null) {
+			for (Entity e : mc.level.entitiesForRendering()) {
+				if (e instanceof LivingEntity living) {
+					double ex = Mth.lerp(partialTicks, e.xOld, e.getX());
+					double ey = Mth.lerp(partialTicks, e.yOld, e.getY());
+					double ez = Mth.lerp(partialTicks, e.zOld, e.getZ());
+
+					double d1 = (ex - stateX) * (ex - stateX) + (ey - stateY) * (ey - stateY) + (ez - stateZ) * (ez - stateZ);
+					double d2 = (ex - (stateX + cameraPos.x)) * (ex - (stateX + cameraPos.x)) + (ey - (stateY + cameraPos.y)) * (ey - (stateY + cameraPos.y)) + (ez - (stateZ + cameraPos.z)) * (ez - (stateZ + cameraPos.z));
+					double dist = Math.min(d1, d2);
+
+					if (dist < 16.0 && dist < bestDistSqr) {
+						bestDistSqr = dist;
+						entity = living;
+					}
+				}
+			}
+		}
+
+		double weaverX = entity != null ? Mth.lerp(partialTicks, entity.xOld, entity.getX()) : stateX;
+		double weaverY = entity != null ? Mth.lerp(partialTicks, entity.yOld, entity.getY()) : stateY;
+		double weaverZ = entity != null ? Mth.lerp(partialTicks, entity.zOld, entity.getZ()) : stateZ;
+
+		int entityId = entity != null ? entity.getId() : (int)(weaverX * 31 + weaverZ);
+		int currentTick = entity != null ? entity.tickCount : (int) state.ageInTicks;
+
+		// 1. Determine Hypnosis Active State from SynchedData or NBT
+		CompoundTag tag = entity != null ? entity.getPersistentData() : null;
+		int hypnoPhase = getTagInt(tag, "hypno_phase");
+		int weaponFlashPhase = getTagInt(tag, "weapon_flash_phase");
+		boolean isHypnotizing = getTagBoolean(tag, "is_hypnotizing");
+		int stareTicks = getTagInt(tag, "stare_ticks");
+		boolean isInterruptedNbt = getTagBoolean(tag, "hypno_interrupted");
+		boolean isWeaponCloseNbt = getTagBoolean(tag, "isWeaponClose");
+		int targetId = getTagInt(tag, "hypno_target_id");
+
+		boolean isSyncedHypno = false;
+		boolean isSyncedClosing = false;
+		boolean isOrbLooping = false;
+		if (entity != null) {
+			try {
+				for (var field : entity.getClass().getFields()) {
+					String name = field.getName();
+					if (name.contains("OrbLoop") || name.contains("isOrbLooping")) {
+						Object accessor = field.get(null);
+						if (accessor instanceof net.minecraft.network.syncher.EntityDataAccessor dataAccessor) {
+							Object val = entity.getEntityData().get(dataAccessor);
+							if (val instanceof Boolean b && b) {
+								isOrbLooping = true;
+							}
+						}
+					}
+					if (name.contains("Hypnotiz") || name.contains("isHypno") || name.contains("OrbLoop")) {
+						Object accessor = field.get(null);
+						if (accessor instanceof net.minecraft.network.syncher.EntityDataAccessor dataAccessor) {
+							Object val = entity.getEntityData().get(dataAccessor);
+							if (val instanceof Boolean b && b) {
+								isSyncedHypno = true;
+							}
+						}
+					}
+					if (name.contains("isClosing") || name.contains("DATA_isClosing") || name.contains("WeaponClose")) {
+						Object accessor = field.get(null);
+						if (accessor instanceof net.minecraft.network.syncher.EntityDataAccessor dataAccessor) {
+							Object val = entity.getEntityData().get(dataAccessor);
+							if (val instanceof Boolean b && b) {
+								isSyncedClosing = true;
+							}
+						}
+					}
+				}
+			} catch (Throwable ignored) {}
+		}
+
+		boolean isActivelyHypnotizing = (hypnoPhase == 1 || hypnoPhase == 2 || weaponFlashPhase == 1 || weaponFlashPhase == 2 || isHypnotizing || isSyncedHypno || isOrbLooping) && !isSyncedClosing && !isWeaponCloseNbt && hypnoPhase != 3 && weaponFlashPhase != 3;
+		boolean isClosingOrInterrupted = isSyncedClosing || isWeaponCloseNbt || hypnoPhase == 3 || weaponFlashPhase == 3 || isInterruptedNbt;
+
+		ClientHypnoTracker tracker = CLIENT_TRACKERS.get(entityId);
+
+		if (!isActivelyHypnotizing && !isClosingOrInterrupted) {
+			if (tracker != null && (currentTick - tracker.lastActiveTick > 20)) {
+				CLIENT_TRACKERS.remove(entityId);
+			}
+			return;
+		}
+
+		if (tracker == null) {
+			tracker = new ClientHypnoTracker();
+			tracker.startTick = currentTick;
+			tracker.lastActiveTick = currentTick;
+			CLIENT_TRACKERS.put(entityId, tracker);
+		}
+
+		if (isActivelyHypnotizing) {
+			tracker.lastActiveTick = currentTick;
+			if (!isClosingOrInterrupted) {
+				tracker.wasClosing = false;
+				tracker.closingStartTick = -1;
+			}
+		}
+
+		if (isClosingOrInterrupted && !tracker.wasClosing) {
+			tracker.wasClosing = true;
+			tracker.closingStartTick = currentTick;
+		}
+
+		// --- Dynamic Color Fading Logic ---
+		float targetRed = COLOR_RED;
+		float targetGreen = COLOR_GREEN;
+		float targetBlue = COLOR_BLUE;
+
+		String hypnoMode = getTagString(tag, "hypno_mode");
+		boolean isVaporize = (entity != null && entity.hasEffect(net.minecraft.world.effect.MobEffects.WATER_BREATHING)) || "vaporize".equals(hypnoMode) || weaponFlashPhase > 0;
+		boolean isIncinerate = (entity != null && entity.hasEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE)) || "incinerate".equals(hypnoMode) || (entity != null && entity.isOnFire());
+
+		if (isVaporize) {
+			// Flash Vaporize: Vibrant fiery Orange
+			targetRed = 1.00F;
+			targetGreen = 0.45F;
+			targetBlue = 0.00F;
+		} else if (isIncinerate) {
+			// Incinerate: Deep intense glowing Red
+			targetRed = 1.00F;
+			targetGreen = 0.04F;
+			targetBlue = 0.02F;
+		} else {
+			// Infect (Default): Classic Golden Yellow
+			targetRed = 1.00F;
+			targetGreen = 0.88F;
+			targetBlue = 0.30F;
+		}
+
+		float lerpFactor = 0.18F;
+		tracker.currentRed = Mth.lerp(lerpFactor, tracker.currentRed, targetRed);
+		tracker.currentGreen = Mth.lerp(lerpFactor, tracker.currentGreen, targetGreen);
+		tracker.currentBlue = Mth.lerp(lerpFactor, tracker.currentBlue, targetBlue);
+
+		// 2. Compute Smooth Opacity Transition (0.0 to 1.0 multiplier)
+		float alphaMultiplier = 0.0F;
+
+		if (tracker.wasClosing && tracker.closingStartTick > 0) {
+			float closingProgress = (currentTick - tracker.closingStartTick + partialTicks) / (float) INTERRUPT_FADE_TICKS;
+			alphaMultiplier = 1.0F - Mth.clamp(closingProgress, 0.0F, 1.0F);
+		} else if (isOrbLooping || hypnoPhase == 2 || weaponFlashPhase == 2) {
+			// Continuous full beam rendering during active hypnosis hold / weaponized flash!
+			alphaMultiplier = 1.0F;
+		} else if (isActivelyHypnotizing) {
+			// Smooth opening fade-in during Phase 1
+			float elapsedTicks = (currentTick - tracker.startTick) + partialTicks;
+			alphaMultiplier = Mth.clamp(elapsedTicks / 10.0F, 0.40F, 1.0F);
+		} else {
+			alphaMultiplier = 0.0F;
+		}
+
+		float currentAlpha = BEAM_MAX_OPACITY * Mth.clamp(alphaMultiplier, 0.0F, 1.0F);
+		if (currentAlpha <= 0.005F) {
+			return;
+		}
+
+		// 3. Resolve Target Entity
+		Entity targetEntity = null;
+		if (targetId > 0 && mc.level != null) {
+			targetEntity = mc.level.getEntity(targetId);
+		}
+		if (targetEntity == null && entity instanceof Mob mob) {
+			targetEntity = mob.getTarget();
+		}
+		if (targetEntity == null && mc.level != null) {
+			targetEntity = mc.level.getNearestPlayer(weaverX, weaverY, weaverZ, 64.0, false);
+		}
+
+		// 4. Calculate Exact World Coordinates for True Orb Visual Origin and Target Aim Point
+		float bodyYaw;
+		float headYaw;
+		float pitch;
+
+		if (entity != null) {
+			bodyYaw = Mth.rotLerp(partialTicks, entity.yBodyRotO, entity.yBodyRot);
+			headYaw = Mth.rotLerp(partialTicks, entity.yHeadRotO, entity.yHeadRot);
+			pitch = Mth.lerp(partialTicks, entity.xRotO, entity.getXRot());
+		} else {
+			bodyYaw = yRot;
+			headYaw = state.yRot;
+			pitch = state.xRot;
+		}
+
+		Vec3 orbModelPos = orbModelPosition();
+		double yawRad = Math.toRadians(bodyYaw), cos = Math.cos(yawRad), sin = Math.sin(yawRad);
+		Vec3 orbWorldPos = new Vec3(weaverX + orbModelPos.x * cos + orbModelPos.z * sin,
+			weaverY + 1.501 - orbModelPos.y, weaverZ + orbModelPos.x * sin - orbModelPos.z * cos);
+
+		float beamLength = MIN_BEAM_LENGTH;
+		float targetPitch = 0.0F;
+		float targetYaw = 0.0F;
+
+		if (targetEntity != null && targetEntity.isAlive()) {
+			// Exact frame-interpolated target aim point (configurable ratio, default 0.50 = center of bounding box)
+			double targetX = Mth.lerp(partialTicks, targetEntity.xOld, targetEntity.getX());
+			double targetY = Mth.lerp(partialTicks, targetEntity.yOld, targetEntity.getY()) + (targetEntity.getBbHeight() * TARGET_AIM_HEIGHT_RATIO);
+			double targetZ = Mth.lerp(partialTicks, targetEntity.zOld, targetEntity.getZ());
+			Vec3 targetCenterPos = new Vec3(targetX, targetY, targetZ);
+
+			// Single direction vector directly from orb origin to target center
+			Vec3 toTarget = targetCenterPos.subtract(orbWorldPos);
+			double totalDist = toTarget.length();
+			beamLength = (float) Math.max(MIN_BEAM_LENGTH, totalDist + 24.0);
+
+			double horizontalDist = Math.sqrt(toTarget.x * toTarget.x + toTarget.z * toTarget.z);
+			targetPitch = (float) Math.toDegrees(-Math.atan2(toTarget.y, horizontalDist));
+			targetYaw = (float) Math.toDegrees(Math.atan2(-toTarget.x, toTarget.z));
+		} else {
+			targetPitch = pitch;
+			targetYaw = headYaw;
+		}
+
+		// 5. Render Geometry in Model Space
+		poseStack.pushPose();
+
+		// Follow the animated core translation while keeping target aim independent of head rotation.
+		poseStack.translate(orbModelPos.x, orbModelPos.y, orbModelPos.z);
+
+		// Aim towards target relative to current body rotation
+		float relYaw = targetYaw - bodyYaw;
+		float relPitch = targetPitch;
+
+		poseStack.mulPose(Axis.YP.rotationDegrees(relYaw));
+		poseStack.mulPose(Axis.XP.rotationDegrees(relPitch));
+
+		// End half-width based on beam length (clamped to prevent screen covering)
+		float endSize = Math.min(2.5F, BEAM_START_HALF_SIZE + (beamLength * BEAM_SPREAD_RATE));
+		float submittedLength = beamLength;
+		float submittedAlpha = currentAlpha;
+		float red = tracker.currentRed, green = tracker.currentGreen, blue = tracker.currentBlue;
+		bufferSource.submitCustomGeometry(poseStack,
+			net.minecraft.client.renderer.rendertype.RenderTypes.beaconBeam(PLAIN_TEXTURE, true),
+			(pose, vertexConsumer) -> renderSquarePyramidBeam(pose, vertexConsumer,
+				BEAM_START_HALF_SIZE, endSize, submittedLength, red, green, blue, submittedAlpha));
+
+		poseStack.popPose();
+	}
+
+	private Vec3 orbModelPosition() {
+		if (FOLLOW_ANIMATED_ORB && getParentModel() instanceof ModelWoodweaver model)
+			return animatedOrb(model);
+		return new Vec3(0, -ORB_HEIGHT, -ORB_FORWARD);
+	}
+
+	private static Vec3 animatedOrb(ModelWoodweaver model) {
+		PoseStack local = new PoseStack();
+		model.all.translateAndRotate(local);
+		model.body2.translateAndRotate(local);
+		model.upper_body.translateAndRotate(local);
+		model.head.translateAndRotate(local);
+		model.orb.translateAndRotate(local);
+		Vector3f origin = local.last().pose().transformPosition(new Vector3f());
+		return new Vec3(origin.x, origin.y, origin.z);
+	}
+
+	/**
+	 * Renders a clean 4-sided square frustum/pyramid beam (Top, Bottom, Left, Right faces),
+	 * double-sided so it is visible both from outside and when pulled inside the beam.
+	 */
+	private static void renderSquarePyramidBeam(PoseStack.Pose pose, VertexConsumer builder,
+												float s, float e, float length,
+												float r, float g, float b, float a) {
+
+		Matrix4f matrix = pose.pose();
+
+		// Coordinates in Model Space (-Z is forward, -Y is up, +Y is down, +X is right, -X is left):
+		// Start Square (Z = 0)
+		float sTop = -s;
+		float sBottom = s;
+		float sLeft = -s;
+		float sRight = s;
+
+		// End Square (Z = -length)
+		float eTop = -e;
+		float eBottom = e;
+		float eLeft = -e;
+		float eRight = e;
+
+		float z0 = 0.0F;
+		float z1 = -length;
+
+		// 1. TOP FACE (Facing -Y up)
+		addDoubleSidedQuad(matrix, pose, builder,
+				sLeft, sTop, z0,
+				sRight, sTop, z0,
+				eRight, eTop, z1,
+				eLeft, eTop, z1,
+				0.0F, -1.0F, 0.0F, r, g, b, a);
+
+		// 2. BOTTOM FACE (Facing +Y down)
+		addDoubleSidedQuad(matrix, pose, builder,
+				sRight, sBottom, z0,
+				sLeft, sBottom, z0,
+				eLeft, eBottom, z1,
+				eRight, eBottom, z1,
+				0.0F, 1.0F, 0.0F, r, g, b, a);
+
+		// 3. LEFT FACE (Facing -X left)
+		addDoubleSidedQuad(matrix, pose, builder,
+				sLeft, sBottom, z0,
+				sLeft, sTop, z0,
+				eLeft, eTop, z1,
+				eLeft, eBottom, z1,
+				-1.0F, 0.0F, 0.0F, r, g, b, a);
+
+		// 4. RIGHT FACE (Facing +X right)
+		addDoubleSidedQuad(matrix, pose, builder,
+				sRight, sTop, z0,
+				sRight, sBottom, z0,
+				eRight, eBottom, z1,
+				eRight, eTop, z1,
+				1.0F, 0.0F, 0.0F, r, g, b, a);
+	}
+
+	private static void addDoubleSidedQuad(Matrix4f matrix, PoseStack.Pose pose, VertexConsumer builder,
+										   float x0, float y0, float z0,
+										   float x1, float y1, float z1,
+										   float x2, float y2, float z2,
+										   float x3, float y3, float z3,
+										   float nx, float ny, float nz,
+										   float r, float g, float b, float a) {
+
+		// Front Face
+		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, nx, ny, nz);
+		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, nx, ny, nz);
+		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, nx, ny, nz);
+		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, nx, ny, nz);
+
+		// Back Face (Inside view)
+		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, -nx, -ny, -nz);
+		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, -nx, -ny, -nz);
+		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, -nx, -ny, -nz);
+		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(pose, -nx, -ny, -nz);
+	}
+}
+// 26.1.2
+// 26.1.2
+

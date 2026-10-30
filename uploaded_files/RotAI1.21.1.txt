@@ -155,7 +155,7 @@ public class RotOnEntityTickUpdateProcedure {
 	public static double DYNAMIC_RANGE_OFFSET_VARIANCE = 1.5;
 	// Set these before starting a world. Both true reproduce the original Rot.
 	public static boolean MINOS_MODE = true;
-	public static boolean SENTINEL_MODE = false;
+	public static boolean SENTINEL_MODE = true;
 	public static boolean ENABLE_EXTRACTION_GRAPPLE = false;
 	public static boolean ENABLE_TELEKINESIS = false;
 	public static boolean ENABLE_BLOCKING = true;

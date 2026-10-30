@@ -14,9 +14,6 @@
 */
 package net.mcreator.thebackwoods;
 
-import net.mcreator.thebackwoods.entity.FractusEntity;
-import net.mcreator.thebackwoods.entity.FractusPrimeEntity;
-
 import net.neoforged.neoforge.client.event.RenderLivingEvent;
 import net.neoforged.neoforge.client.event.ClientTickEvent;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
@@ -314,7 +311,7 @@ public class FractusLaserBeam {
 
         public static boolean isBurstLaserActive(Entity entity) {
             if (entity == null) return false;
-            boolean isPrime = (entity instanceof FractusPrimeEntity) || "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
+            boolean isPrime = "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
             boolean isTelekinesis = isPrime && (
                 entity.isShiftKeyDown()
                 || getSyncedDataBoolean(entity, "is_telekinesis", false)
@@ -353,7 +350,7 @@ public class FractusLaserBeam {
 
         public static boolean isSphereBurstActive(Entity entity) {
             if (entity == null) return false;
-            boolean isPrime = (entity instanceof FractusPrimeEntity) || "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
+            boolean isPrime = "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
             if (!isPrime) return false;
             int sphereTicks = (entity instanceof LivingEntity living) ? living.getArrowCount() : 0;
             if (sphereTicks <= 0) {
@@ -374,24 +371,13 @@ public class FractusLaserBeam {
         public static void applyFarRender(Entity entity) {
             if (entity == null) return;
             boolean unculledActive = isBurstLaserActive(entity) || isSphereBurstActive(entity);
-            if (unculledActive) {
+            try {
+                entity.setViewScale(unculledActive ? 16.0F : 1.0F);
+            } catch (Throwable ignored) {}
+            if (NO_CULLING_FIELD != null) {
                 try {
-                    entity.setViewScale(16.0F);
+                    NO_CULLING_FIELD.setBoolean(entity, unculledActive);
                 } catch (Throwable ignored) {}
-                if (NO_CULLING_FIELD != null) {
-                    try {
-                        NO_CULLING_FIELD.setBoolean(entity, true);
-                    } catch (Throwable ignored) {}
-                }
-            } else if (entity.getViewScale() > 1.0F) {
-                try {
-                    entity.setViewScale(1.0F);
-                } catch (Throwable ignored) {}
-                if (NO_CULLING_FIELD != null) {
-                    try {
-                        NO_CULLING_FIELD.setBoolean(entity, false);
-                    } catch (Throwable ignored) {}
-                }
             }
         }
 
@@ -410,57 +396,6 @@ public class FractusLaserBeam {
             return false;
         }
 
-        private static boolean hasAnyLaserOrRitualActivity(LivingEntity entity) {
-            if (entity instanceof FractusEntity fe) {
-                if (fe.getEntityData().get(FractusEntity.DATA_is_laser_activating)
-                    || fe.getEntityData().get(FractusEntity.DATA_is_laser_deactivating)
-                    || fe.getEntityData().get(FractusEntity.DATA_is_laser_burst_activating)
-                    || fe.getEntityData().get(FractusEntity.DATA_is_laser_burst_deactivating)) {
-                    return true;
-                }
-                if (fe.isShiftKeyDown() && fe.isSprinting()) return true;
-                if (fe.isSwimming()) return true;
-            } else if (entity instanceof FractusPrimeEntity fpe) {
-                if (fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_activating)
-                    || fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_deactivating)
-                    || fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_burst_activating)
-                    || fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_burst_deactivating)
-                    || fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_aoe_activating)) {
-                    return true;
-                }
-                if (fpe.getStingerCount() > 0 || fpe.getArrowCount() > 0) return true;
-            }
-
-            int id = entity.getId();
-            if (SUMMON_FADE_TIMERS.containsKey(id)
-                || BURST_LAST_ACTIVE_TIMES.containsKey(id)
-                || LASER_START_TIMES.containsKey(id)
-                || BURST_START_TIMES.containsKey(id)) {
-                return true;
-            }
-
-            net.minecraft.nbt.CompoundTag pData = entity.getPersistentData();
-            if (pData != null && !pData.isEmpty()) {
-                if (pData.getInt("fractus_laser_state") > 0
-                    || pData.getInt("fractus_burst_timer") > 0
-                    || pData.getInt("fractus_burst_state") > 0
-                    || pData.getInt("fractus_sphere_timer") > 0
-                    || pData.getInt("sphere_ticks") > 0
-                    || pData.getInt("fractus_destroying_fire") > 0
-                    || pData.getInt("fractus_summon_role") > 0
-                    || pData.getInt("fractus_summon_ticks") > 0
-                    || pData.getInt("fractus_telekinesis_timer") > 0
-                    || pData.getBoolean("telekinesis_active")
-                    || pData.getBoolean("is_telekinesis")
-                    || pData.getBoolean("is_summoning")
-                    || pData.getBoolean("is_laser_burst")) {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         @SubscribeEvent
         public static void onRenderLivingPre(RenderLivingEvent.Pre<?, ?> event) {
             if (USE_OLD_LASER_PARTICLES) {
@@ -471,24 +406,10 @@ public class FractusLaserBeam {
                 return;
             }
 
-            if (!hasAnyLaserOrRitualActivity(entity)) {
-                if (entity.getViewScale() > 1.0F) {
-                    try {
-                        entity.setViewScale(1.0F);
-                    } catch (Throwable ignored) {}
-                    if (NO_CULLING_FIELD != null) {
-                        try {
-                            NO_CULLING_FIELD.setBoolean(entity, false);
-                        } catch (Throwable ignored) {}
-                    }
-                }
-                return;
-            }
-
             // Disable frustum culling and expand render bounds so laser beams stay visible even near screen edges / outside center FOV
             applyFarRender(entity);
 
-            boolean isPrime = (entity instanceof FractusPrimeEntity) || "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
+            boolean isPrime = "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
 
             // 1. Check Summoning State (Standard Fractus Ritual) with smooth fade-out tracking
             boolean isSummoningRaw = !isPrime && (
@@ -819,11 +740,8 @@ public class FractusLaserBeam {
             if (entity == null || !isFractus(entity)) {
                 return;
             }
-            if (!hasAnyLaserOrRitualActivity(entity)) {
-                return;
-            }
 
-            boolean isPrime = (entity instanceof FractusPrimeEntity) || "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
+            boolean isPrime = "fractus_prime".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath());
             ResourceLocation activeTexture = USE_BEACON_BEAM_TEXTURE ? BEACON_BEAM_LOCATION : CUSTOM_LASER_LOCATION;
 
             // 3D AOE SPHERE: Render complete 360-degree geodesic sphere and energy rings for Fractus Prime
@@ -1558,15 +1476,8 @@ public class FractusLaserBeam {
 
         private static boolean isFractus(Entity entity) {
             if (entity == null) return false;
-            if (entity instanceof FractusEntity || entity instanceof FractusPrimeEntity) {
-                return true;
-            }
-            ResourceLocation key = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
-            if (key != null && "the_backwoods".equals(key.getNamespace())) {
-                String path = key.getPath();
-                return "fractus".equals(path) || "fractus_prime".equals(path);
-            }
-            return false;
+            String path = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath();
+            return "fractus".equals(path) || "fractus_prime".equals(path);
         }
 
         private static boolean isAngry(LivingEntity entity) {
@@ -1578,18 +1489,6 @@ public class FractusLaserBeam {
 
         public static boolean getSyncedDataBoolean(Entity entity, String paramName, boolean defaultValue) {
             if (entity == null) return defaultValue;
-            if (entity instanceof FractusEntity fe) {
-                if ("is_laser_activating".equals(paramName)) return fe.getEntityData().get(FractusEntity.DATA_is_laser_activating);
-                if ("is_laser_deactivating".equals(paramName)) return fe.getEntityData().get(FractusEntity.DATA_is_laser_deactivating);
-                if ("is_laser_burst_activating".equals(paramName)) return fe.getEntityData().get(FractusEntity.DATA_is_laser_burst_activating);
-                if ("is_laser_burst_deactivating".equals(paramName)) return fe.getEntityData().get(FractusEntity.DATA_is_laser_burst_deactivating);
-            } else if (entity instanceof FractusPrimeEntity fpe) {
-                if ("is_laser_activating".equals(paramName)) return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_activating);
-                if ("is_laser_deactivating".equals(paramName)) return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_deactivating);
-                if ("is_laser_burst_activating".equals(paramName)) return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_burst_activating);
-                if ("is_laser_burst_deactivating".equals(paramName)) return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_burst_deactivating);
-                if ("is_laser_aoe_activating".equals(paramName)) return fpe.getEntityData().get(FractusPrimeEntity.DATA_is_laser_aoe_activating);
-            }
             net.minecraft.network.syncher.EntityDataAccessor<Boolean> accessor = getEntityDataAccessor(entity, paramName);
             if (accessor != null) {
                 try {
@@ -1611,21 +1510,12 @@ public class FractusLaserBeam {
         }
 
         private static final java.util.Map<String, java.lang.reflect.Field> SYNCED_DATA_FIELD_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
-        private static final java.lang.reflect.Field NULL_FIELD_SENTINEL;
-        static {
-            java.lang.reflect.Field dummy = null;
-            try {
-                dummy = FractusLaserClientRenderer.class.getDeclaredField("SYNCED_DATA_FIELD_CACHE");
-            } catch (Throwable ignored) {}
-            NULL_FIELD_SENTINEL = dummy;
-        }
 
         @SuppressWarnings("unchecked")
         private static <T> net.minecraft.network.syncher.EntityDataAccessor<T> getEntityDataAccessor(Entity entity, String paramName) {
             if (entity == null || paramName == null) return null;
             String cacheKey = entity.getClass().getName() + ":" + paramName;
             java.lang.reflect.Field field = SYNCED_DATA_FIELD_CACHE.get(cacheKey);
-            if (field == NULL_FIELD_SENTINEL) return null;
             if (field == null) {
                 String[] candidateNames = new String[]{
                     "DATA_" + paramName,
@@ -1658,11 +1548,8 @@ public class FractusLaserBeam {
                     if (field != null) break;
                     current = current.getSuperclass();
                 }
-                if (field == null && NULL_FIELD_SENTINEL != null) {
-                    SYNCED_DATA_FIELD_CACHE.put(cacheKey, NULL_FIELD_SENTINEL);
-                }
             }
-            if (field != null && field != NULL_FIELD_SENTINEL) {
+            if (field != null) {
                 try {
                     return (net.minecraft.network.syncher.EntityDataAccessor<T>) field.get(null);
                 } catch (Exception e) {
@@ -1867,18 +1754,9 @@ public class FractusLaserBeam {
                 return;
             }
 
-            boolean isPrime = entity instanceof FractusPrimeEntity;
-            boolean isStandard = entity instanceof FractusEntity;
-            if (!isStandard && !isPrime) {
-                ResourceLocation key = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
-                if (key == null || !"the_backwoods".equals(key.getNamespace())) return;
-                String path = key.getPath();
-                if ("fractus".equals(path)) isStandard = true;
-                else if ("fractus_prime".equals(path)) isPrime = true;
-                else return;
-            }
-
-            if (isStandard || isPrime) {
+            String path = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).getPath();
+            boolean isPrime = "fractus_prime".equals(path);
+            if ("fractus".equals(path) || isPrime) {
                 // Check telekinesis state
                 boolean isTelekinesisServer = isPrime && (
                     entity.getPersistentData().getBoolean("telekinesis_active")
@@ -1896,7 +1774,7 @@ public class FractusLaserBeam {
                     || entity.getPersistentData().getInt("fractus_summon_ticks") > 0;
 
                 // STRICT RULE: In summoning mode of standard Fractus, NEVER activate the combat laser!
-                if (isSummoning && isStandard) {
+                if (isSummoning && "fractus".equals(path)) {
                     entity.setShiftKeyDown(true);
                     entity.setSprinting(true);
                     entity.setSwimming(true);
@@ -1969,7 +1847,7 @@ public class FractusLaserBeam {
                 }
 
                 // Synchronize sphere burst timer to client via arrow count
-                if (isPrime && entity instanceof LivingEntity living) {
+                if ("fractus_prime".equals(path) && entity instanceof LivingEntity living) {
                     int sphereTicks = entity.getPersistentData().getInt("fractus_sphere_timer");
                     living.setArrowCount(sphereTicks);
                     entity.getPersistentData().putInt("sphere_ticks", sphereTicks);
@@ -1982,16 +1860,12 @@ public class FractusLaserBeam {
             Entity entity = event.getEntity();
             if (entity == null || entity.level().isClientSide()) return;
 
-            boolean isPrime = entity instanceof FractusPrimeEntity;
-            boolean isStandard = entity instanceof FractusEntity;
-            if (!isStandard && !isPrime) {
-                ResourceLocation typeKey = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
-                if (typeKey == null || !"the_backwoods".equals(typeKey.getNamespace())) return;
-                String path = typeKey.getPath();
-                if ("fractus".equals(path)) isStandard = true;
-                else if ("fractus_prime".equals(path)) isPrime = true;
-                else return;
-            }
+            ResourceLocation typeKey = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+            if (typeKey == null || !"the_backwoods".equals(typeKey.getNamespace())) return;
+
+            String path = typeKey.getPath();
+            boolean isPrime = "fractus_prime".equals(path);
+            if (!"fractus".equals(path) && !isPrime) return;
 
             int burstTicks = entity.getPersistentData().getInt("fractus_burst_timer");
             boolean isBurst = burstTicks > 0

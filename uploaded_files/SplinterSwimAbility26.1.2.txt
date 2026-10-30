@@ -20,6 +20,7 @@ import net.minecraft.core.registries.BuiltInRegistries;
 import net.neoforged.api.distmarker.Dist;
 import net.neoforged.neoforge.client.event.RenderLivingEvent;
 import net.minecraft.client.renderer.entity.state.LivingEntityRenderState;
+import net.minecraft.util.Mth;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.mojang.math.Axis;
 
@@ -83,7 +84,7 @@ public class SplinterSwimAbility {
 				return;
 			}
 
-			boolean inWater = mob.isInWater();
+			boolean inWater = mob.isInWater() || mob.isUnderWater();
 			LivingEntity target = mob.getTarget();
 			boolean isChasingTarget = target != null && target.isAlive() && !target.isSpectator() && !(target instanceof Player player && player.isCreative());
 
@@ -97,23 +98,35 @@ public class SplinterSwimAbility {
 				if (mob.getPose() != Pose.SWIMMING) {
 					mob.setPose(Pose.SWIMMING);
 				}
+				// Suspend ground pathfinding while swimming so GroundPathNavigation does not fight 3D water physics
+				if (!mob.getNavigation().isDone()) {
+					mob.getNavigation().stop();
+				}
 				applyWaterSpeedBoost(mob, profile.speedBoost);
 				guideUnderwaterChase(mob, target, profile);
 			} else {
-				if (mob.isSwimming()) {
-					mob.setSwimming(false);
+				// Prevent single-tick pose thrashing at the water-air surface boundary
+				if (!inWater) {
+					if (mob.isSwimming()) {
+						mob.setSwimming(false);
+					}
+					if (mob.isSprinting()) {
+						mob.setSprinting(false);
+					}
+					if (mob.getPose() == Pose.SWIMMING) {
+						mob.setPose(Pose.STANDING);
+					}
+					removeWaterSpeedBoost(mob);
 				}
-				if (mob.isSprinting()) {
-					mob.setSprinting(false);
-				}
-				if (mob.getPose() == Pose.SWIMMING) {
-					mob.setPose(Pose.STANDING);
-				}
-				removeWaterSpeedBoost(mob);
 			}
 		}
 
 		private static void guideUnderwaterChase(Mob mob, LivingEntity target, SwimProfile profile) {
+			// Ensure ground path navigation remains halted during swimming chase
+			if (!mob.getNavigation().isDone()) {
+				mob.getNavigation().stop();
+			}
+
 			Vec3 mobPos = mob.position();
 			Vec3 targetPos = target.position();
 			double dy = (target.getY() + (target.getBbHeight() * 0.5D)) - (mob.getY() + (mob.getBbHeight() * 0.5D));
@@ -124,7 +137,8 @@ public class SplinterSwimAbility {
 				Vec3 vel = mob.getDeltaMovement();
 
 				boolean submerged = mob.isUnderWater();
-				double maxYThrust = submerged ? 0.30D : 0.12D;
+				// Allow increased upward thrust when breaching toward elevated targets (boats, shorelines)
+				double maxYThrust = submerged ? 0.30D : (dy > 0.3D ? 0.24D : 0.12D);
 				double targetVy = Math.max(-0.25D, Math.min(maxYThrust, dy * 0.35D));
 				double newVy = (vel.y * 0.7D) + (targetVy * 0.3D);
 
@@ -144,9 +158,17 @@ public class SplinterSwimAbility {
 
 				mob.setDeltaMovement(newVx, newVy, newVz);
 				mob.hurtMarked = true;
+
+				// Smoothly orient mob head and body rotation toward swimming trajectory
+				if (horizontalSpeed > 0.01D) {
+					float targetYaw = (float) (Mth.atan2(dir.z, dir.x) * (180.0D / Math.PI)) - 90.0F;
+					mob.setYRot(targetYaw);
+					mob.setYHeadRot(targetYaw);
+					mob.setYBodyRot(targetYaw);
+				}
 			}
 
-			mob.getLookControl().setLookAt(target, 30.0F, 30.0F);
+			mob.getLookControl().setLookAt(target, 60.0F, 60.0F);
 		}
 
 		private static void applyWaterSpeedBoost(Mob mob, double speedBoost) {

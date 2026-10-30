@@ -40,88 +40,26 @@ import java.util.List;
 @EventBusSubscriber
 public class RotDataGuardian {
 
-	public static final boolean ENABLE_GUARDIAN = true;
+	public static boolean ENABLE_GUARDIAN = true;
 
-	public static final boolean SILENT_SECURITY_MODE = false;
-	public static final boolean ENABLE_FEEDBACK_PENALTY = true;
-	public static final boolean ENABLE_LIGHTNING_STRIKES = false;
-	public static final boolean ENABLE_SOUND_EFFECTS = false;
-	public static final boolean ENABLE_PARTICLE_EFFECTS = false;
-	public static final boolean ENABLE_BROADCAST_WARNINGS = false;
+	public static boolean SILENT_SECURITY_MODE = false;
+	public static boolean ENABLE_FEEDBACK_PENALTY = true;
+	public static boolean ENABLE_LIGHTNING_STRIKES = false;
+	public static boolean ENABLE_SOUND_EFFECTS = false;
+	public static boolean ENABLE_PARTICLE_EFFECTS = false;
+	public static boolean ENABLE_BROADCAST_WARNINGS = false;
 	
-	public static final String MSG_COMMAND_BLOCKED = "§c[System] Lethal Feedback Protocol: Remote administrative override blocked on structural target.§r";
-	public static final String MSG_TAMPER_DETECTED = "§c[System] Structural anomaly detected (%s). Re-synchronizing atomics.§r";
-	public static final String MSG_FEEDBACK_TRIGGERED = "§4[System] Lethal Feedback Protocol engaged. Neural suppression active. Access denied.§r";
+	public static String MSG_COMMAND_BLOCKED = "§c[System] Lethal Feedback Protocol: Remote administrative override blocked on structural target.§r";
+	public static String MSG_TAMPER_DETECTED = "§c[System] Structural anomaly detected (%s). Re-synchronizing atomics.§r";
+	public static String MSG_FEEDBACK_TRIGGERED = "§4[System] Lethal Feedback Protocol engaged. Neural suppression active. Access denied.§r";
 
-	private static boolean isAuthorizedBackwoodsCaller() {
-		for (StackTraceElement el : Thread.currentThread().getStackTrace()) {
-			String cn = el.getClassName();
-			if (cn.equals(RotDataGuardian.class.getName()) || cn.startsWith("java.lang.Thread")) continue;
-			return cn.startsWith("net.mcreator.thebackwoods.");
-		}
-		return false;
-	}
-
-	private static final class RotVaultState {
-		double validatedMaxHealth;
-		double validatedHealth;
-		int damageGraceTicks;
-		int lastGraceTick = -1;
-		int expectedGoals;
-		int expectedTargets;
-		boolean deathSequenceActive;
-		boolean deathSequenceFinished;
-	}
-
-	private static final java.util.Map<java.util.UUID, RotVaultState> ROT_SECURITY_VAULT = new java.util.concurrent.ConcurrentHashMap<>();
-
-	private static RotVaultState getVault(Entity entity) {
-		return ROT_SECURITY_VAULT.computeIfAbsent(entity.getUUID(), k -> new RotVaultState());
-	}
-
-	public static void authorizeDamageGrace(Entity entity, int ticks) {
-		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
-		RotVaultState v = getVault(entity);
-		v.damageGraceTicks = Math.max(v.damageGraceTicks, ticks);
-		entity.getPersistentData().putInt("sentinel_damage_grace_ticks", v.damageGraceTicks);
-	}
-
-	public static void authorizeDeathSequenceActive(Entity entity) {
-		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
-		RotVaultState v = getVault(entity);
-		v.deathSequenceActive = true;
-		entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
-	}
-
-	public static void authorizeDeathSequenceFinished(Entity entity) {
-		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
-		RotVaultState v = getVault(entity);
-		v.deathSequenceFinished = true;
-		entity.getPersistentData().putBoolean("rot_death_sequence_finished", true);
-	}
-
+	
 	public static boolean isShootingStarAdaptationEnabled() {
-		return true;
-	}
-
-	public static boolean isShootingStarDamage(net.minecraft.world.damagesource.DamageSource ds) {
-		if (ds == null) return false;
 		try {
-			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
-				String typeId = ds.typeHolder().unwrapKey().get().identifier().toString().toLowerCase();
-				if (typeId.equals("shooting_star_demo:shooting_star") || typeId.equals("shooting_star_demo:shooting_star_hit")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		String msgId = ds.getMsgId();
-		if (msgId != null) {
-			String lower = msgId.toLowerCase();
-			return lower.equals("shooting_star_demo:shooting_star") || lower.equals("shooting_star_demo:shooting_star_hit")
-				|| lower.equals("shooting_star_demo.shooting_star") || lower.equals("shooting_star_demo.shooting_star_hit")
-				|| lower.equals("shooting_star") || lower.equals("shooting_star_hit");
+			return net.mcreator.thebackwoods.procedures.RotOnEntityTickUpdateProcedure.ENABLE_SHOOTING_STAR_ADAPTATION;
+		} catch (Throwable t) {
+			return true;
 		}
-		return false;
 	}
 
 	public static boolean isRot(Entity entity) {
@@ -142,40 +80,15 @@ public class RotDataGuardian {
 	public static boolean isBossDeathSequenceActive(Entity entity) {
 		if (entity == null) return false;
 		if (isRot(entity)) {
-			RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
-			if (v != null && v.deathSequenceActive) return true;
-			boolean flagged = false;
 			try {
-				if (entity instanceof RotEntity rot && rot.getEntityData().get(RotEntity.DATA_isDeath)) flagged = true;
+				if (entity instanceof RotEntity rot && rot.getEntityData().get(RotEntity.DATA_isDeath)) return true;
 			} catch (Exception ignored) {}
-			if (!flagged) {
-				flagged = entity.getPersistentData().getBoolean("rot_death_sequence_active").orElse(false);
-			}
-			if (flagged) {
-				if (!entity.level().isClientSide() && v != null && v.validatedMaxHealth >= 1.0 && v.validatedHealth > 20.0 && v.damageGraceTicks <= 0) {
-					try {
-						if (entity instanceof RotEntity rot) rot.getEntityData().set(RotEntity.DATA_isDeath, false);
-					} catch (Exception ignored) {}
-					entity.getPersistentData().putBoolean("rot_death_sequence_active", false);
-					return false;
-				}
-				if (entity instanceof LivingEntity living && living.getHealth() <= 20.0F) {
-					if (v != null) v.deathSequenceActive = true;
-					return true;
-				}
-				return entity.level().isClientSide();
-			}
-			return false;
+			return entity.getPersistentData().getBoolean("rot_death_sequence_active").orElse(false);
 		}
 		if (isVerdantEngine(entity)) {
 			return entity.getPersistentData().getBoolean("verdant_death_sequence_active").orElse(false);
 		}
 		return false;
-	}
-
-	public static void enforceEntitySecurityTick(Entity entity) {
-		if (!ENABLE_GUARDIAN || entity == null || entity.level().isClientSide()) return;
-		RotDataGuardianForgeBusEvents.runEntitySecurityCheck(entity);
 	}
 
 	
@@ -188,13 +101,8 @@ public class RotDataGuardian {
 	}
 
 	public static void unregisterProtectedDeathEntity(Entity entity) {
-		if (entity != null && isAuthorizedBackwoodsCaller()) {
-			if (isRot(entity)) {
-				RotVaultState v = getVault(entity);
-				v.deathSequenceFinished = true;
-			}
+		if (entity != null) {
 			PROTECTED_DEATH_ENTITIES.remove(entity.getUUID());
-			ROT_SECURITY_VAULT.remove(entity.getUUID());
 		}
 	}
 
@@ -217,42 +125,8 @@ public class RotDataGuardian {
 	
 	public static boolean isCommandTargetingBoss(String cmdLower) {
 		if (cmdLower == null || cmdLower.isEmpty()) return false;
-		
-		// Direct entity namespace/name matching
-		if (cmdLower.contains("the_backwoods:rot") || cmdLower.contains("the_backwoods:verdant_engine")
-			|| cmdLower.matches(".*\\brot\\b.*") || cmdLower.matches(".*\\bverdant_engine\\b.*")) {
-			return true;
-		}
-
-		// Selector analysis: only @e can target non-player entities like the boss (@a, @p, @r only target players)
-		if (cmdLower.contains("@e")) {
-			int atEIdx = cmdLower.indexOf("@e");
-			int bracketStart = cmdLower.indexOf('[', atEIdx);
-			int bracketEnd = (bracketStart != -1) ? cmdLower.indexOf(']', bracketStart) : -1;
-
-			if (bracketStart != -1 && bracketEnd != -1 && bracketEnd > bracketStart) {
-				String selectorArgs = cmdLower.substring(bracketStart + 1, bracketEnd);
-				for (String arg : selectorArgs.split(",")) {
-					String trimmed = arg.trim();
-					if (trimmed.startsWith("type=")) {
-						String typeVal = trimmed.substring(5).trim();
-						// Negated type filter excludes the entity (e.g. type=!the_backwoods:rot or type=!player)
-						if (typeVal.startsWith("!")) {
-							return false;
-						}
-						// If an explicit type is given, only flag if it actually targets the boss
-						return typeVal.equals("the_backwoods:rot")
-							|| typeVal.equals("rot")
-							|| typeVal.equals("the_backwoods:verdant_engine")
-							|| typeVal.equals("verdant_engine");
-					}
-				}
-			}
-			// Unfiltered @e (e.g. "/kill @e") targets all entities including the boss
-			return true;
-		}
-
-		return false;
+		return cmdLower.contains("rot") || cmdLower.contains("verdant") || cmdLower.contains("engine")
+			|| cmdLower.contains("@e") || cmdLower.contains("@a") || cmdLower.contains("@r") || cmdLower.contains("@p");
 	}
 
 	public RotDataGuardian() {
@@ -384,11 +258,7 @@ public class RotDataGuardian {
 				if (isVerdantEngine(entity)) {
 					isFinished = entity.getPersistentData().getBoolean("verdant_death_sequence_finished").orElse(false);
 				} else if (isRot(entity)) {
-					RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
-					isFinished = (v != null && v.deathSequenceFinished);
-					if (!isFinished && entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false)) {
-						entity.getPersistentData().putBoolean("rot_death_sequence_finished", false);
-					}
+					isFinished = entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false);
 				}
 				if (!isFinished) {
 					clearEntityRemoval(entity);
@@ -424,16 +294,11 @@ public class RotDataGuardian {
 				if (isVerdantEngine(entity)) {
 					isFinished = entity.getPersistentData().getBoolean("verdant_death_sequence_finished").orElse(false);
 				} else if (isRot(entity)) {
-					RotVaultState v = ROT_SECURITY_VAULT.get(entity.getUUID());
-					isFinished = (v != null && v.deathSequenceFinished);
-					if (!isFinished && entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false)) {
-						entity.getPersistentData().putBoolean("rot_death_sequence_finished", false);
-					}
+					isFinished = entity.getPersistentData().getBoolean("rot_death_sequence_finished").orElse(false);
 				}
 
 				if (isFinished) {
 					toRemove.add(entry.getKey());
-					ROT_SECURITY_VAULT.remove(entry.getKey());
 					continue;
 				}
 
@@ -476,18 +341,12 @@ public class RotDataGuardian {
 			}
 		}
 
-		@SubscribeEvent
+@SubscribeEvent
 		public static void onEntityTick(EntityTickEvent.Pre event) {
 			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
 				return;
 			}
-			runEntitySecurityCheck(event.getEntity());
-		}
-
-		static void runEntitySecurityCheck(Entity entity) {
-			if (!ENABLE_GUARDIAN || entity == null || entity.level().isClientSide()) {
-				return;
-			}
+			Entity entity = event.getEntity();
 			if (isStructuralBoss(entity)) {
 				registerProtectedDeathEntity(entity);
 			}
@@ -499,12 +358,11 @@ public class RotDataGuardian {
 				}
 				ServerLevel level = (ServerLevel) rot.level();
 
-				RotVaultState vault = getVault(rot);
-				double validatedMaxHealth = vault.validatedMaxHealth;
-				double validatedHealth = vault.validatedHealth;
-				int damageGraceTicks = vault.damageGraceTicks;
-				int expectedGoals = vault.expectedGoals;
-				int expectedTargets = vault.expectedTargets;
+				double validatedMaxHealth = rot.getPersistentData().getDouble("sentinel_validated_max_health").orElse(0.0);
+				double validatedHealth = rot.getPersistentData().getDouble("sentinel_validated_health").orElse(0.0);
+				int damageGraceTicks = rot.getPersistentData().getInt("sentinel_damage_grace_ticks").orElse(0);
+				int expectedGoals = rot.getPersistentData().getInt("sentinel_expected_goals").orElse(0);
+				int expectedTargets = rot.getPersistentData().getInt("sentinel_expected_targets").orElse(0);
 
 				double currentBaseMaxHealth = rot.getAttribute(Attributes.MAX_HEALTH).getBaseValue();
 
@@ -513,10 +371,6 @@ public class RotDataGuardian {
 					validatedHealth = rot.getHealth();
 					expectedGoals = rot.goalSelector.getAvailableGoals().size();
 					expectedTargets = rot.targetSelector.getAvailableGoals().size();
-					vault.validatedMaxHealth = validatedMaxHealth;
-					vault.validatedHealth = validatedHealth;
-					vault.expectedGoals = expectedGoals;
-					vault.expectedTargets = expectedTargets;
 					rot.getPersistentData().putDouble("sentinel_validated_max_health", validatedMaxHealth);
 					rot.getPersistentData().putDouble("sentinel_validated_health", validatedHealth);
 					rot.getPersistentData().putInt("sentinel_expected_goals", expectedGoals);
@@ -525,35 +379,25 @@ public class RotDataGuardian {
 
 				if (currentBaseMaxHealth > validatedMaxHealth) {
 					validatedMaxHealth = currentBaseMaxHealth;
-					vault.validatedMaxHealth = validatedMaxHealth;
 					rot.getPersistentData().putDouble("sentinel_validated_max_health", validatedMaxHealth);
 				} else if (currentBaseMaxHealth < validatedMaxHealth) {
 					rot.getAttribute(Attributes.MAX_HEALTH).setBaseValue(validatedMaxHealth);
 					rot.setHealth((float) validatedHealth);
 				}
 
-				if (vault.lastGraceTick != rot.tickCount) {
-					vault.lastGraceTick = rot.tickCount;
-					if (damageGraceTicks > 0) {
-						damageGraceTicks--;
-						vault.damageGraceTicks = damageGraceTicks;
-						rot.getPersistentData().putInt("sentinel_damage_grace_ticks", damageGraceTicks);
-					} else {
-						rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 0);
-					}
+				if (damageGraceTicks > 0) {
+					damageGraceTicks--;
+					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", damageGraceTicks);
 				}
 
 				double currentHealth = rot.getHealth();
 				if (currentHealth < validatedHealth) {
 					if (damageGraceTicks > 0 || rot.hurtTime > 0 || rot.getLastHurtByMob() != null) {
-						vault.validatedHealth = currentHealth;
 						rot.getPersistentData().putDouble("sentinel_validated_health", currentHealth);
 					} else {
 						rot.setHealth((float) validatedHealth);
-						rot.getPersistentData().putDouble("sentinel_validated_health", validatedHealth);
 					}
 				} else if (currentHealth > validatedHealth) {
-					vault.validatedHealth = currentHealth;
 					rot.getPersistentData().putDouble("sentinel_validated_health", currentHealth);
 				}
 
@@ -666,10 +510,9 @@ public class RotDataGuardian {
 
 				boolean isAlreadyAbsorbing = entity.getPersistentData().getBoolean("verdant_railgun_absorbing").orElse(false);
 				boolean isAlreadySupercharged = entity.getPersistentData().getBoolean("verdant_supercharged_mode").orElse(false);
-				boolean isShootingStar = isShootingStarDamage(ds);
 
 				// Railgun strike before supercharge -> Absorb & start 8s countdown!
-				if (!isAlreadySupercharged && (isShootingStar || isAlreadyAbsorbing)) {
+				if (!isAlreadySupercharged && (isRailgunAttack || isAlreadyAbsorbing)) {
 					event.setCanceled(true);
 					event.setAmount(0.0F);
 					if (entity instanceof LivingEntity living) {
@@ -718,11 +561,8 @@ public class RotDataGuardian {
 					return;
 				}
 				if (isPlayerAttack) {
-					RotVaultState v = getVault(rot);
-					v.damageGraceTicks = Math.max(v.damageGraceTicks, 40);
-					v.validatedHealth = Math.max(0.0, rot.getHealth() - amount);
 					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
-					rot.getPersistentData().putDouble("sentinel_validated_health", v.validatedHealth);
+					rot.getPersistentData().putDouble("sentinel_validated_health", Math.max(0.0, rot.getHealth() - amount));
 					return;
 				}
 				if (isShootingStarAdaptationEnabled() && (isRailgunAttack || rot.getPersistentData().getBoolean("rot_phase_active").orElse(false))) {
@@ -740,9 +580,6 @@ public class RotDataGuardian {
 							rot.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, false);
 						} catch (Exception ignored) {}
 					}
-					RotVaultState v = getVault(rot);
-					v.damageGraceTicks = Math.max(v.damageGraceTicks, 60);
-					v.validatedHealth = rot.getMaxHealth();
 					rot.getPersistentData().putBoolean("rot_phase_active", true);
 					rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
 					rot.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
@@ -752,8 +589,6 @@ public class RotDataGuardian {
 					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
 					return;
 				}
-				RotVaultState v = getVault(rot);
-				v.damageGraceTicks = Math.max(v.damageGraceTicks, 20);
 				rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 20);
 			}
 		}
