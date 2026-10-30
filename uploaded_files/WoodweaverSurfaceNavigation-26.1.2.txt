@@ -89,6 +89,7 @@ public final class WoodweaverSurfaceNavigation {
         Key sensedTransition, committedTransition;
         int sensedAt = -100, candidateSince = -1, transitionSeenAt, lastFaceSwitch = -100;
         double currentConfidence, nextConfidence;
+        int steerSign = 1;
     }
 
     private record Failure(int until, BlockPos support, BlockState block, BlockPos goal) {}
@@ -498,6 +499,7 @@ public final class WoodweaverSurfaceNavigation {
             next.key.face.getStepX(), next.key.face.getStepY(), next.key.face.getStepZ())));
         speed *= 0.75 + 0.25 * alignment;
         Vec3 delta = distance > speed ? movement.scale(speed / distance) : movement;
+        delta = applyPassageThreadingAndSteering(mob, state, next, delta, speed);
         mob.move(MoverType.SELF, delta);
         mob.setDeltaMovement(Vec3.ZERO);
         mob.setOnGround(next.key.face == Direction.UP);
@@ -536,6 +538,93 @@ public final class WoodweaverSurfaceNavigation {
         }
         publish(mob, state, false);
         return true;
+    }
+
+    // --- Arachnomod-adapted Passage Threading & Continuous Steering ---
+    private static final double[] STEER_ANGLES = { 0.2618, 0.5236, 0.7854, 1.0472 }; // 15°, 30°, 45°, 60°
+
+    private static Vec3 applyPassageThreadingAndSteering(Mob mob, Controller state, Node next, Vec3 delta, double speed) {
+        if (next == null || delta.lengthSqr() < 1.0e-5) return delta;
+        Level level = mob.level();
+        Vec3 currentPos = mob.position();
+
+        // 1. Passage Lane Threading (adapted from Arachnomod threadOpening)
+        // Check if approaching or inside a confined passage/doorway on ground
+        if (next.key.face == Direction.UP) {
+            BlockPos targetPos = BlockPos.containing(next.position);
+            boolean blockedZ = isPassageWall(level, targetPos.north()) && isPassageWall(level, targetPos.south());
+            boolean blockedX = isPassageWall(level, targetPos.east()) && isPassageWall(level, targetPos.west());
+            
+            if (blockedZ != blockedX) { // Clear single-axis passage
+                boolean alongX = blockedZ; // True if passage runs along X axis
+                double passageLane = alongX ? targetPos.getZ() + 0.5 : targetPos.getX() + 0.5;
+                double currentLane = alongX ? currentPos.z : currentPos.x;
+                double laneOff = passageLane - currentLane;
+                double passageFloorY = next.position.y;
+                
+                double distAlong = alongX ? Math.abs(currentPos.x - (targetPos.getX() + 0.5)) : Math.abs(currentPos.z - (targetPos.getZ() + 0.5));
+                if (distAlong < 3.0) {
+                    // Inside or approaching opening: pin floor Y to stop wall-climbing/riding doorframe
+                    double clampedY = Mth.clamp(passageFloorY - currentPos.y, -speed, speed);
+                    // Square up to passage centerline
+                    double steerLane = Mth.clamp(laneOff * 0.45, -speed * 0.65, speed * 0.65);
+                    
+                    if (alongX) {
+                        delta = new Vec3(delta.x, clampedY, steerLane);
+                    } else {
+                        delta = new Vec3(steerLane, clampedY, delta.z);
+                    }
+                    return delta;
+                }
+            }
+        }
+
+        // 2. Continuous Local Steering (adapted from Arachnomod planChaseMove & probeLine)
+        // If forward path is obstructed by a corner or barrier, sweep angular rays
+        Vec3 horiz = new Vec3(delta.x, 0, delta.z);
+        double horizLen = horiz.length();
+        if (horizLen > 0.01) {
+            Vec3 testFrom = currentPos.add(0, 0.4, 0);
+            Vec3 testTo = testFrom.add(horiz.scale(1.2));
+            BlockHitResult hit = clipLoaded(level, mob, testFrom, testTo);
+            if (hit != null) {
+                // Forward is blocked by an edge or wall: probe alternate angles
+                double baseAngle = Math.atan2(horiz.z, horiz.x);
+                int sign = state.steerSign;
+                Vec3 bestSteer = null;
+
+                for (double angle : STEER_ANGLES) {
+                    for (int s : new int[]{ sign, -sign }) {
+                        double candidateAngle = baseAngle + angle * s;
+                        double probeX = Math.cos(candidateAngle) * horizLen;
+                        double probeZ = Math.sin(candidateAngle) * horizLen;
+                        Vec3 probeEnd = testFrom.add(probeX * 1.5, 0, probeZ * 1.5);
+                        
+                        if (clipLoaded(level, mob, testFrom, probeEnd) == null) {
+                            // Check that ground/support exists under probed position
+                            Vec3 groundCheck = testFrom.add(probeX, 0, probeZ);
+                            if (clipLoaded(level, mob, groundCheck, groundCheck.add(0, -1.8, 0)) != null) {
+                                state.steerSign = s;
+                                bestSteer = new Vec3(probeX, delta.y, probeZ);
+                                break;
+                            }
+                        }
+                    }
+                    if (bestSteer != null) break;
+                }
+                if (bestSteer != null) {
+                    delta = bestSteer;
+                }
+            }
+        }
+
+        return delta;
+    }
+
+    private static boolean isPassageWall(Level level, BlockPos pos) {
+        if (!level.hasChunkAt(pos)) return false;
+        BlockState state = level.getBlockState(pos);
+        return !state.getCollisionShape(level, pos).isEmpty();
     }
 
     /** Probe contact coverage; route selection remains the sole authority over attachment faces. */

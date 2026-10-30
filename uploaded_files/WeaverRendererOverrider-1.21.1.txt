@@ -72,10 +72,7 @@ public class WeaverRendererOverrider {
                 public void setupAnim(WoodweaverEntity entity, float limbSwing, float limbSwingAmount, float ageInTicks, float netHeadYaw, float headPitch) {
                     boolean actionActive = entity.animationState1.isStarted() || entity.animationState2.isStarted() || entity.animationState3.isStarted() || entity.animationState4.isStarted() || entity.animationState5.isStarted() || entity.animationState7.isStarted() || entity.animationState8.isStarted() || entity.animationState9.isStarted() || entity.animationState10.isStarted() || entity.animationState11.isStarted() || entity.animationState12.isStarted() || entity.animationState13.isStarted() || entity.animationState14.isStarted() || entity.animationState15.isStarted() || entity.animationState16.isStarted() || entity.animationState17.isStarted() || entity.animationState21.isStarted();
                     boolean useIK = CustomWoodweaverRenderer.USE_PROCEDURAL_IK && !entity.isDeadOrDying() && WeaverGait.canUseGroundIK(entity);
-                    // Locomotion must not add another head/body pose during authored actions or fight procedural IK.
-                    if (!actionActive && !useIK && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionWalkProcedure.execute(entity)) {
-                        this.animateWalk(WoodweaverAnimation.Walk, limbSwing, limbSwingAmount, 1.3f, 1f);
-                    }
+                    // Completely ignore keyframe walking animation to let procedural IK naturally move like a real spider:
                     
                     safeAnimate(entity.animationState1, WoodweaverAnimation.Hypnotize, ageInTicks);
                     safeAnimate(entity.animationState2, WoodweaverAnimation.Attack_left, ageInTicks);
@@ -95,10 +92,10 @@ public class WeaverRendererOverrider {
                     safeAnimate(entity.animationState16, WoodweaverAnimation.Hypnotize_3, ageInTicks);
                     safeAnimate(entity.animationState17, WoodweaverAnimation.Hypnotize_reverse_4, ageInTicks);
 
-                    if (!actionActive && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionRotateLeftProcedure.execute(entity)) {
+                    if (!actionActive && !useIK && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionRotateLeftProcedure.execute(entity)) {
                         safeAnimate(entity.animationState18, WoodweaverAnimation.Rotate_left, ageInTicks);
                     }
-                    if (!actionActive && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionRotateRightProcedure.execute(entity)) {
+                    if (!actionActive && !useIK && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionRotateRightProcedure.execute(entity)) {
                         safeAnimate(entity.animationState19, WoodweaverAnimation.Rotate_right, ageInTicks);
                     }
                     if (!actionActive && !useIK && net.mcreator.thebackwoods.procedures.WoodweaverPlaybackConditionRetreatProcedure.execute(entity)) {

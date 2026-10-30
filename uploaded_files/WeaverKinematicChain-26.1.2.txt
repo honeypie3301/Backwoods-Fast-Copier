@@ -9,6 +9,7 @@ import org.joml.Matrix3f;
 import org.joml.Quaternionf;
 import org.joml.Vector3f;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.BlockHitResult;
 import net.mcreator.thebackwoods.entity.WoodweaverEntity;
 import java.util.ArrayList;
 import java.util.List;

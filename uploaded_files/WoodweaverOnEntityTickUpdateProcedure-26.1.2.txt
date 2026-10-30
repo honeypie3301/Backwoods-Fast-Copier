@@ -86,6 +86,20 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	@SubscribeEvent
 	public static void onNavigationTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {
 		if (!(event.getEntity() instanceof WoodweaverEntity mob) || mob.level().isClientSide()) return;
+		if (persistentBoolean(mob.getPersistentData(), "is_dying", false)) {
+			NAVIGATION_TURNS.remove(mob);
+			float dYaw = persistentFloat(mob.getPersistentData(), "death_locked_yaw", mob.getYRot());
+			float dPitch = persistentFloat(mob.getPersistentData(), "death_locked_pitch", mob.getXRot());
+			mob.setYRot(dYaw);
+			mob.yRotO = dYaw;
+			mob.setYBodyRot(dYaw);
+			mob.yBodyRotO = dYaw;
+			mob.setYHeadRot(dYaw);
+			mob.yHeadRotO = dYaw;
+			mob.setXRot(dPitch);
+			mob.xRotO = dPitch;
+			return;
+		}
 		NavigationTurnState state = NAVIGATION_TURNS.get(mob);
 		if (state == null) return;
 		if (state.requestedTick != mob.tickCount || !mob.isAlive()) {
@@ -117,12 +131,26 @@ public class WoodweaverOnEntityTickUpdateProcedure {
     public static void onCombatLook(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {
         if (!(event.getEntity() instanceof WoodweaverEntity mob) || mob.level().isClientSide()) return;
         CompoundTag data = mob.getPersistentData();
+        if (persistentBoolean(data, "is_dying", false)) {
+            COMBAT_LOOK.remove(mob);
+            float dYaw = persistentFloat(data, "death_locked_yaw", mob.getYRot());
+            float dPitch = persistentFloat(data, "death_locked_pitch", mob.getXRot());
+            mob.setYRot(dYaw);
+            mob.yRotO = dYaw;
+            mob.setYBodyRot(dYaw);
+            mob.yBodyRotO = dYaw;
+            mob.setYHeadRot(dYaw);
+            mob.yHeadRotO = dYaw;
+            mob.setXRot(dPitch);
+            mob.xRotO = dPitch;
+            return;
+        }
         boolean hypno = persistentInt(data, "hypno_phase", 0) > 0;
         boolean flash = persistentInt(data, "weapon_flash_phase", 0) > 0;
         boolean active = hypno || flash || persistentBoolean(data, "is_attacking", false)
             || persistentBoolean(data, "is_preparing_leap", false) || persistentBoolean(data, "is_leaping", false)
             || persistentBoolean(data, "is_landing_anim", false) || persistentBoolean(data, "is_dashing", false);
-        if (!mob.isAlive() || persistentBoolean(data, "is_dying", false)) { COMBAT_LOOK.remove(mob); return; }
+        if (!mob.isAlive()) { COMBAT_LOOK.remove(mob); return; }
         LivingEntity target = mob.getTarget();
         int targetId = hypno ? persistentInt(data, "hypno_target_id", 0)
             : flash ? persistentInt(data, "weapon_flash_saved_target", 0) : 0;
@@ -250,6 +278,8 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	public static final int DASH_COOLDOWN_TICKS = 420; // 21 seconds cooldown (increased by 75%)
 	public static final double DASH_MIN_DISTANCE = 12.0; // Min distance to initiate dash
 	public static final double DASH_MAX_DISTANCE = 64.0; // Max distance to initiate dash
+	public static final int DASH_DESTROY_WIDTH = 5; // Configurable dash destroy width in blocks (default 5)
+	public static final int DASH_DESTROY_HEIGHT = 5; // Configurable dash destroy height in blocks (default 5)
 	public static final double TARGET_FOLLOW_RANGE = 128.0; // Target following and detection range expanded to 128 blocks
 
 	// Configurable amplified trajectory height boost for Woodweaver jumps
@@ -340,6 +370,8 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			mData.putBoolean("is_dying", true);
 			mData.putInt("death_ticks", 0);
 			mData.putDouble("death_start_y", mob.getY());
+			mData.putFloat("death_locked_yaw", mob.getYRot());
+			mData.putFloat("death_locked_pitch", mob.getXRot());
 			mob.setHealth(1.0F); // lock health during sequence
 			mob.setInvulnerable(true);
 			mob.setNoAi(true);
@@ -349,6 +381,21 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		}
 
 		if (isDying) {
+			float lockYaw = persistentFloat(mData, "death_locked_yaw", mob.getYRot());
+			float lockPitch = persistentFloat(mData, "death_locked_pitch", mob.getXRot());
+			mob.setYRot(lockYaw);
+			mob.yRotO = lockYaw;
+			mob.setYBodyRot(lockYaw);
+			mob.yBodyRotO = lockYaw;
+			mob.setYHeadRot(lockYaw);
+			mob.yHeadRotO = lockYaw;
+			mob.setXRot(lockPitch);
+			mob.xRotO = lockPitch;
+			double rad = Math.toRadians(lockYaw);
+			double lookX = mob.getX() - Math.sin(rad) * 10.0;
+			double lookZ = mob.getZ() + Math.cos(rad) * 10.0;
+			mob.getLookControl().setLookAt(lookX, mob.getEyeY(), lookZ, 100.0F, 100.0F);
+
 			if (persistentInt(mData, "death_ticks", 0) == 0) releaseTrappedProjectiles(mob);
 			stopMobMotion(mob);
 			mob.getNavigation().stop();
@@ -2435,7 +2482,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 									boolean inScratch = false;
 
 									// Core passability (guarantees Weaver's 11x11x6 model passes through the center)
-									if (Math.abs(s) <= 1.2 && (by - footY) >= 0 && (by - footY) <= 4) {
+									if (Math.abs(s) <= 1.4 && (by - footY) >= 0 && (by - footY) <= 5) {
 										inScratch = true;
 									}
 
@@ -2887,11 +2934,16 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			}
 
 			boolean hasDirectLOS = (target != null && mob.getSensing().hasLineOfSight(target));
-			BlockPos physicalObstruction = findPhysicalObstruction(world, mob, target, mob.distanceTo(target));
-			if (physicalObstruction == null && !hasDirectLOS) {
-				physicalObstruction = findFrontalObstruction(world, mob, target);
+			BlockPos physicalObstruction = null;
+			if (!hasDirectLOS) {
+				physicalObstruction = findPhysicalObstruction(world, mob, target, mob.distanceTo(target));
 			}
-			boolean isPhysicallyBlocked = (physicalObstruction != null && !hasDirectLOS);
+			// Always check frontal and overhead obstructions in immediate reach regardless of line of sight
+			BlockPos frontalObstruction = findFrontalObstruction(world, mob, target);
+			if (frontalObstruction != null) {
+				physicalObstruction = frontalObstruction;
+			}
+			boolean isPhysicallyBlocked = (physicalObstruction != null);
 
 			// Track position progression to detect if Weaver is stuck trying to reach target
 			double prevX = persistentDouble(mData, "weaver_prev_x", mob.getX());
@@ -5683,28 +5735,62 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		boolean isTargetBelow = target != null && target.getY() < mob.getY() - 1.5;
 
 		BlockPos.MutableBlockPos mpos = new BlockPos.MutableBlockPos();
-		// Scan 0.5 to 2.5 blocks directly in front of Weaver
-		for (double dist = 0.5; dist <= 2.5; dist += 0.5) {
+		double[] lateralOffsets = {0.0, -0.6, 0.6, -1.2, 1.2, -1.8, 1.8, -2.4, 2.4};
+
+		CompoundTag data = mob.getPersistentData();
+		int stuckTicks = persistentInt(data, "weaver_stuck_ticks", 0);
+
+		// Scan from directly adjacent (0.2) to 2.5 blocks in front of Weaver
+		for (double dist = 0.2; dist <= 2.5; dist += 0.4) {
 			Vec3 center = mobPos.add(look.x * dist, 0, look.z * dist);
 			int startY = isTargetBelow ? mobFootY - 1 : mobFootY;
-			int endY = mobFootY + 5; // Scan up to mobFootY + 5 for 5x5-6x6 clearance
+			int endY = mobFootY + 5; // Full 6-block height clearance (0 through 5)
 
-			boolean isUpperSolid = isSolidBlock(world, mpos.set(center.x, mobFootY + 1, center.z))
-					|| isSolidBlock(world, mpos.set(center.x, mobFootY + 2, center.z))
-					|| isSolidBlock(world, mpos.set(center.x, mobFootY + 3, center.z))
+			boolean isFootStep = !isSolidBlock(world, mpos.set(center.x, mobFootY + 2, center.z))
+					&& !isSolidBlock(world, mpos.set(center.x, mobFootY + 3, center.z))
+					&& !isSolidBlock(world, mpos.set(center.x, mobFootY + 4, center.z))
+					&& !isSolidBlock(world, mpos.set(center.x, mobFootY + 5, center.z));
+
+			// If upper vertical space is completely open (natural hill, slope, or stairs), never mine the ground step
+			if (isFootStep) {
+				continue;
+			}
+
+			boolean isLowerOpen = !isSolidBlock(world, mpos.set(center.x, mobFootY + 1, center.z));
+
+			// Check for overhead obstruction: low doorway lintel, ceiling, or overhang where lower space is open air
+			boolean hasOverheadObstruction = isLowerOpen && (
+					isSolidBlock(world, mpos.set(center.x, mobFootY + 3, center.z))
 					|| isSolidBlock(world, mpos.set(center.x, mobFootY + 4, center.z))
-					|| isSolidBlock(world, mpos.set(center.x, mobFootY + 5, center.z));
+					|| isSolidBlock(world, mpos.set(center.x, mobFootY + 5, center.z))
+			);
 
-			for (int y = startY; y <= endY; y++) {
-				if (!isUpperSolid && y == mobFootY && !isTargetBelow) {
-					continue; // Open hill step! Let Weaver step up naturally without mining.
+			if (hasOverheadObstruction) {
+				// Overhead obstacle (doorway lintel, low ceiling): prioritize clearing overhead blocks from top down
+				for (int y = endY; y >= mobFootY + 2; y--) {
+					for (double wOffset : lateralOffsets) {
+						Vec3 checkPt = center.add(perp.scale(wOffset));
+						mpos.set(checkPt.x, y, checkPt.z);
+						if (canMine(world, mpos, mob, target)) {
+							return mpos.immutable();
+						}
+					}
 				}
+			}
 
-				for (double wOffset = -2.5; wOffset <= 2.5; wOffset += 0.5) {
-					Vec3 checkPt = center.add(perp.scale(wOffset));
-					mpos.set(checkPt.x, y, checkPt.z);
-					if (canMine(world, mpos, mob, target)) {
-						return mpos.immutable();
+			// Check for sheer vertical wall when physically stuck (mobFootY+1, +2, +3 solid, not an open slope)
+			boolean isSheerWall = !isLowerOpen
+					&& isSolidBlock(world, mpos.set(center.x, mobFootY + 2, center.z))
+					&& isSolidBlock(world, mpos.set(center.x, mobFootY + 3, center.z));
+
+			if (isSheerWall && stuckTicks >= 15) {
+				for (int y = endY; y >= startY; y--) {
+					for (double wOffset : lateralOffsets) {
+						Vec3 checkPt = center.add(perp.scale(wOffset));
+						mpos.set(checkPt.x, y, checkPt.z);
+						if (canMine(world, mpos, mob, target)) {
+							return mpos.immutable();
+						}
 					}
 				}
 			}
@@ -6173,17 +6259,18 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		double perpX = -dirZ;
 		double perpZ = dirX;
 
-		double footY = Math.floor(mob.getY());
-		double topY = Math.ceil(mob.getY() + 4.5);
+		int footY = (int) Math.floor(mob.getY());
+		int topY = footY + Math.max(1, DASH_DESTROY_HEIGHT - 1);
+		double halfW = Math.max(0.5, (DASH_DESTROY_WIDTH - 1) * 0.5);
 
 		BlockPos.MutableBlockPos mpos = new BlockPos.MutableBlockPos();
 
 		for (double fwd = 0.6; fwd <= 3.2; fwd += 0.8) {
-			for (double side = -1.6; side <= 1.6; side += 0.8) {
+			for (double side = -halfW; side <= halfW + 0.05; side += 0.8) {
 				double checkX = mob.getX() + dirX * fwd + perpX * side;
 				double checkZ = mob.getZ() + dirZ * fwd + perpZ * side;
 
-				for (int y = (int) footY; y <= (int) topY; y++) {
+				for (int y = footY; y <= topY; y++) {
 					mpos.set((int) Math.floor(checkX), y, (int) Math.floor(checkZ));
 					BlockState state = world.getBlockState(mpos);
 					if (!state.isAir() && !state.getCollisionShape(world, mpos).isEmpty()) {
