@@ -20,13 +20,16 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.damagesource.DamageType;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.sounds.SoundSource;
-import net.minecraft.resources.Identifier;
 import net.minecraft.core.Holder;
 import net.minecraft.network.syncher.EntityDataAccessor;
 import net.minecraft.util.RandomSource;
@@ -4878,7 +4881,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			// Melee attack animation state synchronization (Strict Mutual Exclusivity)
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingLeft, isAttacking && attackType == 1);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingRight, isAttacking && attackType == 2);
-			setEntityDataIfPresent(woodweaver, "DATA_isAttackingboth", isAttacking && attackType == 3);
+			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingBoth, isAttacking && attackType == 3);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingLeft, isAttacking && attackType == 4);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingRight, isAttacking && attackType == 5);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isSweepingLeft, isAttacking && attackType == 6);
@@ -5356,15 +5359,9 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			try {
 				ResourceKey<DamageType> key = ResourceKey.create(
 					Registries.DAMAGE_TYPE,
-					ResourceLocation.fromNamespaceAndPath("the_backwoods", damageTypeName)
+					Identifier.parse("the_backwoods:" + damageTypeName)
 				);
-				var reg = sl.registryAccess().registry(Registries.DAMAGE_TYPE);
-				if (reg.isPresent()) {
-					var holder = reg.get().getHolder(key);
-					if (holder.isPresent()) {
-						return new DamageSource(holder.get(), mob);
-					}
-				}
+				return new DamageSource(sl.holderOrThrow(key), mob);
 			} catch (Throwable ignored) {
 			}
 		}

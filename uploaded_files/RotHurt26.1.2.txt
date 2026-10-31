@@ -37,7 +37,7 @@ import java.util.Comparator;
 
 @EventBusSubscriber
 public class RotEntityIsHurtProcedure {
-	public static boolean ENABLE_ROT_DIALOGUES = false;
+	public static final boolean ENABLE_ROT_DIALOGUES = false;
 
 	private static final String[] DIALOGUES_STAGE_1 = {
 		"I have felt deeper cuts than this.",
@@ -106,18 +106,71 @@ public class RotEntityIsHurtProcedure {
 				|| incomingAmount >= 500.0F
 			);
 
-			if (isPlayerAttack) {
-				entity.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
-			} else if (RotOnEntityTickUpdateProcedure.SENTINEL_MODE && RotOnEntityTickUpdateProcedure.ENABLE_SHOOTING_STAR_ADAPTATION && damagesource != null && (isRailgun || entity.getPersistentData().getBooleanOr("sentinel_railgun_hit_absorbed", false) || entity.getPersistentData().getBooleanOr("rot_phase_active", false))) {
+			boolean isGodWand = isGodWandDamage(damagesource, incomingAmount);
+
+			if (RotOnEntityTickUpdateProcedure.SENTINEL_MODE && damagesource != null && isGodWand) {
+				double gwHits = entity.getPersistentData().getDoubleOr("sentinel_godwand_hits", 0.0) + 1.0;
+				entity.getPersistentData().putDouble("sentinel_godwand_hits", gwHits);
+				entity.getPersistentData().putBoolean("sentinel_adapted_godwand", true);
+
+				if (RotOnEntityTickUpdateProcedure.ENABLE_PHASE_SHIFT) {
 					if (event instanceof LivingDamageEvent.Pre _preEv) {
 						_preEv.setNewDamage(0.0F);
 					} else if (event instanceof LivingIncomingDamageEvent _incEv) {
 						_incEv.setAmount(0.0F);
 					}
 					entity.getPersistentData().putBoolean("rot_phase_active", true);
-					entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
-					entity.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+					entity.getPersistentData().putDouble("rot_phase_timer", 80.0);
+					entity.getPersistentData().putDouble("rot_phase_total_ticks", 80.0);
 					entity.getPersistentData().putBoolean("unlocked_phase_shift", true);
+					if (entity instanceof LivingEntity _living) {
+						_living.setHealth(_living.getMaxHealth());
+						_living.deathTime = 0;
+						_living.hurtTime = 0;
+						_living.invulnerableTime = 40;
+						_living.setInvulnerable(true);
+						_living.setInvisible(true);
+						try {
+							_living.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, false);
+						} catch (Exception ignored) {}
+					}
+					if (world instanceof ServerLevel _sLevel) {
+						_sLevel.sendParticles(ParticleTypes.PORTAL, entity.getX(), entity.getY() + 1.0, entity.getZ(), 20, 0.4, 0.6, 0.4, 0.1);
+						_sLevel.sendParticles(ParticleTypes.REVERSE_PORTAL, entity.getX(), entity.getY() + 1.0, entity.getZ(), 15, 0.3, 0.5, 0.3, 0.05);
+					}
+					return;
+				} else {
+					float dampening = (float) Math.max(0.02, 0.20 / (1.0 + gwHits * 0.4));
+					float finalDmg = Math.min(15.0F, incomingAmount * dampening);
+					if (event instanceof LivingDamageEvent.Pre _preEv) {
+						_preEv.setNewDamage(finalDmg);
+					} else if (event instanceof LivingIncomingDamageEvent _incEv) {
+						_incEv.setAmount(finalDmg);
+					}
+					if (world instanceof ServerLevel _sLevel) {
+						_sLevel.sendParticles(ParticleTypes.ENCHANT, entity.getX(), entity.getY() + 1.0, entity.getZ(), 12, 0.3, 0.5, 0.3, 0.2);
+						_sLevel.sendParticles(ParticleTypes.CRIT, entity.getX(), entity.getY() + 1.0, entity.getZ(), 6, 0.2, 0.4, 0.2, 0.05);
+					}
+				}
+			}
+
+			if (isPlayerAttack) {
+				entity.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
+				try {
+					net.mcreator.thebackwoods.RotDataGuardian.authorizeDamageGrace(entity, 40);
+				} catch (Throwable ignored) {}
+			} else if (RotOnEntityTickUpdateProcedure.SENTINEL_MODE && RotOnEntityTickUpdateProcedure.ENABLE_SHOOTING_STAR_ADAPTATION && damagesource != null && (isRailgun || entity.getPersistentData().getBooleanOr("sentinel_railgun_hit_absorbed", false) || (RotOnEntityTickUpdateProcedure.ENABLE_PHASE_SHIFT && entity.getPersistentData().getBooleanOr("rot_phase_active", false)))) {
+					if (event instanceof LivingDamageEvent.Pre _preEv) {
+						_preEv.setNewDamage(0.0F);
+					} else if (event instanceof LivingIncomingDamageEvent _incEv) {
+						_incEv.setAmount(0.0F);
+					}
+					if (RotOnEntityTickUpdateProcedure.ENABLE_PHASE_SHIFT) {
+						entity.getPersistentData().putBoolean("rot_phase_active", true);
+						entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
+						entity.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+						entity.getPersistentData().putBoolean("unlocked_phase_shift", true);
+					}
 					entity.getPersistentData().putBoolean("sentinel_railgun_hit_absorbed", true);
 					entity.getPersistentData().putDouble("sentinel_railgun_heat_ticks", 60.0);
 					if (entity instanceof LivingEntity _living) {
@@ -335,6 +388,9 @@ public class RotEntityIsHurtProcedure {
 							entity.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, true);
 						} catch (Exception e) {}
 						entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
+						try {
+							net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity);
+						} catch (Throwable ignored) {}
 						entity.getPersistentData().putDouble("rot_death_ticks", 240.0);
 						entity.getPersistentData().putDouble("rot_death_start_x", entity.getX());
 						entity.getPersistentData().putDouble("rot_death_start_y", entity.getY());
@@ -410,8 +466,40 @@ public class RotEntityIsHurtProcedure {
 		}
 	}
 
+	private static boolean isGodWandDamage(DamageSource source, float amount) {
+		if (source == null) return false;
+		String msgId = source.getMsgId().toLowerCase(java.util.Locale.ROOT);
+		if (msgId.contains("godwand") || msgId.contains("arcane_orb") || msgId.contains("stone_cannon")
+			|| msgId.contains("atomic") || msgId.contains("supernova") || msgId.contains("ratio_collapse")
+			|| msgId.contains("spatial") || msgId.contains("singularity") || msgId.contains("earth_drill")
+			|| msgId.contains("drill_wind")) {
+			return true;
+		}
+		Entity direct = source.getDirectEntity();
+		if (direct != null) {
+			String directClass = direct.getClass().getName().toLowerCase(java.util.Locale.ROOT);
+			String typeKey = BuiltInRegistries.ENTITY_TYPE.getKey(direct.getType()).toString().toLowerCase(java.util.Locale.ROOT);
+			if (typeKey.contains("godwand") || typeKey.contains("arcane_orb") || typeKey.contains("stone_cannon")
+				|| directClass.contains("godwand") || directClass.contains("arcaneorb") || directClass.contains("stonecannon")) {
+				return true;
+			}
+		}
+		Entity attacker = source.getEntity();
+		if (attacker instanceof LivingEntity living) {
+			ItemStack main = living.getMainHandItem();
+			ItemStack off = living.getOffhandItem();
+			String mainId = BuiltInRegistries.ITEM.getKey(main.getItem()).toString().toLowerCase(java.util.Locale.ROOT);
+			String offId = BuiltInRegistries.ITEM.getKey(off.getItem()).toString().toLowerCase(java.util.Locale.ROOT);
+			if (mainId.contains("god_wand") || mainId.contains("godwand") || offId.contains("god_wand") || offId.contains("godwand")) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private static String classifyDamage(DamageSource source) {
 		if (source == null) return "NONE";
+		if (isGodWandDamage(source, 0.0F)) return "MAGIC";
 		if (isCBCProjectileOrDamage(source)) return "ARTILLERY";
 
 		Entity direct = source.getDirectEntity();

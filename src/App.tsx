@@ -260,6 +260,11 @@ export default function App() {
     } catch {
       // ignore
     }
+    fetch('/api/files/mark-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).catch(() => {});
     addToast('Marked All as Read', 'All files and updated indicators have been cleared.', 'info');
   }, [files, addToast]);
 
@@ -336,6 +341,11 @@ export default function App() {
   const handleMarkAsRead = useCallback((filename: string) => {
     markAsRead(filename);
     clearUpdatedIndicator(filename);
+    fetch('/api/files/mark-read', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    }).catch(() => {});
     addToast('Marked as Read', `Cleared updated indicator for ${filename}`, 'info');
   }, [markAsRead, clearUpdatedIndicator, addToast]);
 
@@ -449,6 +459,11 @@ export default function App() {
       if (ok) {
         markAsRead(filename);
         clearUpdatedIndicator(filename);
+        fetch('/api/files/mark-read', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename }),
+        }).catch(() => {});
         return true;
       }
       addToast('Copy Failed', 'Unable to access clipboard.', 'error');

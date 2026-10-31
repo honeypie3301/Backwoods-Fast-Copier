@@ -101,6 +101,44 @@ function broadcastFilesChanged() {
   }
 }
 
+// In-memory set of files updated at runtime via fs.watch or POST /api/files
+const runtimeEditedFiles = new Set<string>();
+
+function getUpdatedFiles(): Set<string> {
+  const updated = new Set<string>(runtimeEditedFiles);
+
+  // 1. Uncommitted working-tree modifications against HEAD
+  try {
+    const diffOut = execSync('git diff --name-only HEAD uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
+    diffOut.split('\n').forEach((p) => {
+      const cleaned = p.replace(/^uploaded_files\//, '').trim();
+      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
+    });
+  } catch {}
+
+  // 2. Staged modifications
+  try {
+    const cachedOut = execSync('git diff --cached --name-only uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
+    cachedOut.split('\n').forEach((p) => {
+      const cleaned = p.replace(/^uploaded_files\//, '').trim();
+      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
+    });
+  } catch {}
+
+  // 3. Files updated in the latest commit touching uploaded_files
+  try {
+    const gitOut = execSync('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', { cwd: __dirname, encoding: 'utf8' })
+      .toString()
+      .split('\n');
+    gitOut.slice(1).forEach((p) => {
+      const cleaned = p.replace(/^uploaded_files\//, '').trim();
+      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
+    });
+  } catch {}
+
+  return updated;
+}
+
 // Debounced filesystem watcher on uploaded_files
 let watchDebounceTimer: NodeJS.Timeout | null = null;
 try {
@@ -108,6 +146,9 @@ try {
     // Ignore dotfiles, temp files, or lock files
     if (filename && (filename.startsWith('.') || filename.endsWith('~') || filename.endsWith('.tmp'))) {
       return;
+    }
+    if (filename) {
+      runtimeEditedFiles.add(path.basename(filename));
     }
     if (watchDebounceTimer) {
       clearTimeout(watchDebounceTimer);
@@ -167,20 +208,7 @@ app.get('/api/files', (req, res) => {
       fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     }
 
-    // Determine files updated in the latest commit to reliably flag updated files
-    let recentCommitFiles = new Set<string>();
-    try {
-      const gitOut = execSync('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', { cwd: __dirname })
-        .toString()
-        .split('\n');
-      gitOut.slice(1).forEach((p) => {
-        const cleaned = p.replace('uploaded_files/', '').trim();
-        if (cleaned) recentCommitFiles.add(cleaned);
-      });
-    } catch {
-      // Fallback if git is unavailable
-    }
-
+    const updatedFiles = getUpdatedFiles();
     const files = fs.readdirSync(UPLOAD_DIR);
     const result = files
       .filter(f => !f.startsWith('.'))
@@ -192,7 +220,7 @@ app.get('/api/files', (req, res) => {
         const contentSample = stats.isFile() ? readFirstBytes(filePath, 4096) : '';
         const { version, source } = detectVersion(filename, contentSample);
         const ext = path.extname(filename).toLowerCase().replace('.', '') || 'file';
-        const isRecentlyCommitted = recentCommitFiles.has(filename);
+        const isEdited = updatedFiles.has(filename);
 
         return {
           name: filename,
@@ -203,7 +231,7 @@ app.get('/api/files', (req, res) => {
           versionSource: source,
           extension: ext,
           isText: true,
-          isEdited: isRecentlyCommitted
+          isEdited
         };
       })
       .sort((a, b) => {
@@ -307,6 +335,7 @@ app.post('/api/files', (req, res) => {
 
     const fileContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
     fs.writeFileSync(filePath, fileContent, 'utf-8');
+    runtimeEditedFiles.add(safeName);
 
     const stats = fs.statSync(filePath);
     const { version, source } = detectVersion(safeName, fileContent);
@@ -328,6 +357,17 @@ app.post('/api/files', (req, res) => {
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+// POST /api/files/mark-read - clear edited status on server
+app.post('/api/files/mark-read', (req, res) => {
+  const { filename } = req.body || {};
+  if (filename) {
+    runtimeEditedFiles.delete(path.basename(filename));
+  } else {
+    runtimeEditedFiles.clear();
+  }
+  res.json({ success: true });
 });
 
 // DELETE /api/files/:filename - delete file

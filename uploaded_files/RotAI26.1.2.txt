@@ -75,21 +75,39 @@ import com.mojang.serialization.Codec;
 
 @EventBusSubscriber
 public class RotOnEntityTickUpdateProcedure {
-	public static boolean ROT_DEATH_EXPLOSION_ENABLED = true;
-	public static boolean ROT_DEATH_EXPLOSION_GRIEFING = true;
-	public static float ROT_DEATH_EXPLOSION_DAMAGE = 1500.0F;
-	public static double ROT_DEATH_CRATER_RADIUS = 48.0;
-	public static double ROT_DEATH_BLAST_RADIUS = 56.0;
+	public static boolean LEARN_MOBILE_SONIC_SCREAM = true;
+	public static int MOBILE_SCREAM_PRACTICE_TICKS = 200;
+	public static int SONIC_SCREAM_EFFECT_INTERVAL_TICKS = 4;
+	public static boolean ADAPT_VILTRUMITE_COOLDOWNS = true;
+	public static double VILTRUMITE_STAGE_ONE_COOLDOWN_SECONDS = 10;
+	public static double VILTRUMITE_STAGE_TWO_COOLDOWN_SECONDS = 6;
+	public static double VILTRUMITE_STAGE_THREE_COOLDOWN_SECONDS = 3;
+
+	public static boolean RELENTLESS_RECOVERY = true;
+	public static int RELENTLESS_MELEE_COOLDOWN = 12;
+	public static boolean SMART_DESPAWN_ENABLED = true;
+	public static int SMART_DESPAWN_IDLE_MIN_TICKS = 20 * 60;
+	public static int SMART_DESPAWN_IDLE_MAX_TICKS = 20 * 120;
+	public static int SMART_DESPAWN_CHECK_INTERVAL_TICKS = 40;
+	public static int SMART_DESPAWN_SCAN_TICKS = 40;
+	public static double SMART_DESPAWN_THREAT_RADIUS = 128.0;
+
+	public static final boolean ROT_DEATH_EXPLOSION_ENABLED = true;
+	public static final boolean ROT_DEATH_EXPLOSION_GRIEFING = true;
+	public static final float ROT_DEATH_EXPLOSION_DAMAGE = 1500.0F;
+	public static final double ROT_DEATH_CRATER_RADIUS = 48.0;
+	public static final double ROT_DEATH_BLAST_RADIUS = 56.0;
 
 	public static boolean dealTrueDamageToBosses(net.minecraft.world.entity.Entity target, net.minecraft.world.damagesource.DamageSource ds, float amount) {
 		if (target == null || !target.isAlive()) return false;
+		amount = RotViltrumiteAdaptation.attackDamage(ds != null ? ds.getEntity() : null, target, amount);
 		if (target instanceof net.minecraft.world.entity.player.Player player) {
 			if (player.isCreative() || player.isSpectator() || player.getAbilities().invulnerable) return false;
 			float hpBefore = player.getHealth();
 			player.hurt(ds, amount);
 			float hpAfter = player.getHealth();
 			float actualDealt = Math.max(0.0F, hpBefore - hpAfter);
-			if (actualDealt <= 0.0F && amount > 0.0F && !player.isInvulnerable()) {
+			if (actualDealt <= 0.0F && amount > 0.0F && !player.isInvulnerable() && !RotViltrumiteAdaptation.isViltrumite(player)) {
 				actualDealt = Math.min(amount, hpBefore);
 			}
 			if (ds != null && ds.getEntity() instanceof Entity attacker) {
@@ -156,23 +174,23 @@ public class RotOnEntityTickUpdateProcedure {
 		} catch (Exception ignored) {}
 	}
 
-	public static double TELEGRAPH_JITTER_MAX_TICKS = 3.0;
-	public static double CONTEXT_SCORE_WEIGHT_NN = 25.0;
-	public static double EARNED_UNLOCK_SKILL_SCALING = 1.5;
-	public static double DYNAMIC_RANGE_OFFSET_VARIANCE = 1.5;
+	public static final double TELEGRAPH_JITTER_MAX_TICKS = 3.0;
+	public static final double CONTEXT_SCORE_WEIGHT_NN = 25.0;
+	public static final double EARNED_UNLOCK_SKILL_SCALING = 1.5;
+	public static final double DYNAMIC_RANGE_OFFSET_VARIANCE = 1.5;
 	// Set these before starting a world. Both true reproduce the original Rot.
-	public static boolean MINOS_MODE = true;
-	public static boolean SENTINEL_MODE = true;
-	public static boolean ENABLE_EXTRACTION_GRAPPLE = false;
-	public static boolean ENABLE_TELEKINESIS = false;
-	public static boolean ENABLE_BLOCKING = true;
-	public static boolean ENABLE_CONTROLLED_ADAPTATION = true;
-	public static boolean ENABLE_PHASE_SHIFT = true;
-	public static boolean PHASE_SHIFT_COMBAT = false;
-	public static boolean ENABLE_ASYNC_PATHFINDING = false;
-	public static boolean ENABLE_CHAT_LOGGING = false;
-	public static boolean ENABLE_SHOOTING_STAR_ADAPTATION = true;
-	public static final java.util.List<String> WHITELISTED_FRIENDS = new java.util.ArrayList<>(java.util.Arrays.asList("AEDADA"));
+	public static final boolean MINOS_MODE = true;
+	public static final boolean SENTINEL_MODE = true;
+	public static final boolean ENABLE_EXTRACTION_GRAPPLE = false;
+	public static final boolean ENABLE_TELEKINESIS = false;
+	public static final boolean ENABLE_BLOCKING = true;
+	public static final boolean ENABLE_CONTROLLED_ADAPTATION = true;
+	public static final boolean ENABLE_PHASE_SHIFT = true;
+	public static final boolean PHASE_SHIFT_COMBAT = false;
+	public static final boolean ENABLE_ASYNC_PATHFINDING = false;
+	public static final boolean ENABLE_CHAT_LOGGING = false;
+	public static final boolean ENABLE_SHOOTING_STAR_ADAPTATION = true;
+	public static final java.util.List<String> WHITELISTED_FRIENDS = java.util.List.of("AEDADA");
 
 	public static boolean isWhitelistedFriend(String name) {
 		if (name == null || name.isEmpty()) return false;
@@ -246,31 +264,31 @@ public class RotOnEntityTickUpdateProcedure {
 		entity.needsSync = true;
 	}
 
-	public static double PARTICLE_QUALITY = 1.0;
-	public static double COOLDOWN_MULTIPLIER = 1.5;
+	public static final double PARTICLE_QUALITY = 1.0;
+	public static final double COOLDOWN_MULTIPLIER = 1.5;
 	private static final double TARGET_RANGE = 128.0;
 
-	public static double ROT_PLAYER_BACK_OFF_DISTANCE = 1.35;
-	public static double ROT_PILLAR_BACK_OFF_DISTANCE = 15.0;
-	public static double ROT_PILLAR_INITIAL_ATTACK_DELAY = 40.0;
-	public static double ROT_PILLAR_ATTACK_CHANCE = 0.005;
-	public static double ROT_PILLAR_CIRCLING_SPEED = 0.8;
-	public static double ROT_PILLAR_CIRCLING_CHANCE = 0.15;
+	public static final double ROT_PLAYER_BACK_OFF_DISTANCE = 1.35;
+	public static final double ROT_PILLAR_BACK_OFF_DISTANCE = 15.0;
+	public static final double ROT_PILLAR_INITIAL_ATTACK_DELAY = 40.0;
+	public static final double ROT_PILLAR_ATTACK_CHANCE = 0.005;
+	public static final double ROT_PILLAR_CIRCLING_SPEED = 0.8;
+	public static final double ROT_PILLAR_CIRCLING_CHANCE = 0.15;
 
-	public static double SONIC_SCREAM_COOLDOWN = 1800.0;
+	public static final double SONIC_SCREAM_COOLDOWN = 1800.0;
 
-	public static double SUPERHEAT_EVAPORATION_COOLDOWN = 700.0;
-	public static double SUPERHEAT_EVAPORATION_RADIUS = 45.0;
-	public static double SUPERHEAT_EVAPORATION_DAMAGE = 26.0;
-	public static double SUPERHEAT_EVAPORATION_WAVE_TICKS = 90.0;
+	public static final double SUPERHEAT_EVAPORATION_COOLDOWN = 700.0;
+	public static final double SUPERHEAT_EVAPORATION_RADIUS = 45.0;
+	public static final double SUPERHEAT_EVAPORATION_DAMAGE = 26.0;
+	public static final double SUPERHEAT_EVAPORATION_WAVE_TICKS = 90.0;
 
-	public static double SONIC_BOOM_RANGE = 24.0;
-	public static double SONIC_BOOM_MIN_DIST = 2.5;
-	public static double SONIC_BOOM_COOLDOWN = 324.0;
-	public static double SONIC_BOOM_TORSO_Y_FACTOR = 1;
-	public static double WARDEN_LEARN_REQUIRED_TICKS = 405.0;
-	public static double SONIC_BOOM_ANIMATION_TICKS = 90.0;
-	public static double SONIC_BOOM_TRIGGER_TICK = 36.0;
+	public static final double SONIC_BOOM_RANGE = 24.0;
+	public static final double SONIC_BOOM_MIN_DIST = 2.5;
+	public static final double SONIC_BOOM_COOLDOWN = 324.0;
+	public static final double SONIC_BOOM_TORSO_Y_FACTOR = 1;
+	public static final double WARDEN_LEARN_REQUIRED_TICKS = 405.0;
+	public static final double SONIC_BOOM_ANIMATION_TICKS = 90.0;
+	public static final double SONIC_BOOM_TRIGGER_TICK = 36.0;
 
 	private static final double LASER_Y_OFFSET = 0.25;
 	private static final double LASER_CLOSING_TICKS = 80.0;
@@ -295,138 +313,138 @@ public class RotOnEntityTickUpdateProcedure {
 
 	private static final double DIE_KICK_SPEED = 10.0;
 
-	public static int TP_DODGE_CD = 40;
-	public static int TP_FLANK_CD = 100;
-	public static int SOLAR_CD = 360;
-	public static int ADAPT_CD = 320;
-	public static int GRAPPLE_CD = 220;
-	public static int TK_CD = 220;
+	public static final int TP_DODGE_CD = 40;
+	public static final int TP_FLANK_CD = 100;
+	public static final int SOLAR_CD = 360;
+	public static final int ADAPT_CD = 320;
+	public static final int GRAPPLE_CD = 220;
+	public static final int TK_CD = 220;
 
-	public static double MELEE_ATTACK_CD = 20.0;
-	public static double COMBO_GLOBAL_CD = 50.0;
-	public static double COMBO_GLOBAL_CD_TOTEM = 20.0;
-	public static int TELEPORT_DODGE_COOLDOWN = 18;
-	public static int TELEPORT_FLANK_COOLDOWN = 30;
-	public static int SOLAR_BEAM_COOLDOWN = 360;
-	public static int CRYO_BEAM_COOLDOWN = 360;
-	public static int MUTANT_GRAPPLE_COOLDOWN = 220;
-	public static int TELEKINESIS_COOLDOWN = 220;
+	public static final double MELEE_ATTACK_CD = 20.0;
+	public static final double COMBO_GLOBAL_CD = 50.0;
+	public static final double COMBO_GLOBAL_CD_TOTEM = 20.0;
+	public static final int TELEPORT_DODGE_COOLDOWN = 18;
+	public static final int TELEPORT_FLANK_COOLDOWN = 30;
+	public static final int SOLAR_BEAM_COOLDOWN = 360;
+	public static final int CRYO_BEAM_COOLDOWN = 360;
+	public static final int MUTANT_GRAPPLE_COOLDOWN = 220;
+	public static final int TELEKINESIS_COOLDOWN = 220;
 
-	public static double COMBO_TRIPLE_THREAT_CD = 1000.0;
-	public static double COMBO_TRIPLE_THREAT_CD_TOTEM = 800.0;
-	public static double COMBO_HIGH_SKY_SLAM_CD = 1000.0;
-	public static double COMBO_HIGH_SKY_SLAM_CD_TOTEM = 800.0;
-	public static double COMBO_PUNCH_DROPKICK_CD = 1000.0;
-	public static double COMBO_PUNCH_DROPKICK_CD_TOTEM = 800.0;
-	public static double COMBO_PUNCH_RIDER_KICK_CD = 1000.0;
-	public static double COMBO_PUNCH_RIDER_KICK_CD_TOTEM = 800.0;
-	public static double COMBO_HEAVENLY_REPENTANCE_PLUS_CD = 1000.0;
-	public static double COMBO_HEAVENLY_REPENTANCE_PLUS_CD_TOTEM = 800.0;
+	public static final double COMBO_TRIPLE_THREAT_CD = 1000.0;
+	public static final double COMBO_TRIPLE_THREAT_CD_TOTEM = 800.0;
+	public static final double COMBO_HIGH_SKY_SLAM_CD = 1000.0;
+	public static final double COMBO_HIGH_SKY_SLAM_CD_TOTEM = 800.0;
+	public static final double COMBO_PUNCH_DROPKICK_CD = 1000.0;
+	public static final double COMBO_PUNCH_DROPKICK_CD_TOTEM = 800.0;
+	public static final double COMBO_PUNCH_RIDER_KICK_CD = 1000.0;
+	public static final double COMBO_PUNCH_RIDER_KICK_CD_TOTEM = 800.0;
+	public static final double COMBO_HEAVENLY_REPENTANCE_PLUS_CD = 1000.0;
+	public static final double COMBO_HEAVENLY_REPENTANCE_PLUS_CD_TOTEM = 800.0;
 
-	public static double DIVE_COUNTER_MIN_HEIGHT = 4.0;
-	public static double DIVE_COUNTER_TRIGGER_RANGE = 12.0;
-	public static double DIVE_COUNTER_COOLDOWN = 240.0;
+	public static final double DIVE_COUNTER_MIN_HEIGHT = 4.0;
+	public static final double DIVE_COUNTER_TRIGGER_RANGE = 12.0;
+	public static final double DIVE_COUNTER_COOLDOWN = 240.0;
 
-	public static double OMNI_SONIC_BOOM_CD = 600.0;
-	public static double OMNI_SONIC_BOOM_ANIMATION_TICKS = 270.0;
-	public static double OMNI_SONIC_BOOM_TRIGGER_TICK = 140.0;
-	public static double OMNI_SONIC_BOOM_RANGE = 24.0;
-	public static boolean OMNI_SONIC_BOOM_SHOW_PARTICLES = true;
+	public static final double OMNI_SONIC_BOOM_CD = 600.0;
+	public static final double OMNI_SONIC_BOOM_ANIMATION_TICKS = 270.0;
+	public static final double OMNI_SONIC_BOOM_TRIGGER_TICK = 140.0;
+	public static final double OMNI_SONIC_BOOM_RANGE = 24.0;
+	public static final boolean OMNI_SONIC_BOOM_SHOW_PARTICLES = true;
 
-	public static double ADAPTATION_REGEN_BASE_HEAL = 1.0;
-	public static double ADAPTATION_REGEN_MAX_HEALTH_RATIO = 0.0075;
-	public static double ADAPTATION_REGEN_COMBAT_MULTIPLIER = 2.0;
-	public static double ADAPTATION_REGEN_HEALTH_LOW_BURST = 3.5;
-	public static double ADAPTATION_REGEN_HEALTH_MID_BURST = 2.0;
+	public static final double ADAPTATION_REGEN_BASE_HEAL = 1.0;
+	public static final double ADAPTATION_REGEN_MAX_HEALTH_RATIO = 0.0075;
+	public static final double ADAPTATION_REGEN_COMBAT_MULTIPLIER = 2.0;
+	public static final double ADAPTATION_REGEN_HEALTH_LOW_BURST = 3.5;
+	public static final double ADAPTATION_REGEN_HEALTH_MID_BURST = 2.0;
 
-	public static double ADAPTATION_RESISTANCE_DECAY = 0.95;
-	public static double ADAPTATION_RESISTANCE_HIGH_THRESHOLD = 70.0;
-	public static double ADAPTATION_RESISTANCE_MID_THRESHOLD = 40.0;
-	public static double ADAPTATION_RESISTANCE_LOW_THRESHOLD = 16.0;
+	public static final double ADAPTATION_RESISTANCE_DECAY = 0.95;
+	public static final double ADAPTATION_RESISTANCE_HIGH_THRESHOLD = 70.0;
+	public static final double ADAPTATION_RESISTANCE_MID_THRESHOLD = 40.0;
+	public static final double ADAPTATION_RESISTANCE_LOW_THRESHOLD = 16.0;
 
-	public static double ADAPTATION_SPEED_MIN_MULTIPLIER = -0.45;
-	public static double ADAPTATION_SPEED_MAX_MULTIPLIER = 0.10;
-	public static double ADAPTATION_SPEED_MAX_FALLBACK = 0.25;
-	public static double ADAPTATION_SPEED_SCALING_TELEPORT = 1000.0;
-	public static double ADAPTATION_SPEED_SCALING_FALLBACK = 600.0;
+	public static final double ADAPTATION_SPEED_MIN_MULTIPLIER = -0.45;
+	public static final double ADAPTATION_SPEED_MAX_MULTIPLIER = 0.10;
+	public static final double ADAPTATION_SPEED_MAX_FALLBACK = 0.25;
+	public static final double ADAPTATION_SPEED_SCALING_TELEPORT = 1000.0;
+	public static final double ADAPTATION_SPEED_SCALING_FALLBACK = 600.0;
 
-	public static double ROT_WALK_SPEED = 1.0;
-	public static double ROT_RUN_SPEED = 1.45;
+	public static final double ROT_WALK_SPEED = 1.0;
+	public static final double ROT_RUN_SPEED = 1.45;
 
-	public static double MELEE_PUNCH_DAMAGE = 18.0;
-	public static double SONIC_BOOM_DMG = 38.0;
-	public static double SONIC_BOOM_DMG_TOTEM = 65.0;
-	public static double SONIC_BOOM_SPLASH_DAMAGE = 10.0;
-	public static double SONIC_BOOM_SPLASH_TOTEM_DMG = 22.0;
-	public static double SOLAR_BEAM_DMG_BASE = 8.0;
-	public static double SOLAR_BEAM_DMG_BOOST = 18.0;
-	public static double CRYO_BEAM_DMG_BASE = 8.0;
-	public static double CRYO_BEAM_DMG_BOOST = 18.0;
-	public static double MUTANT_DNA_GRAPPLE_DMG = 4.0;
+	public static final double MELEE_PUNCH_DAMAGE = 18.0;
+	public static final double SONIC_BOOM_DMG = 38.0;
+	public static final double SONIC_BOOM_DMG_TOTEM = 65.0;
+	public static final double SONIC_BOOM_SPLASH_DAMAGE = 10.0;
+	public static final double SONIC_BOOM_SPLASH_TOTEM_DMG = 22.0;
+	public static final double SOLAR_BEAM_DMG_BASE = 8.0;
+	public static final double SOLAR_BEAM_DMG_BOOST = 18.0;
+	public static final double CRYO_BEAM_DMG_BASE = 8.0;
+	public static final double CRYO_BEAM_DMG_BOOST = 18.0;
+	public static final double MUTANT_DNA_GRAPPLE_DMG = 4.0;
 
-	public static double COMBO_SEISMIC_SLAM_DMG = 35.0;
-	public static double COMBO_OVERHEAD_SLAM_DMG = 40.0;
+	public static final double COMBO_SEISMIC_SLAM_DMG = 35.0;
+	public static final double COMBO_OVERHEAD_SLAM_DMG = 40.0;
 
-	public static double OVERHEAD_TOTAL_TICKS = 56.0;
-	public static double OVERHEAD_PREP_THRESHOLD = 31.0;
-	public static double OVERHEAD_STRIKE_TICK = 30.0;
-	public static double OVERHEAD_Y_OFFSET_1 = 0.72;
-	public static double OVERHEAD_Y_OFFSET_2 = 0.84;
-	public static double OVERHEAD_STRIKE_FALL_VELOCITY = -10.0;
-	public static double OVERHEAD_POST_STRIKE_FALL_VELOCITY = -3.2;
+	public static final double OVERHEAD_TOTAL_TICKS = 56.0;
+	public static final double OVERHEAD_PREP_THRESHOLD = 31.0;
+	public static final double OVERHEAD_STRIKE_TICK = 30.0;
+	public static final double OVERHEAD_Y_OFFSET_1 = 0.72;
+	public static final double OVERHEAD_Y_OFFSET_2 = 0.84;
+	public static final double OVERHEAD_STRIKE_FALL_VELOCITY = -10.0;
+	public static final double OVERHEAD_POST_STRIKE_FALL_VELOCITY = -3.2;
 
-	public static double HEAVY_PUNCH_TOTAL_TICKS = 61.0;
-	public static double HEAVY_PUNCH_STRIKE_TICK = 35.0;
+	public static final double HEAVY_PUNCH_TOTAL_TICKS = 61.0;
+	public static final double HEAVY_PUNCH_STRIKE_TICK = 35.0;
 
-	public static double UPPERCUT_TOTAL_TICKS = 80.0;
-	public static double UPPERCUT_LAUNCH_TICK = 49.0;
-	public static double UPPERCUT_DAMAGE = 30.0;
+	public static final double UPPERCUT_TOTAL_TICKS = 80.0;
+	public static final double UPPERCUT_LAUNCH_TICK = 49.0;
+	public static final double UPPERCUT_DAMAGE = 30.0;
 
-	public static double JUDGMENT_KICK_IMPACT_DIST = 0.7;
-	public static double DIE_KICK_IMPACT_DIST = 0.6;
-	public static double DIE_KICK_GROUND_OFFSET = 0.6;
+	public static final double JUDGMENT_KICK_IMPACT_DIST = 0.7;
+	public static final double DIE_KICK_IMPACT_DIST = 0.6;
+	public static final double DIE_KICK_GROUND_OFFSET = 0.6;
 
-	public static double COMBO_JUDGMENT_KICK_DMG = 50.0;
-	public static double COMBO_DIE_RIDER_KICK_DMG = 65.0;
-	public static double COMBO_GRAPPLE_SIPHON_DMG = 12.0;
-	public static double COMBO_TK_SLAM_DMG = 15.0;
-	public static double COMBO_NANITE_BLITZ_DMG = 8.0;
-	public static double COMBO_THERMAL_SHOCK_DMG = 25.0;
+	public static final double COMBO_JUDGMENT_KICK_DMG = 50.0;
+	public static final double COMBO_DIE_RIDER_KICK_DMG = 65.0;
+	public static final double COMBO_GRAPPLE_SIPHON_DMG = 12.0;
+	public static final double COMBO_TK_SLAM_DMG = 15.0;
+	public static final double COMBO_NANITE_BLITZ_DMG = 8.0;
+	public static final double COMBO_THERMAL_SHOCK_DMG = 25.0;
 
-	public static double BETA_VARIANCE_GATE_THRESHOLD = 0.08;
-	public static double NN_LEARNING_RATE = 0.12;
-	public static int NN_HIDDEN_NEURONS = 8;
+	public static final double BETA_VARIANCE_GATE_THRESHOLD = 0.08;
+	public static final double NN_LEARNING_RATE = 0.12;
+	public static final int NN_HIDDEN_NEURONS = 8;
 
-	public static double PERSONALITY_DRIFT_RATE = 0.02;
+	public static final double PERSONALITY_DRIFT_RATE = 0.02;
 
-	public static double SURPRISE_Z_SCORE_THRESHOLD = 2.5;
-	public static double ANOMALY_MIN_SAMPLES = 5.0;
+	public static final double SURPRISE_Z_SCORE_THRESHOLD = 2.5;
+	public static final double ANOMALY_MIN_SAMPLES = 5.0;
 
-	public static int ROLE_AUCTION_DURATION_TICKS = 60;
-	public static double ROLE_AUCTION_RANGE = 32.0;
+	public static final int ROLE_AUCTION_DURATION_TICKS = 60;
+	public static final double ROLE_AUCTION_RANGE = 32.0;
 
-	public static boolean ENABLE_ARMOR_RIP = true;
-	public static double ARMOR_RIP_COOLDOWN = 600.0;
-	public static double ARMOR_RIP_TICKS = 120.0;
-	public static double ARMOR_RIP_TRIGGER_DISTANCE = 1.5;
-	public static double ARMOR_RIP_MAX_DISTANCE = 16.0;
-	public static double ARMOR_RIP_HOLD_DISTANCE = 0.8;
-	public static double ARMOR_RIP_RIGHT_OFFSET = 0.55;
-	public static double ARMOR_RIP_HEIGHT_OFFSET = 0.50;
-	public static double ARMOR_RIP_CHANCE_REGULAR = 0.001;
-	public static double ARMOR_RIP_CHANCE_INDESTRUCTIBLE = 0.02;
-	public static double TOTEM_STEAL_TIME_MIN = 150.0;
-	public static double TOTEM_STEAL_TIME_MAX = 1000.0;
-	public static double BLOCK_MIN_TICKS = 20.0;
-	public static double BLOCK_MAX_TICKS = 45.0;
-	public static int CHOKE_MIN_HITS = 5;
-	public static int CHOKE_MAX_HITS = 20;
-	public static int CHOKE_TOTEM_MIN_HITS = 15;
-	public static int CHOKE_TOTEM_MAX_HITS = 30;
-	public static double CHOKE_DAMAGE = 2.0;
-	public static int CHOKE_DAMAGE_INTERVAL = 15;
-	public static int CHOKE_ARMOR_DURABILITY_LOSS = 100;
-	public static int CHOKE_INDESTRUCTIBLE_DROP_INTERVAL = 30;
+	public static final boolean ENABLE_ARMOR_RIP = true;
+	public static final double ARMOR_RIP_COOLDOWN = 600.0;
+	public static final double ARMOR_RIP_TICKS = 120.0;
+	public static final double ARMOR_RIP_TRIGGER_DISTANCE = 1.5;
+	public static final double ARMOR_RIP_MAX_DISTANCE = 16.0;
+	public static final double ARMOR_RIP_HOLD_DISTANCE = 0.8;
+	public static final double ARMOR_RIP_RIGHT_OFFSET = 0.55;
+	public static final double ARMOR_RIP_HEIGHT_OFFSET = 0.50;
+	public static final double ARMOR_RIP_CHANCE_REGULAR = 0.001;
+	public static final double ARMOR_RIP_CHANCE_INDESTRUCTIBLE = 0.02;
+	public static final double TOTEM_STEAL_TIME_MIN = 150.0;
+	public static final double TOTEM_STEAL_TIME_MAX = 1000.0;
+	public static final double BLOCK_MIN_TICKS = 20.0;
+	public static final double BLOCK_MAX_TICKS = 45.0;
+	public static final int CHOKE_MIN_HITS = 5;
+	public static final int CHOKE_MAX_HITS = 20;
+	public static final int CHOKE_TOTEM_MIN_HITS = 15;
+	public static final int CHOKE_TOTEM_MAX_HITS = 30;
+	public static final double CHOKE_DAMAGE = 2.0;
+	public static final int CHOKE_DAMAGE_INTERVAL = 15;
+	public static final int CHOKE_ARMOR_DURABILITY_LOSS = 100;
+	public static final int CHOKE_INDESTRUCTIBLE_DROP_INTERVAL = 30;
 
 	private static final String K_WOODBOUND = "the_backwoods:woodbound_entities";
 
@@ -768,12 +786,19 @@ private static float lerpAngle(float pct, float start, float end) {
 	}
 
 	private static void executeInternal(@Nullable Event event, LevelAccessor world, double x, double y, double z, Entity entity) {
+		try {
+			net.mcreator.thebackwoods.RotDataGuardian.enforceEntitySecurityTick(entity);
+		} catch (Throwable ignored) {}
 		boolean isDying = false;
 		try {
-			isDying = entity.getEntityData().get(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath);
-		} catch (Exception e) {}
-		if (!isDying) {
-			isDying = getB(entity, "rot_death_sequence_active");
+			isDying = net.mcreator.thebackwoods.RotDataGuardian.isBossDeathSequenceActive(entity);
+		} catch (Throwable ignored) {
+			try {
+				isDying = entity.getEntityData().get(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath);
+			} catch (Exception e) {}
+			if (!isDying) {
+				isDying = getB(entity, "rot_death_sequence_active");
+			}
 		}
 		boolean isRailgunAbsorbing = SENTINEL_MODE && ENABLE_SHOOTING_STAR_ADAPTATION && getB(entity, "sentinel_railgun_hit_absorbed");
 		if (isRailgunAbsorbing && entity instanceof LivingEntity living) {
@@ -838,6 +863,9 @@ private static float lerpAngle(float pct, float start, float end) {
 				entity.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, true);
 			} catch (Exception e) {}
 			putB(entity, "rot_death_sequence_active", true);
+			try {
+				net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity);
+			} catch (Throwable ignored) {}
 			putD(entity, "rot_death_ticks", 240.0);
 			putD(entity, "rot_death_start_x", entity.getX());
 			putD(entity, "rot_death_start_y", entity.getY());
@@ -1073,6 +1101,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				if (!entity.level().isClientSide()) {
 					putB(entity, "rot_death_sequence_finished", true);
 					try {
+						net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceFinished(entity);
 						net.mcreator.thebackwoods.RotDataGuardian.unregisterProtectedDeathEntity(entity);
 					} catch (Throwable ignored) {}
 					entity.discard();
@@ -1292,6 +1321,8 @@ private static float lerpAngle(float pct, float start, float end) {
 				}
 			}
 		}
+
+		if (handleSmartDeparture(world, entity)) return;
 
 		if (handleScanningState(entity)) {
 			return;
@@ -1531,6 +1562,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			double originZ = getD(entity, "sentinel_shockwave_z");
 			double radius = shockwaveStage * 2.2;
 			boolean isVertical = getB(entity, "sentinel_shockwave_vertical");
+			net.mcreator.thebackwoods.BackwoodsImpactDebris.ring(entity, new Vec3(originX, originY, originZ), radius, 12.0 * getAdaptationMultiplier(entity), isVertical, entity.getPersistentData().contains("sentinel_shockwave_yaw") ? getD(entity, "sentinel_shockwave_yaw") : entity.getYRot(), false);
 
 			if (world instanceof ServerLevel level) {
 				int particleCount = Math.max(1, (int) (2 * Math.PI * radius * 7.5 * Mth.clamp(PARTICLE_QUALITY, 0.1, 1.0)));
@@ -1682,6 +1714,9 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		Entity combatTarget = acquireTarget(world, entity, x, y, z);
+		if (isMobileScreamActive(entity)) {
+			executeSentinelSonicScream(world, entity, combatTarget, (int)getD(entity, "sentinel_sonic_scream_ticks"));
+		}
 		if (combatTarget == null || !combatTarget.isAlive() || combatTarget.isRemoved()) {
 			cleanupCombatFlags(entity);
 		} else {
@@ -1906,7 +1941,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		double sonicScreamTicksFirstCheck = getD(entity, "sentinel_sonic_scream_ticks");
-		if (sonicScreamTicksFirstCheck > 0) {
+		if (sonicScreamTicksFirstCheck > 0 && !canUseMobileScream(entity)) {
 			executeSentinelSonicScream(world, entity, combatTarget, (int) sonicScreamTicksFirstCheck);
 			if (combatTarget != null) {
 				lockLookAtTarget(entity, combatTarget);
@@ -1995,7 +2030,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				}
 			}
 
-			if (omniSonicTicks == getTelegraphJitter(entity, "omni_sonic", OMNI_SONIC_BOOM_TRIGGER_TICK, -5.0, 5.0)) {
+			if (omniSonicTicks == OMNI_SONIC_BOOM_TRIGGER_TICK) {
 				if (world instanceof ServerLevel level) {
 					boolean totemActive = getB(entity, "sentinel_totem_active");
 					boolean unlockedExplosion = getB(entity, "unlocked_explosion_boom");
@@ -2084,7 +2119,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (combatTarget != null) {
 				lockLookAtTarget(entity, combatTarget);
 			}
-			double triggerTick = getTelegraphJitter(entity, "sonic_boom", SONIC_BOOM_TRIGGER_TICK, -4.0, 4.0);
+			double triggerTick = SONIC_BOOM_TRIGGER_TICK;
 			boolean alreadyTriggered = getB(entity, "sentinel_sonic_triggered");
 			if (!alreadyTriggered && sonicTicksFirstCheck <= triggerTick) {
 				if (combatTarget != null) {
@@ -2510,21 +2545,23 @@ private static float lerpAngle(float pct, float start, float end) {
 			} else if (minosStage == 2) {
 				double heavyLeft = getD(entity, "sentinel_heavy_left_punch_ticks");
 				double heavyRight = getD(entity, "sentinel_heavy_right_punch_ticks");
+				double recoveryRemaining = Math.max(heavyLeft, heavyRight);
+				if (RELENTLESS_RECOVERY && combatTarget != null && recoveryRemaining > 0
+						&& recoveryRemaining < HEAVY_PUNCH_STRIKE_TICK - 8.0
+						&& getI(entity, "rot_recovery_queue_target_id") != combatTarget.getId()) {
+					putI(entity, "rot_recovery_queue_target_id", combatTarget.getId());
+					putD(entity, "rot_recovery_queue_start", recoveryRemaining);
+					putD(entity, "rot_recovery_queue_wait", planMinosRecoveryWait(world, entity, combatTarget,
+							isTargetCornered(world, combatTarget, entity)));
+				}
 
 				if (heavyLeft == 0 && heavyRight == 0) {
 					boolean isCornered = (combatTarget != null) && isTargetCornered(world, combatTarget, entity);
-					double baseWait = isCornered ? 12.0 : 32.0;
-
-					double targetVel = (combatTarget != null) ? combatTarget.getDeltaMovement().horizontalDistance() : 0.0;
-					double speedDiscount = Math.min(12.0, targetVel * 20.0);
-					double missCount = getD(entity, "sentinel_heavy_punch_misses");
-					double missDiscount = Math.min(15.0, missCount * 5.0);
-
-					baseWait = Math.max(4.0, baseWait - speedDiscount - missDiscount);
-
-					double adaptation = getAdaptationMultiplier(entity);
-					double adaptedWait = baseWait / Math.max(0.8, adaptation);
-					double waitTicks = Math.max(4.0, getTelegraphJitter(entity, "minos_wait", adaptedWait, -10.0, 10.0));
+					double waitTicks = planMinosRecoveryWait(world, entity, combatTarget, isCornered);
+					if (RELENTLESS_RECOVERY && combatTarget != null
+							&& getI(entity, "rot_recovery_queue_target_id") == combatTarget.getId())
+						waitTicks = Math.max(0, getD(entity, "rot_recovery_queue_wait") - getD(entity, "rot_recovery_queue_start"));
+					clearDoubles(entity, "rot_recovery_queue_target_id", "rot_recovery_queue_start", "rot_recovery_queue_wait");
 
 					if (isCornered && combatTarget != null && world instanceof ServerLevel level) {
 						level.sendParticles(ParticleTypes.ANGRY_VILLAGER, combatTarget.getX(), combatTarget.getY() + 1.2, combatTarget.getZ(), 6, 0.3, 0.3, 0.3, 0.1);
@@ -3240,10 +3277,11 @@ private static float lerpAngle(float pct, float start, float end) {
 		double globalCd = getD(entity, "sentinel_global_ability_cooldown");
 		double coreCd = getDynamicGlobalCooldown(entity);
 
-		if (globalCd <= 0) {
+		if (globalCd <= 0 && !hasActiveMinosAction(entity)) {
 			if (combatTarget instanceof LivingEntity livTarget) {
 				boolean unlockedScream = getB(entity, "unlocked_sonic_scream");
 				double screamCd = getD(entity, "sentinel_sonic_scream_cooldown");
+				if (getD(entity, "sentinel_sonic_scream_ticks") > 0) screamCd = Math.max(1, screamCd);
 
 				boolean isPlayerTarget = livTarget instanceof Player;
 				boolean isSurvivalPlayer = false;
@@ -3470,9 +3508,9 @@ private static float lerpAngle(float pct, float start, float end) {
 			lockLookAtTarget(entity, combatTarget);
 			if (meleeWindup == 1) {
 				executeSentinelPunch(world, entity, combatTarget);
-				putD(entity, "sentinel_melee_cooldown", 20);
+				putD(entity, "sentinel_melee_cooldown", RELENTLESS_RECOVERY ? Math.max(4, RELENTLESS_MELEE_COOLDOWN) : 20);
 			}
-		} else if (SENTINEL_MODE && !getB(entity, "sentinel_waiting_intercept") && getD(entity, "ai_fake_pressure_ticks") <= 0 && meleeCooldown <= 0 && dist <= ((combatTarget instanceof Player) ? 2.5 : 3.2)) {
+		} else if (SENTINEL_MODE && !getB(entity, "sentinel_waiting_intercept") && getD(entity, "ai_fake_pressure_ticks") <= 0 && meleeCooldown <= 0 && !hasActiveMinosAction(entity) && dist <= ((combatTarget instanceof Player) ? 2.5 : 3.2)) {
 			putD(entity, "sentinel_melee_windup", 8);
 			playHostileSound(world, entity, "entity.player.attack.weak", 0.9F, 0.85F);
 			spawnParticles(world, ParticleTypes.CRIT, entity.getX(), entity.getY() + 1.2, entity.getZ(), 5, 0.4, 0.4, 0.4, 0.1);
@@ -4196,11 +4234,19 @@ private static float lerpAngle(float pct, float start, float end) {
 	private static void executeSentinelSonicScream(LevelAccessor world, Entity entity, Entity target, int ticksLeft) {
 		if (!(world instanceof ServerLevel level) || !(entity instanceof LivingEntity living)) return;
 
-		if (entity instanceof Mob mob) {
-			mob.getNavigation().stop();
+		long now = level.getGameTime();
+		if (LEARN_MOBILE_SONIC_SCREAM && !canUseMobileScream(entity) && ticksLeft > 20 && ticksLeft <= 200
+				&& (!entity.getPersistentData().contains("rot_scream_practice_last_tick")
+						|| getD(entity, "rot_scream_practice_last_tick") != now)) {
+			putD(entity, "rot_scream_practice_last_tick", now);
+			double practice = getD(entity, "rot_scream_practice_ticks") + 1;
+			putD(entity, "rot_scream_practice_ticks", practice);
+			if (practice >= Math.max(1, MOBILE_SCREAM_PRACTICE_TICKS)) putB(entity, "rot_mobile_scream_learned", true);
 		}
-		if (entity.getDeltaMovement().y() > 0) {
-			entity.setDeltaMovement(entity.getDeltaMovement().x(), 0.0, entity.getDeltaMovement().z());
+		if (!canUseMobileScream(entity)) {
+			if (entity instanceof Mob mob) mob.getNavigation().stop();
+			if (entity.getDeltaMovement().y() > 0)
+				entity.setDeltaMovement(entity.getDeltaMovement().x(), 0.0, entity.getDeltaMovement().z());
 		}
 
 		if (target != null && target.isAlive()) {
@@ -4211,7 +4257,10 @@ private static float lerpAngle(float pct, float start, float end) {
 			playHostileSound(level, entity, "the_backwoods:sonic_scream", 4.0F, 1.0F);
 		}
 
-		if (ticksLeft > 20 && ticksLeft <= 200) {
+		if (ticksLeft > 20 && ticksLeft <= 200
+				&& (!entity.getPersistentData().contains("rot_scream_effect_next_tick")
+						|| now >= getD(entity, "rot_scream_effect_next_tick"))) {
+			putD(entity, "rot_scream_effect_next_tick", now + Mth.clamp(SONIC_SCREAM_EFFECT_INTERVAL_TICKS, 1, 20));
 			List<LivingEntity> targets = level.getEntitiesOfClass(LivingEntity.class, entity.getBoundingBox().inflate(24.0), e -> e != entity && !isWoodboundEntity(e, entity) && !(e instanceof Player p && (p.isCreative() || p.isSpectator())));
 			for (LivingEntity victim : targets) {
 				applyEffectSafe(victim, new MobEffectInstance(MobEffects.BLINDNESS, 140, 0, false, false));
@@ -4255,7 +4304,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (ticksLeft <= 1) {
 			putD(entity, "sentinel_sonic_scream_ticks", 0);
 			putD(entity, "sentinel_sonic_scream_cooldown", SONIC_SCREAM_COOLDOWN);
-			putD(entity, "sentinel_global_ability_cooldown", getDynamicGlobalCooldown(entity));
+			if (!canUseMobileScream(entity)) putD(entity, "sentinel_global_ability_cooldown", getDynamicGlobalCooldown(entity));
 		}
 	}
 
@@ -4403,6 +4452,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	}
 
 	private static void executeCombatMove(LevelAccessor world, Entity self, Entity target) {
+		if (hasActiveMinosAction(self) || isRotChannelingAbility(self) || isChannelingAbility(self)) return;
 		if ((!MINOS_MODE && !SENTINEL_MODE) || target == null || !target.isAlive()) return;
 		if (!(world instanceof ServerLevel level)) return;
 		LivingEntity ls = (self instanceof LivingEntity) ? (LivingEntity) self : null;
@@ -6671,7 +6721,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			return 0.1;
 		}
 
-		if (getD(entity, "sentinel_sonic_scream_ticks") > 0) {
+		if (getD(entity, "sentinel_sonic_scream_ticks") > 0 && !canUseMobileScream(entity)) {
 			return ROT_RUN_SPEED * 0.25;
 		}
 
@@ -6818,10 +6868,88 @@ private static float lerpAngle(float pct, float start, float end) {
 		"rot_phase_ticks", "rot_superheat_cd", "rot_superheat_charging", "rot_superheat_active"
 	};
 
+
+	private static boolean canUseMobileScream(Entity entity) {
+		return LEARN_MOBILE_SONIC_SCREAM && getB(entity, "rot_mobile_scream_learned");
+	}
+	private static boolean isMobileScreamActive(Entity entity) {
+		return canUseMobileScream(entity) && getD(entity, "sentinel_sonic_scream_ticks") > 0;
+	}
+	private static boolean hasActiveMinosAction(Entity entity) {
+		return isDoingCombo(entity) || hasActiveMinosBodyMotion(entity);
+	}
+	private static boolean hasActiveMinosBodyMotion(Entity entity) {
+		return getD(entity, "sentinel_slam_phase") > 0
+				|| getD(entity, "rot_overhead_ticks") > 0 || getD(entity, "sentinel_die_kick_phase") > 0
+				|| getD(entity, "sentinel_landing_ticks") > 0 || getD(entity, "sentinel_uppercut_anim_ticks") > 0
+				|| getB(entity, "is_uppercutting") || getD(entity, "sentinel_heavy_left_punch_ticks") > 0
+				|| getD(entity, "sentinel_heavy_right_punch_ticks") > 0;
+	}
+	private static final Set<String> VILTRUMITE_ADAPTIVE_COOLDOWNS = Set.of(
+			"sentinel_dodge_cd", "sentinel_flank_cd", "sentinel_solar_cd", "sentinel_grapple_cd", "sentinel_tk_cd",
+			"sentinel_global_ability_cooldown", "sentinel_uppercut_cd", "sentinel_cc1_cd", "sentinel_cc2_cd",
+			"sentinel_cc3_cd", "sentinel_cc4_cd", "sentinel_cc5_cd", "sentinel_warden_sonic_cooldown",
+			"sentinel_omni_sonic_cooldown", "sentinel_sonic_scream_cooldown", "sentinel_dropkick_cooldown",
+			"sentinel_dive_counter_cd", "rot_armor_rip_cooldown", "rot_block_cooldown");
+	private static int adaptiveCooldownStage(Entity entity) {
+		if (!ADAPT_VILTRUMITE_COOLDOWNS || !(entity instanceof Mob mob)) return 0;
+		LivingEntity target = mob.getTarget();
+		if (target == null || !target.isAlive() || target.level() != entity.level()
+				|| !RotViltrumiteAdaptation.isViltrumite(target)) return 0;
+		String identity = target.getStringUUID();
+		if (!identity.equals(getS(entity, "rot_adaptive_cooldown_target"))) {
+			for (String key : VILTRUMITE_ADAPTIVE_COOLDOWNS) {
+				entity.getPersistentData().remove("rot_cd_due_" + key);
+				entity.getPersistentData().remove("rot_cd_seen_" + key);
+			}
+			putS(entity, "rot_adaptive_cooldown_target", identity);
+		}
+		return RotViltrumiteAdaptation.stage(entity);
+	}
+	private static void updateAdaptiveCooldown(Entity entity, String key, int stage, long now, boolean remember) {
+		String dueKey = "rot_cd_due_" + key, seenKey = "rot_cd_seen_" + key;
+		double value = getD(entity, key);
+		if (stage <= 0 || value <= 0) {
+			if (entity.getPersistentData().contains(dueKey)) {
+				entity.getPersistentData().remove(dueKey);
+				entity.getPersistentData().remove(seenKey);
+			}
+			return;
+		}
+		if (remember) { putD(entity, seenKey, value); return; }
+		double seconds = stage >= 3 ? VILTRUMITE_STAGE_THREE_COOLDOWN_SECONDS
+				: stage == 2 ? VILTRUMITE_STAGE_TWO_COOLDOWN_SECONDS : VILTRUMITE_STAGE_ONE_COOLDOWN_SECONDS;
+		seconds = Double.isFinite(seconds) ? Mth.clamp(seconds, 1.0, 60.0) : 3.0;
+		double due = getD(entity, dueKey);
+		if (!entity.getPersistentData().contains(dueKey) || value > getD(entity, seenKey) + 0.0001) due = now + seconds * 20;
+		else due = Math.min(due, now + seconds * 20);
+		if (getD(entity, dueKey) != due) putD(entity, dueKey, due);
+		if (now >= due) entity.getPersistentData().remove(key);
+	}
+
 	private static void tickCooldowns(Entity e) {
 		boolean totemAccelerated = getB(e, "sentinel_totem_active") && !getB(e, "sentinel_is_infinity_totem");
+		int stage = adaptiveCooldownStage(e);
+		int previousStage = getI(e, "rot_adaptive_cooldown_stage");
+		if (stage <= 0) {
+			if (previousStage > 0) {
+				for (String key : VILTRUMITE_ADAPTIVE_COOLDOWNS) {
+					e.getPersistentData().remove("rot_cd_due_" + key);
+					e.getPersistentData().remove("rot_cd_seen_" + key);
+				}
+				putI(e, "rot_adaptive_cooldown_stage", 0);
+			}
+			for (String key : ROT_COOLDOWN_KEYS)
+				if (e.getPersistentData().contains(key)) tickCooldown(e, key, 1, totemAccelerated);
+			return;
+		}
+		if (stage != previousStage) putI(e, "rot_adaptive_cooldown_stage", stage);
+		long now = e.level().getGameTime();
 		for (String key : ROT_COOLDOWN_KEYS) {
+			boolean adaptive = VILTRUMITE_ADAPTIVE_COOLDOWNS.contains(key);
+			if (adaptive) updateAdaptiveCooldown(e, key, stage, now, false);
 			if (e.getPersistentData().contains(key)) tickCooldown(e, key, 1, totemAccelerated);
+			if (adaptive) updateAdaptiveCooldown(e, key, stage, now, true);
 		}
 	}
 
@@ -7020,7 +7148,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		boolean isUppercutting = getB(entity, "is_uppercutting");
 		double superheatCharging = getD(entity, "rot_superheat_charging");
 		double superheatActive = getD(entity, "rot_superheat_active");
-		return solarCharge > 0 || solarFire > 0 || cryoCharge > 0 || cryoFire > 0 || grappleTicks > 0 || tkTicks > 0 || sonicTicks > 0 || closingTicks > 0 || skyWarp > 0 || judgment > 0 || riderHold > 0 || omniSonic > 0 || sonicScream > 0 || armorRipTicks > 0 || blockTicks > 0 || isUppercutting || superheatCharging > 0 || superheatActive > 0 || isDoingCombo(entity);
+		return solarCharge > 0 || solarFire > 0 || cryoCharge > 0 || cryoFire > 0 || grappleTicks > 0 || tkTicks > 0 || sonicTicks > 0 || closingTicks > 0 && !isMobileScreamActive(entity) || skyWarp > 0 || judgment > 0 || riderHold > 0 || omniSonic > 0 || sonicScream > 0 && !canUseMobileScream(entity) || armorRipTicks > 0 || blockTicks > 0 || isUppercutting || superheatCharging > 0 || superheatActive > 0 || isDoingCombo(entity);
 	}
 
 	private static void syncNBTFlags(Entity entity) {
@@ -7107,7 +7235,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		double witherSkullFire = getD(entity, "sentinel_wither_skull_fire_ticks");
 		boolean charging = solarCharge > 0 || cryoCharge > 0 || (sonicScreamTicks > 200.0) || (witherSkullFire > 9.0);
 		boolean firing = solarFire > 0 || cryoFire > 0 || (sonicScreamTicks > 20.0 && sonicScreamTicks <= 200.0) || (witherSkullFire > 0.0 && witherSkullFire <= 9.0);
-		boolean closing = (closingTicks > 0 && !firing && !charging) || (sonicScreamTicks > 0.0 && sonicScreamTicks <= 20.0);
+		boolean closing = (closingTicks > 0 || (sonicScreamTicks > 0.0 && sonicScreamTicks <= 20.0)) && !firing && !charging;
 		boolean sonic = sonicTicks > 0;
 		boolean landing = landingTicks > 0;
 		boolean isGroundCrushing = slamPhase == 3 || skyWarpTicks > 0 || (landingTicks > 0 && getB(entity, "sentinel_is_slam_landing"));
@@ -7460,6 +7588,7 @@ private static float lerpAngle(float pct, float start, float end) {
 							damageSource = liv.damageSources().generic();
 						}
 						dealTrueDamageToBosses(liv, damageSource, 25.0F * (float) getAdaptationMultiplier(entity));
+						RotViltrumiteAdaptation.slam(entity, liv, liv.position());
 						liv.teleportTo(liv.getX(), targetSunkY, liv.getZ());
 						setMotion(liv, liv.getDeltaMovement().x(), OVERHEAD_STRIKE_FALL_VELOCITY, liv.getDeltaMovement().z());
 						liv.hurtMarked = true;
@@ -7701,19 +7830,47 @@ private static float lerpAngle(float pct, float start, float end) {
 		return true;
 	}
 
+
+	private static double planMinosRecoveryWait(LevelAccessor world, Entity entity, Entity target, boolean cornered) {
+		double baseWait = cornered ? 12.0 : 32.0;
+		double speed = target == null ? 0.0 : target.getDeltaMovement().horizontalDistance();
+		double speedDiscount = Math.min(12.0, speed * 20.0);
+		double missDiscount = Math.min(15.0, getD(entity, "sentinel_heavy_punch_misses") * 5.0);
+		double adaptedWait = Math.max(4.0, baseWait - speedDiscount - missDiscount) / Math.max(0.8, getAdaptationMultiplier(entity));
+		return Math.max(4.0, getTelegraphJitter(entity, "minos_wait", adaptedWait, -10.0, 10.0));
+	}
+
+	private static boolean pursueDuringHeavyRecovery(LevelAccessor world, Entity entity, Entity target, double remaining) {
+		if (!RELENTLESS_RECOVERY || remaining <= 0 || remaining >= HEAVY_PUNCH_STRIKE_TICK - 8.0
+				|| !(world instanceof ServerLevel level) || !(entity instanceof Mob mob)
+				|| !(target instanceof LivingEntity) || !target.isAlive() || target.level() != level
+				|| !entity.onGround() || entity.isPassenger() || isCustomComboActive(entity)) return false;
+		if (entity.distanceTo(target) <= 3.0) return false;
+		long now = level.getGameTime();
+		if (getD(entity, "rot_recovery_path_next_tick") <= now) {
+			putD(entity, "rot_recovery_path_next_tick", now + 4);
+			InterceptionPrediction prediction = evaluateInterceptionPipeline(entity, target, inferTargetIntent(entity, target));
+			Vec3 goal = prediction.repositionTargetPos != null ? prediction.repositionTargetPos : prediction.predictedPos;
+			if (goal != null && Double.isFinite(goal.lengthSqr()) && goal.distanceToSqr(entity.position()) <= TARGET_RANGE * TARGET_RANGE
+					&& level.getChunkSource().getChunkNow(Mth.floor(goal.x) >> 4, Mth.floor(goal.z) >> 4) != null)
+				mob.getNavigation().moveTo(goal.x, entity.getY(), goal.z, ROT_RUN_SPEED);
+		}
+		return true;
+	}
+
 	private static void handleHeavyPunchState(LevelAccessor world, Entity entity, @Nullable Entity combatTarget) {
 		double heavyLeftTicks = getD(entity, "sentinel_heavy_left_punch_ticks");
 		double heavyRightTicks = getD(entity, "sentinel_heavy_right_punch_ticks");
 
 		if (combatTarget != null && (heavyLeftTicks > 0 || heavyRightTicks > 0)) {
 			snapLookAtTarget(entity, combatTarget);
-			if (entity instanceof Mob mob) {
-				mob.getNavigation().stop();
+			if (!pursueDuringHeavyRecovery(world, entity, combatTarget, Math.max(heavyLeftTicks, heavyRightTicks))) {
+				if (entity instanceof Mob mob) mob.getNavigation().stop();
+				entity.setDeltaMovement(0, entity.getDeltaMovement().y(), 0);
 			}
-			entity.setDeltaMovement(0, entity.getDeltaMovement().y(), 0);
 		}
 
-		double jitteredPunchStrike = getTelegraphJitter(entity, "heavy_punch", HEAVY_PUNCH_STRIKE_TICK, -5.0, 5.0);
+		double jitteredPunchStrike = HEAVY_PUNCH_STRIKE_TICK;
 		boolean strikeLeft = (heavyLeftTicks == jitteredPunchStrike);
 		boolean strikeRight = (heavyRightTicks == jitteredPunchStrike);
 
@@ -7725,15 +7882,17 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (target != null && entity.distanceTo(target) <= 4.5) {
 				putD(entity, "sentinel_heavy_punch_misses", 0.0);
 				Vec3 knockDir = target.position().subtract(entity.position()).normalize();
-				applyKnockbackAndSync(target, knockDir.x * 4.4, 0.70, knockDir.z * 4.4);
+				double learnedKnockback = RotViltrumiteAdaptation.heavyKnockback(entity, target);
+				applyKnockbackAndSync(target, knockDir.x * 4.4 * learnedKnockback, 0.70 * Math.sqrt(learnedKnockback), knockDir.z * 4.4 * learnedKnockback);
+				RotViltrumiteAdaptation.punch(entity, target, knockDir);
 				ClearFlightPathProcedure.execute(world, target, target.getX(), target.getY(), target.getZ(), target.getX() + knockDir.x * 4.4, target.getY() + 0.70, target.getZ() + knockDir.z * 4.4, 1.2, true);
 
 				if (target instanceof LivingEntity targetLiv) {
-					double punchDmg = Math.min(100.0, MELEE_PUNCH_DAMAGE * getAdaptationMultiplier(entity));
+					double punchDmg = RotViltrumiteAdaptation.heavyDamage(entity, targetLiv, Math.min(100.0, MELEE_PUNCH_DAMAGE * getAdaptationMultiplier(entity)));
 					disablePlayerShield(world, targetLiv, punchDmg, 100);
 				}
 				if (world instanceof ServerLevel level) {
-					float finalHeavyPunchDmg = (float) Math.min(100.0, MELEE_PUNCH_DAMAGE * getAdaptationMultiplier(entity));
+					float finalHeavyPunchDmg = (float) RotViltrumiteAdaptation.heavyDamage(entity, target, Math.min(100.0, MELEE_PUNCH_DAMAGE * getAdaptationMultiplier(entity)));
 					dealTrueDamageToBosses(target, getBackwoodsDamage(level, "rot_consecutive_punches", entity), finalHeavyPunchDmg);
 				}
 
@@ -7753,7 +7912,9 @@ private static float lerpAngle(float pct, float start, float end) {
 	}
 
 	private static void executeMinosHeavyPunchBlink(LevelAccessor world, Entity entity, LivingEntity targetLiv, boolean isLeftHand) {
+		if (hasActiveMinosBodyMotion(entity)) return;
 		if (targetLiv == null || !hasHeavyPunchSupport(world, targetLiv)) return;
+		clearDoubles(entity, "rot_recovery_queue_target_id", "rot_recovery_queue_start", "rot_recovery_queue_wait");
 		cancelActiveBeams(world, entity);
 		double targetYaw = targetLiv.getYRot();
 		double radians = Math.toRadians(targetYaw);
@@ -8060,6 +8221,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		double targetX = self.getX();
 		double targetY = self.getY();
 		double targetZ = self.getZ();
+		RotViltrumiteAdaptation.slam(self, target, new Vec3(targetX, targetY, targetZ));
 
 		boolean totemActive = getB(self, "sentinel_totem_active");
 		boolean isInfinity = getB(self, "sentinel_is_infinity_totem");
@@ -8226,7 +8388,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 	}
 
-	public static float ROT_CAMERA_SHAKE_STRENGTH = 0.3F;
+	public static final float ROT_CAMERA_SHAKE_STRENGTH = 0.3F;
 
 	private static void sendCameraShake(float intensity, int duration, float range) {
 		try {
@@ -8239,6 +8401,98 @@ private static float lerpAngle(float pct, float start, float end) {
 			sendMethod.invoke(null, msgInstance);
 		} catch (Exception e) {
 		}
+	}
+
+
+	private static void resetSmartDeparture(Entity entity) {
+		if (getD(entity, "rot_departure_scan_ticks") > 0) {
+			clearDoubles(entity, "sentinel_scanning_ticks", "sentinel_scan_max_ticks");
+		}
+		clearDoubles(entity, "rot_departure_idle_ticks", "rot_departure_delay_ticks", "rot_departure_scan_ticks");
+	}
+
+	private static boolean hasDepartureThreat(ServerLevel level, RotEntity rot) {
+		double radius = Double.isFinite(SMART_DESPAWN_THREAT_RADIUS)
+				? Mth.clamp(SMART_DESPAWN_THREAT_RADIUS, 16.0, 128.0) : 128.0;
+		return !level.getEntitiesOfClass(LivingEntity.class, rot.getBoundingBox().inflate(radius),
+				candidate -> isValidTarget(candidate, rot, true)).isEmpty();
+	}
+
+	private static boolean handleSmartDeparture(LevelAccessor world, Entity entity) {
+		if (!(world instanceof ServerLevel level) || !(entity instanceof RotEntity rot) || !rot.isAlive()) return false;
+		double scan = getD(rot, "rot_departure_scan_ticks");
+		if (!SMART_DESPAWN_ENABLED) {
+			if (scan > 0 || getD(rot, "rot_departure_delay_ticks") > 0) resetSmartDeparture(rot);
+			return false;
+		}
+		long now = level.getGameTime();
+		int interval = Mth.clamp(SMART_DESPAWN_CHECK_INTERVAL_TICKS, 10, 200);
+		if (scan <= 0) {
+			if (!rot.getPersistentData().contains("rot_departure_next_poll")) {
+				putD(rot, "rot_departure_next_poll", now + Math.floorMod(rot.getId(), interval));
+				return false;
+			}
+			double next = getD(rot, "rot_departure_next_poll");
+			if (now < next && next - now <= interval) return false;
+			putD(rot, "rot_departure_next_poll", now + interval);
+		}
+		LivingEntity target = rot.getTarget();
+		int lastCombat = Math.max(rot.getLastHurtByMobTimestamp(), rot.getLastHurtMobTimestamp());
+		boolean busy = target != null && target.isAlive() && target.level() == level
+				|| lastCombat > 0 && rot.tickCount - lastCombat <= interval + 1
+				|| rot.hurtTime > 0 || rot.isNoAi() || rot.isPassenger() || rot.isVehicle()
+				|| getB(rot, "master_follow_enabled") || getB(rot, "master_guard_mode") || getB(rot, "is_dueling")
+				|| getI(rot, "master_kill_target_id") != 0 || isRotChannelingAbility(rot)
+				|| getD(rot, "rot_land_timer") > 0 || getD(rot, "sentinel_landing_ticks") > 0
+				|| getB(rot, "rot_phase_active") || getB(rot, "rot_phase_shifting")
+				|| getB(rot, "rot_death_sequence_active")
+				|| scan <= 0 && getD(rot, "sentinel_scanning_ticks") > 0;
+		if (busy) {
+			if (scan > 0 || getD(rot, "rot_departure_delay_ticks") > 0) resetSmartDeparture(rot);
+			return false;
+		}
+		if (scan <= 0) {
+			int delay = (int)getD(rot, "rot_departure_delay_ticks");
+			if (delay <= 0) {
+				int min = Mth.clamp(SMART_DESPAWN_IDLE_MIN_TICKS, 20, 24000);
+				int max = Math.max(min, Math.min(24000, SMART_DESPAWN_IDLE_MAX_TICKS));
+				delay = min + level.getRandom().nextInt(max - min + 1);
+				putD(rot, "rot_departure_delay_ticks", delay);
+				putD(rot, "rot_departure_idle_ticks", 0);
+				return false;
+			}
+			double quiet = getD(rot, "rot_departure_idle_ticks") + interval;
+			putD(rot, "rot_departure_idle_ticks", quiet);
+			if (quiet < delay) return false;
+			if (hasDepartureThreat(level, rot)) {
+				resetSmartDeparture(rot);
+				return false;
+			}
+			scan = Mth.clamp(SMART_DESPAWN_SCAN_TICKS, 10, 200);
+			putD(rot, "rot_departure_scan_ticks", scan);
+			putD(rot, "sentinel_scanning_ticks", scan);
+			putD(rot, "sentinel_scan_max_ticks", scan);
+			putD(rot, "sentinel_scanning_base_yaw", rot.getYRot());
+		}
+		// Both the entity event and MCreator's base tick can call this procedure in one game tick.
+		if (rot.getPersistentData().contains("rot_departure_scan_last_tick")
+				&& getD(rot, "rot_departure_scan_last_tick") == now) return true;
+		putD(rot, "rot_departure_scan_last_tick", now);
+		if ((scan <= 1 || (int)scan % 20 == 0) && hasDepartureThreat(level, rot)) {
+			resetSmartDeparture(rot);
+			return false;
+		}
+		if (scan <= 1) {
+			net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceFinished(rot);
+			net.mcreator.thebackwoods.RotDataGuardian.unregisterProtectedDeathEntity(rot);
+			level.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, rot.getX(), rot.getY() + 1.0, rot.getZ(),
+					24, 0.35, 0.7, 0.35, 0.02);
+			rot.discard();
+			return true;
+		}
+		putD(rot, "rot_departure_scan_ticks", scan - 1);
+		handleScanningState(rot);
+		return true;
 	}
 
 	private static boolean handleScanningState(Entity entity) {
@@ -8606,6 +8860,7 @@ private static float lerpAngle(float pct, float start, float end) {
 								double launchHeightVel = 3.6 + Math.random() * 0.8;
 								applyKnockbackAndSync(combatTarget, 0.0, launchHeightVel, 0.0);
 								putD(entity, "sentinel_uppercut_launch_ticks", 4.0);
+								RotViltrumiteAdaptation.uppercut(entity, combatTarget);
 
 								ClearFlightPathProcedure.execute(world, combatTarget, combatTarget.getY(), combatTarget.getY() + 35.0, 1.5);
 								if (!getB(entity, "is_uppercut_standalone")) {
@@ -9612,60 +9867,61 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 	}
 
-	public static final List<AbilityInfo> ABILITY_REGISTRY = new ArrayList<>();
+	public static final List<AbilityInfo> ABILITY_REGISTRY;
 	static {
-		ABILITY_REGISTRY.add(new AbilityInfo("sonic_boom", "unlocked_sonic_boom", "sentinel_warden_sonic_cooldown", 24.0, SONIC_BOOM_DMG, "ranged", "burst", "anti-air", "control")
+		List<AbilityInfo> _reg = new ArrayList<>();
+		_reg.add(new AbilityInfo("sonic_boom", "unlocked_sonic_boom", "sentinel_warden_sonic_cooldown", 24.0, SONIC_BOOM_DMG, "ranged", "burst", "anti-air", "control")
 			.mobility(24.0, 12.0, 24.0, 0.0, 0.0, "PROJECTILE", 3.0, true, true, true)
 			.targeting(2.0, 2.0, 0.5, true, true, true, true, true, true)
 			.ratings(2.8, 0.0, 2.0, 2.5, 0.5, 2.0, 0.0, 0.5, 1.5, 0.5, 2.5, 2.5)
 			.tactical(0.0, 0.0, 0.0, 2.2, 2.0, 2.0, 2.5, 0.0, 0.0, 1.5, 1.0, 0.0, 0.0, 0.0)
 			.affordances("ranged_stagger", "anti_flight_deny", "knockback"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("omni_sonic_boom", "unlocked_sonic_boom", "sentinel_omni_sonic_cooldown", 6.0, SONIC_BOOM_DMG, "aoe", "burst", "control")
+		_reg.add(new AbilityInfo("omni_sonic_boom", "unlocked_sonic_boom", "sentinel_omni_sonic_cooldown", 6.0, SONIC_BOOM_DMG, "aoe", "burst", "control")
 			.mobility(6.0, 6.0, 0.0, 0.0, 0.0, "AOE", 1.0, true, true, true)
 			.ratings(1.5, 0.0, 3.0, 2.8, 0.0, 0.0, 0.0, 0.0, 1.5, 1.0, 3.0, 3.0)
 			.control(2.5, true, false, true, false, true, 0.0, 6.0)
 			.tactical(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 2.5, 1.5, 0.0, 0.0, 0.0)
 			.affordances("shockwave", "area_denial", "multi_target_stagger"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("solar_beam", "unlocked_solar_beam", K_SOLAR_CD, 32.0, SOLAR_BEAM_DMG_BASE, "ranged", "sustained", "burst")
+		_reg.add(new AbilityInfo("solar_beam", "unlocked_solar_beam", K_SOLAR_CD, 32.0, SOLAR_BEAM_DMG_BASE, "ranged", "sustained", "burst")
 			.mobility(32.0, 16.0, 32.0, 0.0, 0.0, "PROJECTILE", 4.0, true, true, true)
 			.ratings(1.8, 0.0, 1.0, 2.8, 2.5, 2.2, 0.0, 0.0, 2.0, 1.5, 1.5, 2.8)
 			.tactical(0.0, 0.0, 0.0, 2.0, 2.5, 2.2, 1.8, 1.0, 0.0, 1.0, 2.5, 0.0, 0.0, 0.0)
 			.affordances("sustained_damage", "zoning_fire", "heat_buildup"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("cryo_beam", "unlocked_cryo_beam", K_SOLAR_CD, 32.0, CRYO_BEAM_DMG_BASE, "ranged", "sustained", "control")
+		_reg.add(new AbilityInfo("cryo_beam", "unlocked_cryo_beam", K_SOLAR_CD, 32.0, CRYO_BEAM_DMG_BASE, "ranged", "sustained", "control")
 			.mobility(32.0, 16.0, 32.0, 0.0, 0.0, "PROJECTILE", 4.0, true, true, true)
 			.ratings(1.8, 0.0, 2.8, 1.8, 2.8, 2.2, 0.0, 0.0, 1.5, 1.0, 2.0, 3.0)
 			.tactical(0.0, 0.0, 0.0, 2.0, 2.5, 2.5, 1.8, 1.0, 0.0, 1.0, 2.5, 0.0, 0.0, 0.0)
 			.affordances("slow_debuff", "freeze_lock", "zoning_ice"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("wither_skulls", "unlocked_wither_skulls", "sentinel_wither_skull_cd", 32.0, 12.0, "ranged", "burst")
+		_reg.add(new AbilityInfo("wither_skulls", "unlocked_wither_skulls", "sentinel_wither_skull_cd", 32.0, 12.0, "ranged", "burst")
 			.mobility(32.0, 16.0, 32.0, 0.0, 0.0, "PROJECTILE", 2.0, true, true, true)
 			.ratings(1.5, 0.0, 1.5, 2.2, 1.0, 1.8, 0.0, 0.0, 1.0, 0.5, 1.0, 2.0)
 			.affordances("wither_debuff", "ranged_harass"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("telekinesis", "unlocked_telekinesis", K_TK_CD, 16.0, COMBO_TK_SLAM_DMG, "control", "ranged", "gap-closer")
+		_reg.add(new AbilityInfo("telekinesis", "unlocked_telekinesis", K_TK_CD, 16.0, COMBO_TK_SLAM_DMG, "control", "ranged", "gap-closer")
 			.mobility(16.0, 10.0, 16.0, 5.0, 5.0, "TELEPORT", 3.0, true, true, true)
 			.targeting(2.5, 2.5, 2.0, true, true, true, true, true, true)
 			.ratings(2.0, 2.8, 3.0, 1.8, 0.0, 2.8, 2.0, 1.5, 1.0, 2.0, 3.0, 2.0)
 			.tactical(2.8, 1.5, 1.5, 2.5, 2.8, 2.8, 2.0, 2.0, 1.0, 3.0, 2.0, 2.0, 1.5, 0.0)
 			.affordances("pull_target", "disrupt_boat", "ground_slam", "juggle_opportunity"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("grapple", "unlocked_grapple", K_GRAPPLE_CD, 12.0, MUTANT_DNA_GRAPPLE_DMG, "drain", "control", "gap-closer")
+		_reg.add(new AbilityInfo("grapple", "unlocked_grapple", K_GRAPPLE_CD, 12.0, MUTANT_DNA_GRAPPLE_DMG, "drain", "control", "gap-closer")
 			.mobility(12.0, 8.0, 12.0, 0.0, 0.0, "DASH", 2.5, true, true, true)
 			.ratings(1.0, 2.8, 2.5, 1.5, 1.5, 2.5, 2.2, 1.5, 1.0, 1.5, 2.5, 1.0)
 			.tactical(2.8, 0.0, 0.0, 2.2, 2.5, 2.5, 1.0, 1.5, 0.0, 2.5, 2.0, 2.2, 1.5, 0.0)
 			.affordances("pull_self_to_target", "choke_grab", "life_drain"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("overhead_combo", "unlocked_overhead_combo", "sentinel_overhead_cooldown", 4.5, COMBO_OVERHEAD_SLAM_DMG, "burst", "anti-shield", "control")
+		_reg.add(new AbilityInfo("overhead_combo", "unlocked_overhead_combo", "sentinel_overhead_cooldown", 4.5, COMBO_OVERHEAD_SLAM_DMG, "burst", "anti-shield", "control")
 			.mobility(4.5, 8.0, 2.0, 0.0, 8.0, "LEAP", 2.0, false, true, true)
 			.ratings(1.5, 1.0, 2.5, 2.8, 0.0, 1.5, 1.0, 2.5, 2.8, 3.0, 2.5, 1.0)
 			.control(2.0, false, false, false, true, true, 0.0, 4.5)
 			.tactical(1.0, 0.0, 3.0, 1.5, 1.5, 1.5, 1.5, 3.0, 1.0, 2.0, 2.0, 1.0, 2.5, 2.8)
 			.affordances("ground_slam", "shockwave", "target_grounded", "area_denial", "target_stunned"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("dropkick_combo", "unlocked_dropkick_combo", "sentinel_dropkick_cooldown", 6.0, COMBO_JUDGMENT_KICK_DMG, "gap-closer", "burst", "control")
+		_reg.add(new AbilityInfo("dropkick_combo", "unlocked_dropkick_combo", "sentinel_dropkick_cooldown", 6.0, COMBO_JUDGMENT_KICK_DMG, "gap-closer", "burst", "control")
 			.mobility(200.0, 20.0, 200.0, 5.0, 5.0, "DASH", 4.5, true, true, true)
 			.targeting(3.0, 3.0, 2.5, true, true, true, true, true, true)
 			.ratings(2.0, 3.0, 2.5, 3.0, 0.0, 3.0, 2.0, 2.0, 2.5, 2.0, 2.5, 1.0)
@@ -9673,26 +9929,26 @@ private static float lerpAngle(float pct, float start, float end) {
 			.tactical(3.0, 0.5, 0.5, 3.0, 3.0, 3.0, 2.0, 1.5, 0.0, 2.5, 2.5, 2.0, 2.0, 2.2)
 			.affordances("large_displacement", "knockback", "spacing", "pursuit_opportunity"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("minos_combo", "unlocked_minos_combo", "sentinel_minos_cooldown", 5.0, COMBO_SEISMIC_SLAM_DMG, "burst", "sustained")
+		_reg.add(new AbilityInfo("minos_combo", "unlocked_minos_combo", "sentinel_minos_cooldown", 5.0, COMBO_SEISMIC_SLAM_DMG, "burst", "sustained")
 			.mobility(5.0, 3.0, 5.0, 0.0, 0.0, "DASH", 2.0, false, true, false)
 			.ratings(0.5, 1.8, 2.0, 2.8, 2.0, 1.5, 2.0, 2.5, 2.0, 1.5, 2.0, 1.0)
 			.control(2.0, false, false, false, true, true, 0.0, 5.0)
 			.affordances("seismic_shockwave", "combo_chain", "ground_pressure"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("die_rider_kick", "unlocked_knockback_rider_combo", "sentinel_cc4_cd", 8.0, COMBO_DIE_RIDER_KICK_DMG, "gap-closer", "burst", "anti-air")
+		_reg.add(new AbilityInfo("die_rider_kick", "unlocked_knockback_rider_combo", "sentinel_cc4_cd", 8.0, COMBO_DIE_RIDER_KICK_DMG, "gap-closer", "burst", "anti-air")
 			.mobility(30.0, 15.0, 30.0, 8.0, 0.0, "LEAP", 3.5, true, true, true)
 			.targeting(2.8, 2.8, 1.8, true, true, true, true, true, true)
 			.ratings(2.8, 3.0, 2.0, 3.0, 0.0, 2.8, 1.5, 2.0, 2.8, 1.5, 2.5, 1.0)
 			.tactical(3.0, 2.2, 0.0, 2.8, 2.8, 2.8, 2.8, 1.0, 0.0, 2.0, 2.5, 1.5, 2.0, 2.8)
 			.affordances("aerial_pursuit", "knockback", "juggle_opportunity", "supersonic_kick"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("triple_threat_combo", "unlocked_triple_threat_combo", "sentinel_cc1_cd", 4.5, MELEE_PUNCH_DAMAGE * 3.0, "sustained", "burst")
+		_reg.add(new AbilityInfo("triple_threat_combo", "unlocked_triple_threat_combo", "sentinel_cc1_cd", 4.5, MELEE_PUNCH_DAMAGE * 3.0, "sustained", "burst")
 			.mobility(4.5, 2.5, 3.0, 0.0, 0.0, "GROUND", 1.0, false, false, false)
 			.ratings(0.5, 1.0, 1.5, 2.5, 2.8, 1.0, 2.8, 2.8, 2.0, 1.8, 2.0, 0.5)
 			.tactical(1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.5, 1.5, 0.0, 1.5, 2.8, 2.8, 2.8, 1.5)
 			.affordances("triple_strike", "melee_pressure", "combo_starter"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("high_sky_slam_combo", "unlocked_high_sky_slam_combo", "sentinel_cc2_cd", 6.0, UPPERCUT_DAMAGE + COMBO_SEISMIC_SLAM_DMG, "anti-air", "aoe", "control")
+		_reg.add(new AbilityInfo("high_sky_slam_combo", "unlocked_high_sky_slam_combo", "sentinel_cc2_cd", 6.0, UPPERCUT_DAMAGE + COMBO_SEISMIC_SLAM_DMG, "anti-air", "aoe", "control")
 			.mobility(6.0, 12.0, 4.0, 12.0, 12.0, "LEAP", 3.0, true, true, true)
 			.targeting(2.5, 2.5, 1.0, true, true, true, true, true, true)
 			.ratings(3.0, 2.2, 2.8, 2.5, 1.0, 2.2, 2.0, 2.5, 2.2, 1.5, 2.8, 1.5)
@@ -9700,7 +9956,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			.tactical(2.0, 3.0, 2.5, 2.8, 2.0, 2.2, 3.0, 1.0, 2.0, 2.5, 2.0, 2.0, 2.5, 2.2)
 			.affordances("self_airborne", "target_airborne", "juggle_opportunity", "aerial_followup_window"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("knockback_dropkick_combo", "unlocked_knockback_dropkick_combo", "sentinel_cc3_cd", 6.0, COMBO_JUDGMENT_KICK_DMG, "gap-closer", "control")
+		_reg.add(new AbilityInfo("knockback_dropkick_combo", "unlocked_knockback_dropkick_combo", "sentinel_cc3_cd", 6.0, COMBO_JUDGMENT_KICK_DMG, "gap-closer", "control")
 			.mobility(200.0, 20.0, 200.0, 5.0, 5.0, "DASH", 4.5, true, true, true)
 			.targeting(3.0, 3.0, 2.5, true, true, true, true, true, true)
 			.ratings(2.0, 3.0, 2.5, 2.8, 0.0, 3.0, 1.5, 2.0, 2.5, 2.0, 2.5, 1.0)
@@ -9708,21 +9964,23 @@ private static float lerpAngle(float pct, float start, float end) {
 			.tactical(3.0, 0.5, 0.5, 3.0, 3.0, 3.0, 2.0, 1.5, 0.0, 2.5, 2.5, 1.5, 2.0, 2.2)
 			.affordances("large_displacement", "knockback", "spacing", "pursuit_opportunity"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("heavenly_repentance_plus", "unlocked_heavenly_repentance_plus", "sentinel_cc5_cd", 5.0, COMBO_DIE_RIDER_KICK_DMG, "burst", "aoe", "control")
+		_reg.add(new AbilityInfo("heavenly_repentance_plus", "unlocked_heavenly_repentance_plus", "sentinel_cc5_cd", 5.0, COMBO_DIE_RIDER_KICK_DMG, "burst", "aoe", "control")
 			.mobility(8.0, 8.0, 8.0, 5.0, 5.0, "LEAP", 3.0, true, true, true)
 			.ratings(2.2, 2.5, 3.0, 3.0, 1.0, 2.5, 2.0, 2.5, 2.8, 2.0, 2.8, 2.0)
 			.control(2.8, true, false, true, true, true, 0.0, 8.0)
 			.affordances("divine_explosion", "massive_knockback", "shockwave", "finisher_slam"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("armor_rip", "unlocked_armor_rip", "rot_armor_rip_cooldown", ARMOR_RIP_TRIGGER_DISTANCE, CHOKE_DAMAGE, "anti-shield", "control", "drain")
+		_reg.add(new AbilityInfo("armor_rip", "unlocked_armor_rip", "rot_armor_rip_cooldown", ARMOR_RIP_TRIGGER_DISTANCE, CHOKE_DAMAGE, "anti-shield", "control", "drain")
 			.mobility(3.5, 2.0, 3.5, 0.0, 0.0, "GROUND", 1.0, false, false, false)
 			.ratings(0.0, 1.0, 3.0, 2.0, 2.5, 1.5, 1.0, 2.0, 1.5, 3.0, 3.0, 0.5)
 			.tactical(1.0, 0.0, 0.0, 1.0, 1.5, 2.0, 0.0, 3.0, 0.0, 2.5, 2.5, 1.0, 2.0, 1.5)
 			.affordances("armor_destruction", "choke_grab", "protection_strip"));
 
-		ABILITY_REGISTRY.add(new AbilityInfo("block", "unlocked_block", "rot_block_cooldown", 5.5, 0.0, "control")
+		_reg.add(new AbilityInfo("block", "unlocked_block", "rot_block_cooldown", 5.5, 0.0, "control")
 			.ratings(0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 			.affordances("damage_reduction", "parry_window"));
+
+		ABILITY_REGISTRY = java.util.Collections.unmodifiableList(_reg);
 	}
 
 	public static List<AbilityInfo> getAvailableAbilities(Entity self) {
@@ -14194,11 +14452,11 @@ private static float lerpAngle(float pct, float start, float end) {
 			|| getD(entity, "sentinel_solar_fire_ticks") > 0
 			|| getD(entity, "sentinel_cryo_charge_ticks") > 0
 			|| getD(entity, "sentinel_cryo_fire_ticks") > 0
-			|| getD(entity, "sentinel_laser_closing_ticks") > 0
+			|| getD(entity, "sentinel_laser_closing_ticks") > 0 && !isMobileScreamActive(entity)
 			|| getD(entity, "sentinel_wither_skull_fire_ticks") > 0
 			|| getD(entity, "sentinel_sonic_ticks") > 0
 			|| getD(entity, "sentinel_omni_sonic_charge_ticks") > 0
-			|| getD(entity, "sentinel_sonic_scream_ticks") > 0
+			|| getD(entity, "sentinel_sonic_scream_ticks") > 0 && !canUseMobileScream(entity)
 			|| getD(entity, K_GRAPPLE_TICKS) > 0
 			|| getD(entity, K_TK_TICKS) > 0
 			|| getB(entity, "is_armor_ripping")
@@ -14644,7 +14902,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		double hDist = Math.max(0.2, Math.sqrt(self.distanceToSqr(target.getX(), self.getY(), target.getZ())));
 
 		// 1. Check unlocked ranged/burst combat abilities first if off cooldown
-		if (getB(self, "unlocked_sonic_scream") && getD(self, "sentinel_sonic_scream_cooldown") <= 0.0 && dist <= 18.0) {
+		if (getB(self, "unlocked_sonic_scream") && getD(self, "sentinel_sonic_scream_cooldown") <= 0.0 && getD(self, "sentinel_sonic_scream_ticks") <= 0 && dist <= 18.0) {
 			recordAttack(self, "sonic_scream");
 			putD(self, "sentinel_sonic_scream_ticks", 240.0);
 			putD(self, "sentinel_sonic_scream_cooldown", SONIC_SCREAM_COOLDOWN);
@@ -15170,5 +15428,558 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (target instanceof Player p && (p.isCreative() || p.isSpectator())) return;
 		target.addEffect(effect);
 	}
+
+	/** Optional Viltrumite adaptation; combat clocks and animation states remain owned by the tick procedure. */
+	@EventBusSubscriber(modid = "the_backwoods")
+	public static class RotViltrumiteAdaptation {
+	    public static boolean ENABLED = true;
+	    public static boolean ONLY_DURING_VILTRUMITE_COMBAT = true;
+	    public static boolean RESPECT_MOB_GRIEFING = true;
+	    public static boolean DROP_BLOCKS = false;
+	    public static int STAGE_ONE_COMBAT_TICKS = 200;
+	    public static int STAGE_TWO_COMBAT_TICKS = 600;
+	    public static int STAGE_THREE_COMBAT_TICKS = 1200;
+	    public static int SAMPLE_INTERVAL_TICKS = 10;
+	    public static int RECENT_COMBAT_TICKS = 100;
+	    public static double MAX_COMBAT_DISTANCE = 64.0;
+	    public static int MAX_SCANS_PER_TICK = 384;
+	    public static int MAX_BLOCKS_PER_TICK = 64;
+	    public static int MAX_BLOCKS_PER_IMPACT = 768;
+	    public static int MAX_QUEUED_IMPACTS = 64;
+	    public static int MAX_IMPACTS_PER_ROT = 4;
+	    public static int MAX_JOB_AGE_TICKS = 40;
+	    public static float MAX_BLOCK_HARDNESS = 50.0F;
+	    public static double[] PUNCH_RADII = {1.0, 1.75, 2.5};
+	    public static double[] PUNCH_LENGTHS = {4.0, 8.0, 14.0};
+	    public static boolean SCALE_HEAVY_DAMAGE = true;
+	    public static boolean SCALE_HEAVY_KNOCKBACK = true;
+	    public static double[] HEAVY_DAMAGE_MULTIPLIERS = {1.15, 1.40, 1.75};
+	    public static double[] HEAVY_KNOCKBACK_MULTIPLIERS = {1.10, 1.35, 1.65};
+	    public static double MAX_ADAPTED_HEAVY_DAMAGE = 175.0;
+	    public static boolean LEARN_WEAK_HIT_THRESHOLD = true;
+	    public static int WEAK_HITS_TO_LEARN = 3;
+	    public static double MAX_THRESHOLD_ADAPTED_DAMAGE = 256.0;
+	    public static boolean LEARN_UPPERCUT_RESISTANCE = true;
+	    public static int FAILED_LAUNCHES_TO_LEARN = 2;
+	    public static int MAX_TRACKED_UPPERCUTS = 32;
+	    public static boolean ENABLE_SWEPT_COLLISIONS = true;
+	    public static int LAUNCH_LIFETIME_TICKS = 20;
+	    public static int MAX_TRACKED_LAUNCHES = 32;
+	    public static double MAX_LAUNCH_SPEED = 8.0;
+	    public static boolean ENABLE_FALLING_DEBRIS = true;
+	    public static int MAX_ACTIVE_DEBRIS = 96;
+	    public static int MAX_DEBRIS_PER_TICK = 8;
+	    public static int MAX_DEBRIS_PER_IMPACT = 16;
+	    public static int DEBRIS_EVERY_N_BLOCKS = 4;
+	    public static int DEBRIS_LIFETIME_TICKS = 60;
+	    public static double[] CRATER_RADII = {1.5, 2.5, 3.5};
+	    public static double[] CRATER_DEPTHS = {1.0, 1.5, 2.5};
+	    public static String[] ADDITIONAL_VILTRUMITE_ENTITY_IDS = {};
+
+	    private static final String PROGRESS = "rot_viltrumite_combat_ticks";
+	    private static final String SAMPLE = "rot_viltrumite_sample";
+	    private static final String THREAT = "rot_viltrumite_threat";
+	    private static final String CONTACT = "rot_viltrumite_contact";
+	    private static final String DEBRIS_UNTIL = "rot_viltrumite_debris_until";
+	    private static final String WEAK_HITS = "rot_viltrumite_weak_hits";
+	    private static final String WEAK_SAMPLE = "rot_viltrumite_weak_sample";
+	    private static final String FAILED_LIFTS = "rot_viltrumite_failed_lifts";
+	    private static final java.util.Map<net.minecraft.server.MinecraftServer, Work> WORK = new java.util.IdentityHashMap<>();
+	    private static Class<?> playerApi, npcType;
+	    private static java.lang.reflect.Method isViltrumite;
+	    private static boolean checkedApi, warned;
+	    private static Class<?> statsApi, flightApi;
+	    private static java.lang.reflect.Method ignoreThreshold, damageReduction, stopFlight;
+	    private static boolean checkedPowers;
+
+	    public RotViltrumiteAdaptation() {}
+
+	    public static boolean isViltrumite(Entity entity) {
+	        if (entity == null) return false;
+	        if (!checkedApi) {
+	            checkedApi = true;
+	            try {
+	                playerApi = Class.forName("dev.baranhan.viltrumitecore.util.ViltrumiteCorePlayer");
+	                isViltrumite = playerApi.getMethod("isViltrumite");
+	                npcType = Class.forName("dev.baranhan.viltrumitecore.entity.ViltrumiteFakePlayer");
+	            } catch (ClassNotFoundException absent) {
+	                // Viltrumite Core is optional; explicit entity IDs can still enable another implementation.
+	            } catch (ReflectiveOperationException | LinkageError failure) { warn(failure); }
+	        }
+	        if (npcType != null && npcType.isInstance(entity)) return true;
+	        if (playerApi != null && isViltrumite != null && playerApi.isInstance(entity)) {
+	            try { if (Boolean.TRUE.equals(isViltrumite.invoke(entity))) return true; }
+	            catch (ReflectiveOperationException | RuntimeException failure) { warn(failure); }
+	        }
+	        if (ADDITIONAL_VILTRUMITE_ENTITY_IDS.length > 0) {
+	            String id = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+	            for (String configured : ADDITIONAL_VILTRUMITE_ENTITY_IDS) if (configured.equals(id)) return true;
+	        }
+	        return false;
+	    }
+
+	    private static void warn(Throwable failure) {
+	        if (!warned) {
+	            warned = true;
+	            com.mojang.logging.LogUtils.getLogger().warn("Rot Viltrumite adaptation API unavailable", failure);
+	        }
+	    }
+
+	    private static boolean alive(RotEntity rot) {
+	        return rot.isAlive() && !rot.isRemoved() && !rot.getEntityData().get(RotEntity.DATA_isDeath)
+	                && !net.mcreator.thebackwoods.RotDataGuardian.isBossDeathSequenceActive(rot);
+	    }
+
+	    private static void remember(RotEntity rot, Entity threat) {
+	        if (!(rot.level() instanceof ServerLevel level) || !isViltrumite(threat)) return;
+	        rot.getPersistentData().putString(THREAT, threat.getUUID().toString());
+	        rot.getPersistentData().putLong(CONTACT, level.getGameTime());
+	    }
+
+	    @SubscribeEvent
+	    public static void hurt(net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post event) {
+	        if (!ENABLED || event.getHealthDamage() <= 0 || event.getEntity().level().isClientSide()) return;
+	        Entity attacker = event.getSource().getEntity();
+	        if (event.getEntity() instanceof RotEntity rot && alive(rot)) remember(rot, attacker);
+	        else if (attacker instanceof RotEntity rot && alive(rot)) remember(rot, event.getEntity());
+	    }
+
+	    private static Entity opponent(RotEntity rot, ServerLevel level) {
+	        LivingEntity target = rot.getTarget();
+	        if (target != null && target.isAlive() && isViltrumite(target)) return target;
+	        var data = rot.getPersistentData();
+	        String id = data.getStringOr(THREAT, "");
+	        long age = level.getGameTime() - data.getLongOr(CONTACT, 0L);
+	        if (id.isEmpty() || age < 0 || age > Math.max(0, RECENT_COMBAT_TICKS)) return null;
+	        try {
+	            Entity remembered = level.getEntity(java.util.UUID.fromString(id));
+	            return remembered != null && remembered.isAlive() && isViltrumite(remembered) ? remembered : null;
+	        } catch (IllegalArgumentException invalid) { return null; }
+	    }
+
+	    @SubscribeEvent
+	    public static void sample(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {
+	        if (!ENABLED || !(event.getEntity() instanceof RotEntity rot) || !(rot.level() instanceof ServerLevel level) || !alive(rot)) return;
+	        var data = rot.getPersistentData();
+	        long now = level.getGameTime(), previous = data.getLongOr(SAMPLE, 0L);
+	        int interval = Math.max(1, SAMPLE_INTERVAL_TICKS);
+	        if (now >= previous && now - previous < interval) return;
+	        data.putLong(SAMPLE, now);
+	        Entity target = opponent(rot, level);
+	        double distance = Math.max(0, MAX_COMBAT_DISTANCE);
+	        if (target != null && rot.distanceToSqr(target) <= distance * distance) {
+	            int elapsed = (int)Math.min(interval, Math.max(0L, now - previous));
+	            int cap = Math.max(1, STAGE_THREE_COMBAT_TICKS);
+	            data.putInt(PROGRESS, (int)Math.min(cap, (long)Math.max(0, data.getIntOr(PROGRESS, 0)) + elapsed));
+	        }
+	    }
+
+	    public static int stage(Entity entity) {
+	        if (!ENABLED || !(entity instanceof RotEntity rot) || !alive(rot)
+	                || !net.mcreator.thebackwoods.procedures.RotOnEntityTickUpdateProcedure.MINOS_MODE) return 0;
+	        int ticks = rot.getPersistentData().getIntOr(PROGRESS, 0);
+	        return ticks >= Math.max(1, STAGE_THREE_COMBAT_TICKS) ? 3
+	                : ticks >= Math.max(1, STAGE_TWO_COMBAT_TICKS) ? 2
+	                : ticks >= Math.max(1, STAGE_ONE_COMBAT_TICKS) ? 1 : 0;
+	    }
+
+	    public static void punch(Entity entity, Entity target, Vec3 direction) {
+	        if (target == null) return;
+	        double base = Math.min(100.0, net.mcreator.thebackwoods.procedures.RotOnEntityTickUpdateProcedure.MELEE_PUNCH_DAMAGE
+	                * net.mcreator.thebackwoods.procedures.RotOnEntityTickUpdateProcedure.getAdaptationMultiplier(entity));
+	        net.mcreator.thebackwoods.BackwoodsImpactDebris.punch(entity, target, direction, heavyDamage(entity, target, base));
+	        int stage = combatStage(entity, target);
+	        if (stage == 0) return;
+	        Vec3 start = target.position().add(0, target.getBbHeight() * 0.45, 0);
+	        Vec3 forward = direction.lengthSqr() > 0.0001 ? direction.normalize() : entity.getLookAngle();
+	        double length = setting(PUNCH_LENGTHS, stage, 16);
+	        Strike strike = new Strike();
+	        Impact initial = enqueue(entity, target, start, start.add(forward.scale(length)), setting(PUNCH_RADII, stage, 4), false, 0, strike);
+	        if (initial != null && ENABLE_SWEPT_COLLISIONS && target.level() == entity.level()) {
+	            Work work = WORK.get(initial.level.getServer());
+	            if (work.launches.containsKey(target.getUUID()) || work.launches.size() < Math.max(0, Math.min(128, MAX_TRACKED_LAUNCHES)))
+	                work.launches.put(target.getUUID(), new Launch(initial.level, entity.getUUID(), target, strike));
+	        }
+	    }
+
+	    public static void slam(Entity entity, Entity target, Vec3 position) {
+	        int stage = stage(entity);
+	        if (stage == 0) return;
+	        enqueue(entity, target, position, position, setting(CRATER_RADII, stage, 6), true, setting(CRATER_DEPTHS, stage, 4), new Strike());
+	    }
+
+	    private static int combatStage(Entity entity, Entity target) {
+	        int learned = stage(entity);
+	        if (learned == 0 || !(entity instanceof RotEntity rot) || !(rot.level() instanceof ServerLevel level)) return 0;
+	        Entity threat = target != null && isViltrumite(target) ? target : opponent(rot, level);
+	        double range = Math.max(0, MAX_COMBAT_DISTANCE);
+	        return !ONLY_DURING_VILTRUMITE_COMBAT || threat != null && threat.isAlive() && rot.distanceToSqr(threat) <= range * range ? learned : 0;
+	    }
+
+	    public static double heavyDamage(Entity entity, Entity target, double base) {
+	        int learned = combatStage(entity, target);
+	        if (!SCALE_HEAVY_DAMAGE || learned == 0) return base;
+	        double ceiling = Double.isFinite(MAX_ADAPTED_HEAVY_DAMAGE) ? Math.max(base, MAX_ADAPTED_HEAVY_DAMAGE) : base;
+	        return Math.min(ceiling, base * Math.max(1, setting(HEAVY_DAMAGE_MULTIPLIERS, learned, 4)));
+	    }
+
+	    public static double heavyKnockback(Entity entity, Entity target) {
+	        int learned = combatStage(entity, target);
+	        return !SCALE_HEAVY_KNOCKBACK || learned == 0 ? 1 : Math.max(1, setting(HEAVY_KNOCKBACK_MULTIPLIERS, learned, 3));
+	    }
+
+	    private static double setting(double[] values, int stage, double maximum) {
+	        if (values == null || values.length < stage || !Double.isFinite(values[stage - 1])) return 0;
+	        return Math.max(0, Math.min(maximum, values[stage - 1]));
+	    }
+
+	    private static Impact enqueue(Entity entity, Entity target, Vec3 start, Vec3 end, double radius, boolean crater, double depth, Strike strike) {
+	        if (!(entity instanceof RotEntity rot) || !(rot.level() instanceof ServerLevel level) || radius <= 0 || !alive(rot)) return null;
+	        Entity threat = target != null && isViltrumite(target) ? target : opponent(rot, level);
+	        double range = Math.max(0, MAX_COMBAT_DISTANCE);
+	        if (ONLY_DURING_VILTRUMITE_COMBAT && (threat == null || !threat.isAlive() || rot.distanceToSqr(threat) > range * range)) return null;
+	        if (RESPECT_MOB_GRIEFING && !net.neoforged.neoforge.event.EventHooks.canEntityGrief(level, rot)) return null;
+	        Work work = WORK.computeIfAbsent(level.getServer(), ignored -> new Work());
+	        int perRot = work.owners.getOrDefault(rot.getUUID(), 0);
+	        if (work.jobs.size() >= Math.max(0, Math.min(256, MAX_QUEUED_IMPACTS))
+	                || perRot >= Math.max(0, Math.min(16, MAX_IMPACTS_PER_ROT))) return null;
+	        Impact impact = new Impact(level, rot.getUUID(), start, end, radius, crater, depth, level.getGameTime(), strike, null);
+	        work.jobs.add(impact);
+	        work.owners.put(rot.getUUID(), perRot + 1);
+	        return impact;
+	    }
+
+
+	    private static void powers() {
+	        if (checkedPowers) return;
+	        checkedPowers = true;
+	        try {
+	            statsApi = Class.forName("dev.baranhan.viltrumitecore.util.ViltrumiteStatHolder");
+	            ignoreThreshold = statsApi.getMethod("getDamageIgnoreThreshold");
+	            damageReduction = statsApi.getMethod("getDamageReduction");
+	        } catch (ClassNotFoundException absent) {
+	        } catch (ReflectiveOperationException | LinkageError failure) { warn(failure); }
+	        try {
+	            flightApi = Class.forName("dev.baranhan.viltrumiteflight.util.ViltrumiteFlightPlayer");
+	            stopFlight = flightApi.getMethod("stopFlight");
+	        } catch (ClassNotFoundException absent) {
+	        } catch (ReflectiveOperationException | LinkageError failure) { warn(failure); }
+	    }
+
+	    /** Learn the actual weak-hit threshold; normal hurt processing, armor, blocking and invulnerability still apply. */
+	    public static float attackDamage(Entity attacker, Entity target, float original) {
+	        if (!ENABLED || !LEARN_WEAK_HIT_THRESHOLD || !(attacker instanceof RotEntity rot) || !alive(rot)
+	                || !(rot.level() instanceof ServerLevel level) || !isViltrumite(target) || target.isInvulnerable()
+	                || !Float.isFinite(original) || original <= 0) return original;
+	        if (target instanceof net.minecraft.world.entity.player.Player player
+	                && (player.isCreative() || player.isSpectator() || player.getAbilities().invulnerable)) return original;
+	        powers();
+	        if (statsApi == null || !statsApi.isInstance(target) || ignoreThreshold == null || damageReduction == null) return original;
+	        try {
+	            double threshold = ((Number)ignoreThreshold.invoke(target)).doubleValue();
+	            double fraction = 1.0 - ((Number)damageReduction.invoke(target)).doubleValue() * 0.01;
+	            if (!Double.isFinite(threshold) || !Double.isFinite(fraction) || threshold <= 0 || fraction <= 0.001
+	                    || original * fraction >= threshold) return original;
+	            var data = rot.getPersistentData();
+	            long now = level.getGameTime(), last = data.getLongOr(WEAK_SAMPLE, 0L);
+	            if (!data.contains(WEAK_SAMPLE) || now < last || now - last >= 10) {
+	                data.putInt(WEAK_HITS, Math.min(64, Math.max(0, data.getIntOr(WEAK_HITS, 0)) + 1));
+	                data.putLong(WEAK_SAMPLE, now);
+	            }
+	            remember(rot, target);
+	            if (data.getIntOr(WEAK_HITS, 0) < Math.max(1, WEAK_HITS_TO_LEARN)) return original;
+	            double cap = Double.isFinite(MAX_THRESHOLD_ADAPTED_DAMAGE) ? Math.max(original, Math.min(2048, MAX_THRESHOLD_ADAPTED_DAMAGE)) : original;
+	            return (float)Math.max(original, Math.min(cap, (threshold + 0.5) / fraction));
+	        } catch (ReflectiveOperationException | RuntimeException failure) { warn(failure); return original; }
+	    }
+
+	    private static final class Lift {
+	        final ServerLevel level;
+	        final java.util.UUID owner;
+	        final Entity victim;
+	        final double startY;
+	        final boolean reinforce;
+	        double rise;
+	        int remaining = 4; // Matches the existing uppercut launch window; never changes combo clocks.
+	        Lift(ServerLevel level, RotEntity owner, Entity victim) {
+	            this.level = level; this.owner = owner.getUUID(); this.victim = victim; startY = victim.getY();
+	            reinforce = owner.getPersistentData().getIntOr(FAILED_LIFTS, 0) >= Math.max(1, FAILED_LAUNCHES_TO_LEARN);
+	        }
+	    }
+
+	    public static void uppercut(Entity entity, Entity victim) {
+	        if (!ENABLED || !LEARN_UPPERCUT_RESISTANCE || !(entity instanceof RotEntity rot) || !alive(rot)
+	                || !(rot.level() instanceof ServerLevel level) || victim == null || !victim.isAlive()
+	                || !isViltrumite(victim) || victim.level() != level) return;
+	        remember(rot, victim);
+	        Work work = WORK.computeIfAbsent(level.getServer(), ignored -> new Work());
+	        if (work.lifts.containsKey(victim.getUUID()) || work.lifts.size() < Math.max(0, Math.min(128, MAX_TRACKED_UPPERCUTS)))
+	            work.lifts.put(victim.getUUID(), new Lift(level, rot, victim));
+	    }
+
+	    private static boolean freeHeadroom(ServerLevel level, Entity entity) {
+	        BlockPos head = BlockPos.containing(entity.getX(), entity.getBoundingBox().maxY + 0.1, entity.getZ());
+	        var chunk = level.getChunkSource().getChunkNow(head.getX() >> 4, head.getZ() >> 4);
+	        return chunk != null && !chunk.getBlockState(head).blocksMotion();
+	    }
+
+	    @SubscribeEvent
+	    public static void observeUppercuts(net.neoforged.neoforge.event.tick.ServerTickEvent.Post event) {
+	        Work work = WORK.get(event.getServer());
+	        if (work == null) return;
+	        for (var iterator = work.lifts.values().iterator(); iterator.hasNext();) {
+	            Lift lift = iterator.next();
+	            Entity owner = lift.level.getEntity(lift.owner), target = lift.victim;
+	            if (!ENABLED || !LEARN_UPPERCUT_RESISTANCE || !(owner instanceof RotEntity rot) || !alive(rot)
+	                    || !target.isAlive() || target.isRemoved() || target.level() != lift.level || rot.distanceToSqr(target) > 4096) {
+	                iterator.remove(); continue;
+	            }
+	            boolean room = freeHeadroom(lift.level, target);
+	            lift.rise = Math.max(lift.rise, target.getY() - lift.startY);
+	            if (lift.reinforce && room) {
+	                powers();
+	                if (flightApi != null && stopFlight != null && flightApi.isInstance(target)) {
+	                    try { stopFlight.invoke(target); }
+	                    catch (ReflectiveOperationException | RuntimeException failure) { warn(failure); }
+	                }
+	                Vec3 motion = target.getDeltaMovement();
+	                double minimum = Math.min(3.8, 1.6 + rot.getPersistentData().getIntOr(FAILED_LIFTS, 0) * 0.4);
+	                target.setDeltaMovement(motion.x, Math.min(3.8, Math.max(minimum, motion.y)), motion.z);
+	                target.needsSync = true; target.hurtMarked = true;
+	                if (target instanceof net.minecraft.server.level.ServerPlayer player)
+	                    player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket(player));
+	            }
+	            if (--lift.remaining <= 0) {
+	                if (room && lift.rise < 0.75) {
+	                    var data = rot.getPersistentData();
+	                    data.putInt(FAILED_LIFTS, Math.min(8, Math.max(0, data.getIntOr(FAILED_LIFTS, 0)) + 1));
+	                }
+	                iterator.remove();
+	            }
+	        }
+	    }
+
+	    private static final class Work {
+	        final java.util.ArrayDeque<Impact> jobs = new java.util.ArrayDeque<>();
+	        final java.util.Map<java.util.UUID, Integer> owners = new java.util.HashMap<>();
+	        final java.util.LinkedHashMap<java.util.UUID, Launch> launches = new java.util.LinkedHashMap<>();
+	        final java.util.LinkedHashMap<java.util.UUID, Lift> lifts = new java.util.LinkedHashMap<>();
+	        final java.util.ArrayList<net.minecraft.world.entity.item.FallingBlockEntity> debris = new java.util.ArrayList<>();
+	        int spawnedThisTick;
+	        void finish(Impact job) { job.finished = true; owners.computeIfPresent(job.owner, (id, count) -> count <= 1 ? null : count - 1); }
+	    }
+
+	    private static final class Strike { int broken, debris; boolean blocked; }
+
+
+	    private static final class Launch {
+	        final ServerLevel level;
+	        final java.util.UUID owner;
+	        final Entity victim;
+	        final Strike strike;
+	        Vec3 previous, velocity;
+	        Impact pending;
+	        int remaining, lastBroken;
+	        Launch(ServerLevel level, java.util.UUID owner, Entity victim, Strike strike) {
+	            this.level = level; this.owner = owner; this.victim = victim; this.strike = strike;
+	            previous = victim.position(); velocity = victim.getDeltaMovement();
+	            remaining = Math.max(1, Math.min(60, LAUNCH_LIFETIME_TICKS));
+	        }
+	    }
+
+	    private static Vec3 limited(Vec3 velocity) {
+	        double cap = Double.isFinite(MAX_LAUNCH_SPEED) ? Math.max(0.5, Math.min(12, MAX_LAUNCH_SPEED)) : 8;
+	        return velocity.lengthSqr() > cap * cap ? velocity.normalize().scale(cap) : velocity;
+	    }
+
+	    private static void launches(Work work) {
+	        for (var iterator = work.launches.values().iterator(); iterator.hasNext();) {
+	            Launch launch = iterator.next();
+	            Entity victim = launch.victim;
+	            Entity owner = launch.level.getEntity(launch.owner);
+	            if (!ENABLE_SWEPT_COLLISIONS || !(owner instanceof RotEntity rot) || !alive(rot)
+	                    || !victim.isAlive() || victim.isRemoved() || victim.level() != launch.level
+	                    || launch.remaining-- <= 0 || launch.strike.blocked || launch.strike.broken >= Math.max(0, Math.min(1024, MAX_BLOCKS_PER_IMPACT))
+	                    || victim.position().distanceToSqr(launch.previous) > 256
+	                    || RESPECT_MOB_GRIEFING && !net.neoforged.neoforge.event.EventHooks.canEntityGrief(launch.level, rot)) {
+	                iterator.remove(); continue;
+	            }
+	            if (launch.level.getChunkSource().getChunkNow(victim.blockPosition().getX() >> 4, victim.blockPosition().getZ() >> 4) == null) {
+	                iterator.remove(); continue;
+	            }
+	            Vec3 velocity = limited(launch.velocity);
+	            if (velocity.lengthSqr() < 0.25) { iterator.remove(); continue; }
+	            victim.setDeltaMovement(velocity);
+	            victim.needsSync = true; victim.hurtMarked = true;
+	            if (victim instanceof net.minecraft.server.level.ServerPlayer player && (launch.remaining & 1) == 0)
+	                player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket(player));
+	            if ((launch.pending == null || launch.pending.finished)
+	                    && work.jobs.size() < Math.max(0, Math.min(256, MAX_QUEUED_IMPACTS))
+	                    && work.owners.getOrDefault(launch.owner, 0) < Math.max(0, Math.min(16, MAX_IMPACTS_PER_ROT))) {
+	                // Match meteor physics: sweep the physical body along its motion, including the last observed segment.
+	                var area = victim.getBoundingBox().minmax(victim.getBoundingBox().move(launch.previous.subtract(victim.position())))
+	                        .expandTowards(velocity).inflate(0.2);
+	                double volume = (area.maxX - area.minX + 1) * (area.maxY - area.minY + 1) * (area.maxZ - area.minZ + 1);
+	                if (volume <= 4096) {
+	                    launch.pending = new Impact(launch.level, launch.owner, victim.position(),
+	                            victim.position().add(velocity), 0.2, false, 0, launch.level.getGameTime(), launch.strike, area);
+	                    work.jobs.addFirst(launch.pending);
+	                    work.owners.merge(launch.owner, 1, Integer::sum);
+	                    launch.previous = victim.position();
+	                }
+	            }
+	            int resistance = Math.max(0, launch.strike.broken - launch.lastBroken);
+	            launch.lastBroken = launch.strike.broken;
+	            double drag = Math.max(0.6, 1.0 - resistance * 0.004);
+	            launch.velocity = new Vec3(velocity.x * 0.98 * drag, velocity.y * 0.98 - 0.08, velocity.z * 0.98 * drag);
+	        }
+	    }
+
+	    private static boolean debris(Work work, Impact job, BlockPos pos, BlockState state) {
+	        if (!ENABLE_FALLING_DEBRIS || (job.strike.broken + 1) % Math.max(1, DEBRIS_EVERY_N_BLOCKS) != 0
+	                || !net.mcreator.thebackwoods.BackwoodsImpactDebris.terrainCapacity(job.level)
+	                || work.spawnedThisTick >= Math.max(0, Math.min(32, MAX_DEBRIS_PER_TICK))
+	                || job.strike.debris >= Math.max(0, Math.min(64, MAX_DEBRIS_PER_IMPACT))
+	                || work.debris.size() >= Math.max(0, Math.min(256, MAX_ACTIVE_DEBRIS))) return false;
+	        Vec3 direction = job.crater ? Vec3.atCenterOf(pos).subtract(job.start).multiply(1, 0, 1) : job.end.subtract(job.start);
+	        if (direction.lengthSqr() > 0.0001) direction = direction.normalize(); else direction = new Vec3(1, 0, 0);
+	        var random = job.level.getRandom();
+	        Vec3 velocity = new Vec3(direction.x * 0.6 + (random.nextDouble() - 0.5) * 0.3,
+	                0.35 + random.nextDouble() * 0.55, direction.z * 0.6 + (random.nextDouble() - 0.5) * 0.3);
+	        var falling = net.mcreator.thebackwoods.BackwoodsImpactDebris.liftRotBlock(job.level, pos, state, velocity);
+	        if (falling == null) return false;
+	        if (!work.debris.contains(falling)) work.debris.add(falling);
+	        work.spawnedThisTick++; job.strike.debris++;
+	        return true;
+	    }
+
+	    @SubscribeEvent
+	    public static void debrisTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Pre event) {
+	        if (!(event.getEntity() instanceof net.minecraft.world.entity.item.FallingBlockEntity falling)
+	                || !(falling.level() instanceof ServerLevel level)) return;
+	        long until = falling.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L);
+	        if (until <= 0) return;
+	        if (!ENABLED || !ENABLE_FALLING_DEBRIS || level.getGameTime() >= until || falling.onGround()) {
+	            falling.discard(); return;
+	        }
+	        var area = falling.getBoundingBox().expandTowards(falling.getDeltaMovement()).inflate(0.1);
+	        if (area.maxX - area.minX > 8 || area.maxY - area.minY > 16 || area.maxZ - area.minZ > 8) { falling.discard(); return; }
+	        for (int x = ((int)Math.floor(area.minX)) >> 4; x <= ((int)Math.floor(area.maxX)) >> 4; x++)
+	            for (int z = ((int)Math.floor(area.minZ)) >> 4; z <= ((int)Math.floor(area.maxZ)) >> 4; z++)
+	                if (level.getChunkSource().getChunkNow(x, z) == null) { falling.discard(); return; }
+	    }
+
+	    @SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+	    public static void debrisJoined(net.neoforged.neoforge.event.entity.EntityJoinLevelEvent event) {
+	        if (!(event.getEntity() instanceof net.minecraft.world.entity.item.FallingBlockEntity falling)
+	                || !(event.getLevel() instanceof ServerLevel level)) return;
+	        if (falling.getPersistentData().contains("backwoods_rot_real_block")) {
+	            Work work = WORK.computeIfAbsent(level.getServer(), ignored -> new Work());
+	            if (!work.debris.contains(falling)) work.debris.add(falling);
+	            return;
+	        }
+	        long until = falling.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L);
+	        if (until <= 0) return;
+	        Work work = WORK.computeIfAbsent(level.getServer(), ignored -> new Work());
+	        if (!ENABLED || !ENABLE_FALLING_DEBRIS || level.getGameTime() >= until
+	                || work.debris.size() >= Math.max(0, Math.min(256, MAX_ACTIVE_DEBRIS))) {
+	            event.setCanceled(true); falling.discard(); return;
+	        }
+	        falling.disableDrop(); falling.dropItem = false;
+	        if (!work.debris.contains(falling)) work.debris.add(falling);
+	    }
+
+	    private static final class Impact {
+	        final ServerLevel level;
+	        final java.util.UUID owner;
+	        final Vec3 start, end;
+	        final double radius, depth;
+	        final boolean crater;
+	        final Strike strike;
+	        final net.minecraft.world.phys.AABB swept;
+	        final long created;
+	        final int x, y, z, width, height, volume;
+	        int cursor;
+	        boolean finished;
+	        Impact(ServerLevel level, java.util.UUID owner, Vec3 start, Vec3 end, double radius, boolean crater, double depth, long created, Strike strike, net.minecraft.world.phys.AABB swept) {
+	            this.level = level; this.owner = owner; this.start = start; this.end = end;
+	            this.radius = radius; this.crater = crater; this.depth = depth; this.created = created;
+	            this.strike = strike; this.swept = swept;
+	            x = (int)Math.floor(swept != null ? swept.minX : Math.min(start.x, end.x) - radius);
+	            y = (int)Math.floor(swept != null ? swept.minY : crater ? start.y - depth : Math.min(start.y, end.y) - radius);
+	            z = (int)Math.floor(swept != null ? swept.minZ : Math.min(start.z, end.z) - radius);
+	            width = (int)Math.floor(swept != null ? swept.maxX : Math.max(start.x, end.x) + radius) - x + 1;
+	            height = (int)Math.floor(swept != null ? swept.maxY : crater ? start.y - 0.01 : Math.max(start.y, end.y) + radius) - y + 1;
+	            int length = (int)Math.floor(swept != null ? swept.maxZ : Math.max(start.z, end.z) + radius) - z + 1;
+	            volume = Math.max(0, width * height * length);
+	        }
+	        BlockPos next() {
+	            int index = cursor++;
+	            return new BlockPos(x + index % width, y + index / width % height, z + index / (width * height));
+	        }
+	        boolean includes(BlockPos pos) {
+	            if (swept != null) return true; // Native meteor logic scans the victim's expanded bounding box.
+	            Vec3 point = Vec3.atCenterOf(pos);
+	            if (crater) {
+	                double dx = point.x - start.x, dz = point.z - start.z;
+	                double below = Math.max(0, start.y - point.y);
+	                return point.y < start.y && dx * dx + dz * dz + below * below <= radius * radius;
+	            }
+	            Vec3 axis = end.subtract(start);
+	            double length = axis.lengthSqr();
+	            double t = length <= 0.0001 ? 0 : Math.max(0, Math.min(1, point.subtract(start).dot(axis) / length));
+	            double widening = 0.5 + Math.max(0, radius - 0.5) * t;
+	            return point.distanceToSqr(start.add(axis.scale(t))) <= widening * widening;
+	        }
+	    }
+
+	    @SubscribeEvent
+	    public static void work(net.neoforged.neoforge.event.tick.ServerTickEvent.Pre event) {
+	        Work work = WORK.get(event.getServer());
+	        if (work == null) return;
+	        if (!ENABLED) { for (var debris : work.debris) if (!net.mcreator.thebackwoods.BackwoodsImpactDebris.isRealTerrain(debris)) debris.discard(); WORK.remove(event.getServer()); return; }
+	        work.debris.removeIf(debris -> {
+	            if (debris.isRemoved()) return true;
+	            if (net.mcreator.thebackwoods.BackwoodsImpactDebris.isRealTerrain(debris)) return false;
+	            if (debris.level() instanceof ServerLevel level && level.getGameTime() >= debris.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L)) { debris.discard(); return true; }
+	            return false;
+	        });
+	        work.spawnedThisTick = 0;
+	        launches(work);
+	        int scans = Math.max(0, Math.min(4096, MAX_SCANS_PER_TICK));
+	        int changes = Math.max(0, Math.min(512, MAX_BLOCKS_PER_TICK));
+	        int limit = Math.max(0, Math.min(1024, MAX_BLOCKS_PER_IMPACT));
+	        while (scans > 0 && changes > 0 && !work.jobs.isEmpty()) {
+	            Impact job = work.jobs.remove();
+	            Entity owner = job.level.getEntity(job.owner);
+	            if (!(owner instanceof RotEntity rot) || !alive(rot)
+	                    || job.level.getGameTime() - job.created > (job.swept != null ? 3 : Math.max(1, Math.min(200, MAX_JOB_AGE_TICKS)))
+	                    || RESPECT_MOB_GRIEFING && !net.neoforged.neoforge.event.EventHooks.canEntityGrief(job.level, rot)) {
+	                work.finish(job); continue;
+	            }
+	            for (int slice = 0; slice < 16 && scans > 0 && changes > 0 && job.cursor < job.volume && job.strike.broken < limit; slice++) {
+	                scans--;
+	                BlockPos pos = job.next();
+	                if (!job.includes(pos) || pos.getY() < job.level.getMinY() || pos.getY() >= job.level.getMaxY()) continue;
+	                var chunk = job.level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
+	                if (chunk == null) continue;
+	                BlockState state = chunk.getBlockState(pos);
+	                if (state.isAir() || state.hasBlockEntity() || !state.getFluidState().isEmpty()) continue;
+	                float hardness = state.getDestroySpeed(job.level, pos);
+	                if (hardness < 0 && job.swept != null) job.strike.blocked = true;
+	                if (hardness < 0 || hardness > MAX_BLOCK_HARDNESS || !state.canEntityDestroy(job.level, pos, rot)
+	                        || !net.neoforged.neoforge.event.EventHooks.onEntityDestroyBlock(rot, pos, state)) continue;
+	                if (debris(work, job, pos, state) || job.level.destroyBlock(pos, DROP_BLOCKS, rot)) { job.strike.broken++; changes--; }
+	            }
+	            if (job.cursor >= job.volume || job.strike.broken >= limit) work.finish(job); else work.jobs.add(job);
+	        }
+	        if (work.jobs.isEmpty() && work.launches.isEmpty() && work.lifts.isEmpty() && work.debris.isEmpty()) WORK.remove(event.getServer());
+	    }
+
+	    @SubscribeEvent
+	    public static void stopped(net.neoforged.neoforge.event.server.ServerStoppedEvent event) { WORK.remove(event.getServer()); }
+	}
+
 }
+// 26.1.2
 // 26.1.2

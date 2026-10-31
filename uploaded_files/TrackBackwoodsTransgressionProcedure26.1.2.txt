@@ -2,12 +2,16 @@ package net.mcreator.thebackwoods.procedures;
 
 import net.neoforged.neoforge.event.level.BlockEvent;
 import net.neoforged.neoforge.event.level.block.BreakBlockEvent;
-
+import net.neoforged.neoforge.event.level.ExplosionEvent;
+import net.neoforged.neoforge.event.entity.player.PlayerInteractEvent;
+import net.neoforged.neoforge.event.entity.player.AttackEntityEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 import net.neoforged.neoforge.event.tick.PlayerTickEvent;
 import net.neoforged.neoforge.event.ServerChatEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.bus.api.SubscribeEvent;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.item.ItemStack;
 
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Block;
@@ -24,10 +28,24 @@ import net.minecraft.tags.BlockTags;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.core.registries.Registries;
+import java.util.Set;
+
 import net.mcreator.thebackwoods.entity.RotEntity;
 
 @EventBusSubscriber
 public class TrackBackwoodsTransgressionProcedure {
+
+	private static final Set<ResourceKey<Level>> TRANSGRESSION_DIMENSIONS = Set.of(
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:backwoods")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_crossworks")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_grain")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_sub_strata")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_petrified_weald")),
+		ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:rotting"))
+	);
 
 	public static boolean TEST_MODE = false; // set true to test quickly / set false for normal gameplay
 	public static double MASTER_TRIGGER_MULTIPLIER = 1.0; // lower to trigger faster / increase to require larger towns
@@ -136,6 +154,166 @@ public class TrackBackwoodsTransgressionProcedure {
 	}
 
 	@SubscribeEvent
+	public static void onExplosionDetonate(ExplosionEvent.Detonate event) {
+		if (event == null || !(event.getLevel() instanceof ServerLevel level)) return;
+		if (!isBackwoodsDimension(level)) return;
+
+		Entity indirect = event.getExplosion().getIndirectSourceEntity();
+		Entity direct = event.getExplosion().getDirectSourceEntity();
+		Player player = null;
+		if (indirect instanceof Player p) {
+			player = p;
+		} else if (direct instanceof Player p) {
+			player = p;
+		} else if (direct != null && direct.getPersistentData().contains("master_owner_uuid")) {
+			try {
+				String uuidStr = getOptionalString(direct.getPersistentData(), "master_owner_uuid", "");
+				if (!uuidStr.isEmpty()) {
+					player = level.getPlayerByUUID(java.util.UUID.fromString(uuidStr));
+				}
+			} catch (Exception ignored) {}
+		}
+
+		if (player == null) {
+			Vec3 center = event.getExplosion().center();
+			player = level.getNearestPlayer(center.x, center.y, center.z, 64.0, false);
+		}
+
+		if (player == null || player.isSpectator()) return;
+
+		CompoundTag tag = player.getPersistentData();
+		ensureDataVersion(tag, player);
+		long currentTime = level.getGameTime();
+		applyScoreDecay(tag, currentTime);
+
+		double blastScore = 0.0;
+		int blocksBroken = 0;
+
+		for (BlockPos pos : event.getAffectedBlocks()) {
+			BlockState state = level.getBlockState(pos);
+			if (state.isAir()) continue;
+
+			String blockPath = BuiltInRegistries.BLOCK.getKey(state.getBlock()).getPath().toLowerCase();
+			double pts = SCORE_DEFAULT_BREAK;
+			if (state.is(BlockTags.LEAVES) || state.is(BlockTags.FLOWERS) || state.is(BlockTags.CROPS)
+				|| blockPath.contains("grass") || blockPath.contains("fern") || blockPath.contains("vine")
+				|| blockPath.contains("bush") || blockPath.contains("root") || blockPath.contains("moss")) {
+				pts = SCORE_FOLIAGE_BREAK;
+			} else if (state.is(BlockTags.LOGS) || state.is(BlockTags.MINEABLE_WITH_PICKAXE) || state.is(BlockTags.PLANKS)) {
+				pts = SCORE_LOG_OR_PICKAXE_BREAK;
+			}
+			blastScore += pts;
+			blocksBroken++;
+		}
+
+		if (blocksBroken > 0) {
+			if (TEST_MODE) blastScore *= 15.0;
+			double curTrans = getDouble(tag, "backwoods_transgression_score", 0.0);
+			int totalBroken = getInt(tag, "backwoods_blocks_broken", 0);
+
+			tag.putDouble("backwoods_transgression_score", Math.max(0.0, Math.min(MAX_SCORE, curTrans + blastScore)));
+			tag.putInt("backwoods_blocks_broken", Math.min(MAX_COUNTER, totalBroken + blocksBroken));
+			tag.putLong("backwoods_last_activity_time", currentTime);
+		}
+	}
+
+	@SubscribeEvent
+	public static void onPlayerPunchOrAttack(AttackEntityEvent event) {
+		handleViltrumiteShockwave(event.getEntity());
+	}
+
+	@SubscribeEvent
+	public static void onPlayerLeftClickEmpty(PlayerInteractEvent.LeftClickEmpty event) {
+		handleViltrumiteShockwave(event.getEntity());
+	}
+
+	@SubscribeEvent
+	public static void onPlayerLeftClickBlock(PlayerInteractEvent.LeftClickBlock event) {
+		handleViltrumiteShockwave(event.getEntity());
+	}
+
+	private static void handleViltrumiteShockwave(Player player) {
+		if (player == null || player.isSpectator()) return;
+		if (!(player.level() instanceof ServerLevel level) || !isBackwoodsDimension(level)) return;
+		if (!isViltrumiteOrGodWandUser(player)) return;
+
+		long currentTime = level.getGameTime();
+		CompoundTag tag = player.getPersistentData();
+		long lastPunch = getLong(tag, "backwoods_last_viltrumite_shockwave_tick", 0L);
+		if (currentTime - lastPunch < 4L) return; // Debounce rapid click packets
+		tag.putLong("backwoods_last_viltrumite_shockwave_tick", currentTime);
+
+		ensureDataVersion(tag, player);
+		applyScoreDecay(tag, currentTime);
+
+		Vec3 eyePos = player.getEyePosition();
+		Vec3 look = player.getLookAngle();
+		int shatteredBlocks = 0;
+		double punchScore = 0.0;
+
+		// Conical shockwave ray projection (up to 7 blocks forward, cone radius up to 2.5 blocks)
+		for (double dist = 1.0; dist <= 7.0; dist += 1.0) {
+			Vec3 center = eyePos.add(look.scale(dist));
+			double radius = Math.min(2.5, 0.8 + dist * 0.25);
+			int minX = (int) Math.floor(center.x - radius);
+			int maxX = (int) Math.floor(center.x + radius);
+			int minY = (int) Math.floor(center.y - radius);
+			int maxY = (int) Math.floor(center.y + radius);
+			int minZ = (int) Math.floor(center.z - radius);
+			int maxZ = (int) Math.floor(center.z + radius);
+
+			for (int bx = minX; bx <= maxX; bx++) {
+				for (int by = minY; by <= maxY; by++) {
+					for (int bz = minZ; bz <= maxZ; bz++) {
+						BlockPos bPos = new BlockPos(bx, by, bz);
+						if (center.distanceToSqr(bPos.getX() + 0.5, bPos.getY() + 0.5, bPos.getZ() + 0.5) > radius * radius) continue;
+
+						BlockState bState = level.getBlockState(bPos);
+						if (!bState.isAir()) {
+							double pts = SCORE_DEFAULT_BREAK;
+							if (bState.is(BlockTags.LOGS) || bState.is(BlockTags.MINEABLE_WITH_PICKAXE) || bState.is(BlockTags.PLANKS)) {
+								pts = SCORE_LOG_OR_PICKAXE_BREAK;
+							} else if (bState.is(BlockTags.LEAVES) || bState.is(BlockTags.FLOWERS)) {
+								pts = SCORE_FOLIAGE_BREAK;
+							}
+							punchScore += pts;
+							shatteredBlocks++;
+						}
+					}
+				}
+			}
+		}
+
+		if (shatteredBlocks > 0) {
+			if (TEST_MODE) punchScore *= 15.0;
+			double curTrans = getDouble(tag, "backwoods_transgression_score", 0.0);
+			int totalBroken = getInt(tag, "backwoods_blocks_broken", 0);
+
+			tag.putDouble("backwoods_transgression_score", Math.max(0.0, Math.min(MAX_SCORE, curTrans + punchScore)));
+			tag.putInt("backwoods_blocks_broken", Math.min(MAX_COUNTER, totalBroken + shatteredBlocks));
+			tag.putLong("backwoods_last_activity_time", currentTime);
+		}
+	}
+
+	private static boolean isViltrumiteOrGodWandUser(Player player) {
+		if (player == null) return false;
+		CompoundTag tag = player.getPersistentData();
+		for (String key : tag.keySet()) {
+			String lower = key.toLowerCase();
+			if (lower.contains("viltrumite") || lower.contains("godwand") || lower.contains("god_wand")) return true;
+		}
+		for (int slot = 0; slot < player.getInventory().getContainerSize(); slot++) {
+			ItemStack stack = player.getInventory().getItem(slot);
+			if (!stack.isEmpty()) {
+				String itemId = BuiltInRegistries.ITEM.getKey(stack.getItem()).toString().toLowerCase();
+				if (itemId.contains("viltrumite") || itemId.contains("infinity_gun") || itemId.contains("scourge")
+					|| itemId.contains("god_wand") || itemId.contains("godwand")) return true;
+			}
+		}
+		return false;
+	}
+
+	@SubscribeEvent
 	public static void onBlockPlace(BlockEvent.EntityPlaceEvent event) {
 		if (event == null || !(event.getLevel() instanceof ServerLevel level)) return;
 		if (!isBackwoodsDimension(level)) return;
@@ -218,6 +396,21 @@ public class TrackBackwoodsTransgressionProcedure {
 		if (player == null || player.isSpectator()) return;
 		if (!(player.level() instanceof ServerLevel level)) return;
 
+		if (isBackwoodsDimension(level) && player.getDeltaMovement().lengthSqr() > 1.8 && isViltrumiteOrGodWandUser(player)) {
+			CompoundTag pTag = player.getPersistentData();
+			long now = level.getGameTime();
+			long lastFlightImpact = getLong(pTag, "backwoods_last_flight_shock_tick", 0L);
+			if (now - lastFlightImpact >= 10L) {
+				pTag.putLong("backwoods_last_flight_shock_tick", now);
+				double curT = getDouble(pTag, "backwoods_transgression_score", 0.0);
+				int bBroken = getInt(pTag, "backwoods_blocks_broken", 0);
+				double impactScore = TEST_MODE ? 30.0 : 4.0;
+				pTag.putDouble("backwoods_transgression_score", Math.max(0.0, Math.min(MAX_SCORE, curT + impactScore)));
+				pTag.putInt("backwoods_blocks_broken", Math.min(MAX_COUNTER, bBroken + 3));
+				pTag.putLong("backwoods_last_activity_time", now);
+			}
+		}
+
 		// Throttled to run every 3 seconds (60 ticks) per player for performance
 		if (level.getGameTime() % 60 != 0) return;
 
@@ -237,7 +430,9 @@ public class TrackBackwoodsTransgressionProcedure {
 		long lastExitTime = getLong(tag, "backwoods_dim_exit_time", 0L);
 
 		if (!dimId.equals(lastDimId)) {
-			if (lastDimId.contains("backwood") && !dimId.contains("backwood")) {
+			boolean wasTransgressionDim = isTransgressionDimensionId(lastDimId);
+			boolean isTransgressionDim = isBackwoodsDimension(level);
+			if (wasTransgressionDim && !isTransgressionDim) {
 				tag.putLong("backwoods_dim_exit_time", level.getGameTime());
 				lastExitTime = level.getGameTime();
 			}
@@ -249,7 +444,7 @@ public class TrackBackwoodsTransgressionProcedure {
 			return;
 		}
 
-		if (!dimId.contains("the_backwoods") && !dimId.contains("backwood")) {
+		if (!isBackwoodsDimension(level)) {
 			VerdantEngineNaturalEntitySpawningConditionProcedure.execute(level, player.getX(), player.getY(), player.getZ());
 		}
 	}
@@ -599,10 +794,33 @@ public class TrackBackwoodsTransgressionProcedure {
 		return null;
 	}
 
-	private static boolean isBackwoodsDimension(ServerLevel level) {
+	public static boolean isBackwoodsDimension(ServerLevel level) {
 		if (level == null) return false;
-		String dimId = level.dimension().identifier().toString().toLowerCase();
-		return dimId.contains("the_backwoods") || dimId.contains("backwood");
+		return isBackwoodsDimension(level.dimension());
+	}
+
+	public static boolean isBackwoodsDimension(ResourceKey<Level> dim) {
+		if (dim == null) return false;
+		if (TRANSGRESSION_DIMENSIONS.contains(dim)) return true;
+		String id = dim.identifier().toString().toLowerCase();
+		String path = dim.identifier().getPath().toLowerCase();
+		return id.equals("the_backwoods:backwoods") || path.equals("backwoods")
+			|| id.equals("the_backwoods:the_crossworks") || path.equals("the_crossworks") || path.equals("crossworks")
+			|| id.equals("the_backwoods:the_grain") || path.equals("the_grain") || path.equals("grain")
+			|| id.equals("the_backwoods:the_sub_strata") || path.equals("the_sub_strata") || path.equals("sub_strata")
+			|| id.equals("the_backwoods:the_petrified_weald") || path.equals("the_petrified_weald") || path.equals("petrified_weald")
+			|| id.equals("the_backwoods:rotting") || path.equals("rotting");
+	}
+
+	public static boolean isTransgressionDimensionId(String dimId) {
+		if (dimId == null || dimId.isEmpty()) return false;
+		String lower = dimId.toLowerCase();
+		return lower.equals("the_backwoods:backwoods") || lower.contains("backwoods")
+			|| lower.equals("the_backwoods:the_crossworks") || lower.contains("crossworks")
+			|| lower.equals("the_backwoods:the_grain") || lower.contains("grain")
+			|| lower.equals("the_backwoods:the_sub_strata") || lower.contains("sub_strata")
+			|| lower.equals("the_backwoods:the_petrified_weald") || lower.contains("petrified_weald")
+			|| lower.equals("the_backwoods:rotting") || lower.contains("rotting");
 	}
 
 	private static boolean isRotEntity(Entity entity) {
