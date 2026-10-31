@@ -1,7 +1,13 @@
 /**
  * ============================================================================
- * STRICT RULE / CONSTANT REMINDER:
- * Always fully import so the updated frame logic is always there.
+ * STRICT ARCHITECTURAL RULES (FOR FUTURE AI AGENTS & DEVELOPERS):
+ * 1. ALWAYS PRESERVE THIS ENTIRE COMPONENT. NEVER replace with minimal templates.
+ * 2. UPDATED INDICATOR LOGIC:
+ *    - The indicator (amber border, glow, UPDATED badge) reflects files changed in
+ *      the latest git commit or live filesystem changes.
+ *    - Selecting or viewing a file MUST NOT clear the updated indicator.
+ *    - The indicator will ONLY disappear through the "Mark as Read" button or when
+ *      the file content is copied to clipboard.
  * ============================================================================
  */
 

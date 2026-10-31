@@ -991,7 +991,8 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						if ("incinerate".equals(hypnoMode) && target != null && target.isAlive()) {
 							float dmg = 80.0F;
 							float beforeHealth = target.getHealth() + target.getAbsorptionAmount();
-							target.hurt(mob.damageSources().magic(), dmg);
+							String chosenDmgType = mob.getRandom().nextBoolean() ? "woodweaver_incinerate" : "woodweaver_incinerate_2";
+							target.hurt(getWoodweaverDamageSource(world, mob, chosenDmgType), dmg);
 							recordHypnoProgress(mData, (beforeHealth - target.getHealth() - target.getAbsorptionAmount()) / 20.0);
 							target.setRemainingFireTicks(200);
 							if (mob.level() instanceof ServerLevel sl) {
@@ -1001,7 +1002,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						} else if ("vaporize".equals(hypnoMode) && target != null && target.isAlive()) {
 							float dmg = 50.0F;
 							float beforeHealth = target.getHealth() + target.getAbsorptionAmount();
-							target.hurt(mob.damageSources().magic(), dmg);
+							target.hurt(getWoodweaverDamageSource(world, mob, "woodweaver_disintegrate"), dmg);
 							recordHypnoProgress(mData, (beforeHealth - target.getHealth() - target.getAbsorptionAmount()) / 20.0);
 							target.setRemainingFireTicks(200);
 							if (mob.level() instanceof ServerLevel sl) {
@@ -1831,7 +1832,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				mData.remove("leap_peak_y");
 
 				for (LivingEntity victim : nearby) {
-					victim.hurt(getDamageSource(world, mob), finalLandingDamage);
+					victim.hurt(getWoodweaverDamageSource(world, mob, "woodweaver_leap_crush"), finalLandingDamage);
 					Vec3 pushVec = victim.position().subtract(mob.position());
 					double hDist = Math.sqrt(pushVec.x * pushVec.x + pushVec.z * pushVec.z);
 					if (hDist > 0.01) {
@@ -2108,13 +2109,20 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				}
 				mob.setOnGround(true);
 			} else if (!isFreeFalling) {
-				// Surface Target Mode: Step up slopes up to 4.0 blocks or stick to downward slopes
+				// Surface Target Mode: Ram straight through steep upward slopes to prevent IK stretching/spiking,
+				// or step up gentle slopes (<= 1.25 blocks), and smoothly hug downward slopes.
 				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 3.0, probeZ);
 				if (groundPos != null) {
 					double groundY = groundPos.getY();
 					double heightDiff = groundY - mob.getY();
-					if (heightDiff > 0.1 && heightDiff <= 4.0) {
-						yVel = Math.min(0.85, 0.25 + heightDiff * 0.28); // Smoothly ride up slope
+					if (heightDiff > 1.25) {
+						// Steep upward incline/cliff: Kool-Aid Man ramming mode.
+						// Maintain forward level boring motion; do not heave upward or warp pitch.
+						yVel = 0.0;
+						mob.setOnGround(true);
+					} else if (heightDiff > 0.1) {
+						// Gentle step (<= 1.25 blocks): smooth ride up
+						yVel = Math.min(0.50, 0.20 + heightDiff * 0.24);
 						mob.setOnGround(true);
 					} else if (heightDiff < -0.1) {
 						yVel = Math.max(-0.65, yVel - 0.10); // Stick to downward slope
@@ -2128,9 +2136,12 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				}
 			}
 
-			// Dynamic body pitch matching slope or penetration angle
-			float dashPitch = (float) -Math.toDegrees(Math.atan2(yVel, Math.max(0.1, currentSpeed)));
-			dashPitch = net.minecraft.util.Mth.clamp(dashPitch, -45.0F, 45.0F);
+			// Dynamic body pitch matching gentle slope or penetration angle (stabilized to prevent IK freakout)
+			float dashPitch = 0.0F;
+			if (Math.abs(yVel) > 0.1) {
+				dashPitch = (float) -Math.toDegrees(Math.atan2(yVel, Math.max(0.1, currentSpeed)));
+				dashPitch = net.minecraft.util.Mth.clamp(dashPitch, -20.0F, 20.0F);
+			}
 			mob.setXRot(dashPitch);
 			mob.xRotO = dashPitch;
 
@@ -2700,7 +2711,18 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					}
 
 					if (isHit) {
-						targetEntity.hurt(getDamageSource(world, mob), (float) (3 * mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE)));
+						String meleeDmgType = "woodweaver_left_claw";
+						switch (attackType) {
+							case 1: meleeDmgType = "woodweaver_left_claw"; break;
+							case 2: meleeDmgType = "woodweaver_right_claw"; break;
+							case 3: meleeDmgType = "woodweaver_both_claw"; break;
+							case 4: meleeDmgType = "woodweaver_left_claw_hook"; break;
+							case 5: meleeDmgType = "woodweaver_right_claw_hook"; break;
+							case 6: meleeDmgType = "woodweaver_left_claw_sweep"; break;
+							case 7: meleeDmgType = "woodweaver_right_claw_sweep"; break;
+							default: meleeDmgType = "woodweaver_left_claw"; break;
+						}
+						targetEntity.hurt(getWoodweaverDamageSource(world, mob, meleeDmgType), (float) (3 * mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.ATTACK_DAMAGE)));
 
 						// MELEE ATTACKS VS SHIELDS: Disable shields and force randomized 2-7s (40-140 ticks) cooldown if target is blocking
 						if (targetEntity instanceof Player blockingPlayer && blockingPlayer.isBlocking()) {
@@ -5326,6 +5348,26 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	}
 
 	private static DamageSource getDamageSource(LevelAccessor world, Mob mob) {
+		return mob.damageSources().mobAttack(mob);
+	}
+
+	private static DamageSource getWoodweaverDamageSource(LevelAccessor world, Mob mob, String damageTypeName) {
+		if (world instanceof ServerLevel sl) {
+			try {
+				ResourceKey<DamageType> key = ResourceKey.create(
+					Registries.DAMAGE_TYPE,
+					ResourceLocation.fromNamespaceAndPath("the_backwoods", damageTypeName)
+				);
+				var reg = sl.registryAccess().registry(Registries.DAMAGE_TYPE);
+				if (reg.isPresent()) {
+					var holder = reg.get().getHolder(key);
+					if (holder.isPresent()) {
+						return new DamageSource(holder.get(), mob);
+					}
+				}
+			} catch (Throwable ignored) {
+			}
+		}
 		return mob.damageSources().mobAttack(mob);
 	}
 

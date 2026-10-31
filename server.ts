@@ -9,12 +9,18 @@
  *    If jszip is missing, Vite throws a client-side bundle import error and halts rendering.
  * 3. COMPONENT INTEGRITY: App.tsx must NEVER be overwritten with placeholder templates like "export default function App() { return <div></div>; }".
  *    Always preserve the complete 21KB dashboard component.
- * 4. CONSTANT REMINDER: Always fully import so the updated frame logic is always there.
+ * 4. UPDATED INDICATOR SYSTEM (CRITICAL ARCHITECTURAL RULE):
+ *    - On initial clone or reload, all files get identical filesystem mtimes.
+ *    - /api/files MUST query `git log -n 1 --name-only --format=%ct HEAD uploaded_files/` to flag files changed in the latest commit as `isEdited: true`.
+ *    - Updated files display an amber border, glow, and UPDATED badge.
+ *    - Clicking, selecting, or viewing a file must NEVER clear the indicator.
+ *    - The indicator clears ONLY when clicking "Mark as Read" or copying the file content.
  */
 
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -161,6 +167,20 @@ app.get('/api/files', (req, res) => {
       fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     }
 
+    // Determine files updated in the latest commit to reliably flag updated files
+    let recentCommitFiles = new Set<string>();
+    try {
+      const gitOut = execSync('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', { cwd: __dirname })
+        .toString()
+        .split('\n');
+      gitOut.slice(1).forEach((p) => {
+        const cleaned = p.replace('uploaded_files/', '').trim();
+        if (cleaned) recentCommitFiles.add(cleaned);
+      });
+    } catch {
+      // Fallback if git is unavailable
+    }
+
     const files = fs.readdirSync(UPLOAD_DIR);
     const result = files
       .filter(f => !f.startsWith('.'))
@@ -172,6 +192,7 @@ app.get('/api/files', (req, res) => {
         const contentSample = stats.isFile() ? readFirstBytes(filePath, 4096) : '';
         const { version, source } = detectVersion(filename, contentSample);
         const ext = path.extname(filename).toLowerCase().replace('.', '') || 'file';
+        const isRecentlyCommitted = recentCommitFiles.has(filename);
 
         return {
           name: filename,
@@ -181,10 +202,15 @@ app.get('/api/files', (req, res) => {
           version,
           versionSource: source,
           extension: ext,
-          isText: true
+          isText: true,
+          isEdited: isRecentlyCommitted
         };
       })
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      .sort((a, b) => {
+        if (a.isEdited && !b.isEdited) return -1;
+        if (!a.isEdited && b.isEdited) return 1;
+        return b.updatedAt.localeCompare(a.updatedAt);
+      });
 
     res.json({ success: true, count: result.length, files: result });
   } catch (error: any) {
