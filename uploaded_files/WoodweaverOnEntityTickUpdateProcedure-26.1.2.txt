@@ -100,17 +100,33 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			mob.xRotO = dPitch;
 			return;
 		}
-		NavigationTurnState state = NAVIGATION_TURNS.get(mob);
-		if (state == null) return;
-		if (state.requestedTick != mob.tickCount || !mob.isAlive()) {
+		NavigationTurnState state = NAVIGATION_TURNS.computeIfAbsent(mob,
+			m -> new NavigationTurnState(m.yBodyRotO, m.yHeadRotO));
+		if (!mob.isAlive()) {
 			NAVIGATION_TURNS.remove(mob);
 			return;
 		}
 		if (state.appliedTick == mob.tickCount) return;
 		state.appliedTick = mob.tickCount;
+
+		// Idle & Strolling Smoothing: If no explicit combat turn requested this tick,
+		// smoothly govern body alignment to keep head within a natural 55-degree look cone.
+		if (state.requestedTick != mob.tickCount) {
+			float headDelta = net.minecraft.util.Mth.wrapDegrees(mob.getYHeadRot() - state.heading);
+			float targetYaw;
+			if (Math.abs(headDelta) > 55.0F) {
+				targetYaw = mob.getYHeadRot() - Math.signum(headDelta) * 45.0F;
+			} else if (mob.getDeltaMovement().horizontalDistanceSqr() > 0.0025) {
+				targetYaw = mob.getYRot();
+			} else {
+				targetYaw = state.heading;
+			}
+			state.requestedYaw = targetYaw;
+		}
+
 		float previous = state.heading, previousHead = state.headHeading;
 		float yaw = state.advanceYaw(state.requestedYaw);
-		state.headHeading = net.minecraft.util.Mth.approachDegrees(previousHead, state.requestedYaw, NAVIGATION_HEAD_TURN_SPEED);
+		state.headHeading = net.minecraft.util.Mth.approachDegrees(previousHead, state.requestedTick == mob.tickCount ? state.requestedYaw : mob.getYHeadRot(), NAVIGATION_HEAD_TURN_SPEED);
 		mob.yRotO = previous;
 		mob.yBodyRotO = previous;
 		mob.yHeadRotO = previousHead;
@@ -1983,8 +1999,11 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				mData.putDouble("dash_start_x", mob.getX());
 				mData.putDouble("dash_start_y", mob.getY());
 				mData.putDouble("dash_start_z", mob.getZ());
-				mData.putDouble("dash_total_dist", 50.0); // Dash far to ensure breakthrough
+				mData.putDouble("dash_total_dist", 50.0);
 				mData.putBoolean("dash_is_override", false);
+				boolean ambushUnderground = isTargetUnderground(mob.level(), mob.getTarget());
+				mData.putBoolean("dash_target_underground", ambushUnderground);
+				mData.putDouble("dash_locked_y", ambushUnderground && mob.getTarget() != null ? mob.getTarget().getY() : mob.getY());
 
 				mob.level().playSound(null, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.RAVAGER_ROAR, SoundSource.HOSTILE, 2.5F, 0.60F);
 				mob.level().playSound(null, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.WARDEN_ROAR, SoundSource.HOSTILE, 2.0F, 0.65F);
@@ -2074,17 +2093,31 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			}
 			mData.putBoolean("dash_free_fall", isFreeFalling);
 
+			boolean isUndergroundDash = persistentBoolean(mData, "dash_target_underground", false);
+			double lockedDashY = persistentDouble(mData, "dash_locked_y", targetY);
 			double yVel = mob.getDeltaMovement().y;
-			if (!isFreeFalling) {
-				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 1.0, probeZ);
+
+			if (isUndergroundDash) {
+				// Bunker-Buster Mode: Player is confirmed underground beneath the hill/bunker.
+				// Do NOT climb the surface slope; lock Y level and bore straight through terrain.
+				double yDiff = lockedDashY - mob.getY();
+				if (Math.abs(yDiff) > 0.4) {
+					yVel = net.minecraft.util.Mth.clamp(yDiff * 0.30, -0.45, 0.45);
+				} else {
+					yVel = 0.0;
+				}
+				mob.setOnGround(true);
+			} else if (!isFreeFalling) {
+				// Surface Target Mode: Step up slopes up to 4.0 blocks or stick to downward slopes
+				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 3.0, probeZ);
 				if (groundPos != null) {
 					double groundY = groundPos.getY();
 					double heightDiff = groundY - mob.getY();
-					if (heightDiff > 0.1 && heightDiff <= 1.5) {
-						yVel = 0.25 + heightDiff * 0.15; // Smoothly scale step-up
+					if (heightDiff > 0.1 && heightDiff <= 4.0) {
+						yVel = Math.min(0.85, 0.25 + heightDiff * 0.28); // Smoothly ride up slope
 						mob.setOnGround(true);
 					} else if (heightDiff < -0.1) {
-						yVel = Math.max(-0.6, yVel - 0.08); // Stick to downward slope
+						yVel = Math.max(-0.65, yVel - 0.10); // Stick to downward slope
 					}
 				}
 			} else {
@@ -2094,6 +2127,12 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					yVel -= 0.08;
 				}
 			}
+
+			// Dynamic body pitch matching slope or penetration angle
+			float dashPitch = (float) -Math.toDegrees(Math.atan2(yVel, Math.max(0.1, currentSpeed)));
+			dashPitch = net.minecraft.util.Mth.clamp(dashPitch, -45.0F, 45.0F);
+			mob.setXRot(dashPitch);
+			mob.xRotO = dashPitch;
 
 			mob.setDeltaMovement(dirX * currentSpeed, yVel, dirZ * currentSpeed);
 			mob.needsSync = true;
@@ -3506,7 +3545,17 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				mData.putDouble("dash_target_x", savedTargetX);
 				mData.putDouble("dash_target_y", savedTargetY);
 				mData.putDouble("dash_target_z", savedTargetZ);
-				mData.putDouble("dash_total_dist", distToTarget + 4.0); // Dash through and past saved target position
+				mData.putDouble("dash_total_dist", distToTarget + 4.0);
+				boolean isUnderground = isTargetUnderground(world, target);
+				mData.putBoolean("dash_target_underground", isUnderground);
+				double lockedDashY = isUnderground ? savedTargetY : mob.getY();
+				mData.putDouble("dash_locked_y", lockedDashY);
+				if (isUnderground && mob.getY() > savedTargetY + 1.5) {
+					BlockPos targetLevelPos = findGroundPos(world, mob.getX(), savedTargetY + 1.0, mob.getZ());
+					if (targetLevelPos != null && Math.abs(targetLevelPos.getY() - savedTargetY) <= 2.0) {
+						mob.setPos(mob.getX(), targetLevelPos.getY(), mob.getZ());
+					}
+				}
 
 				if (targetGettingAwayQuickly) {
 					mData.putBoolean("dash_is_override", true);
@@ -5209,6 +5258,21 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		}
 
 		return WoodweaverSurfaceNavigation.validLeap(mob, new Vec3(landPos.getX() + 0.5, (landPos.getY() + 1.01), landPos.getZ() + 0.5));
+	}
+
+	private static boolean isTargetUnderground(LevelAccessor world, LivingEntity target) {
+		if (target == null) return false;
+		BlockPos targetPos = target.blockPosition();
+		if (!world.canSeeSky(targetPos)) {
+			for (int dy = 1; dy <= 12; dy++) {
+				BlockPos abovePos = targetPos.above(dy);
+				if (!world.getBlockState(abovePos).isAir()) {
+					return true;
+				}
+			}
+		}
+		BlockPos surfaceGround = findGroundPos(world, target.getX(), target.getY() + 15.0, target.getZ());
+		return surfaceGround != null && target.getY() < (surfaceGround.getY() - 2.5);
 	}
 
 	private static BlockPos findGroundPos(LevelAccessor world, double x, double y, double z) {

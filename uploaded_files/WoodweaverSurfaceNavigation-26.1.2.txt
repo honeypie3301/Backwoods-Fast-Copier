@@ -44,7 +44,7 @@ public final class WoodweaverSurfaceNavigation {
     public static final int NODES_PER_ENTITY_TICK = 48, MAX_SEARCH_NODES = 1024, REPLAN_TICKS = 5;
     public static final int GLOBAL_NODE_BUDGET = 144, GLOBAL_BLOCK_BUDGET = 20000, GLOBAL_BREAK_BUDGET = 12;
     public static final int BREAKS_PER_ENTITY_TICK = 3;
-    public static final float ROTATION_DEGREES_PER_TICK = 18.0f;
+    public static final float ROTATION_DEGREES_PER_TICK = 7.5f;
     private static final Vec3 UP = new Vec3(0, 1, 0);
     private static final Map<Mob, Controller> STATES = new WeakHashMap<>();
     private static int budgetTick = Integer.MIN_VALUE, nodesLeft, blocksLeft, breaksLeft;

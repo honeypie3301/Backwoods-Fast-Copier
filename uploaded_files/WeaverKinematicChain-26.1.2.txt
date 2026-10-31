@@ -314,7 +314,7 @@ public class WeaverKinematicChain {
                 gait.renderedRootRotation.set(blendA);
             } else {
                 double elapsed = Math.max(0, time - gait.renderedRootAt);
-                float response = (float) (1 - Math.exp(-elapsed / 0.9));
+                float response = (float) (1 - Math.exp(-elapsed / 0.75));
                 gait.renderedRoot = gait.renderedRoot.lerp(rootTarget, response);
                 gait.renderedRootRotation.slerp(blendA, response).normalize();
             }

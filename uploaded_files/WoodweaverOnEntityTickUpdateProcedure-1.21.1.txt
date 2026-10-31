@@ -100,17 +100,33 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			mob.xRotO = dPitch;
 			return;
 		}
-		NavigationTurnState state = NAVIGATION_TURNS.get(mob);
-		if (state == null) return;
-		if (state.requestedTick != mob.tickCount || !mob.isAlive()) {
+		NavigationTurnState state = NAVIGATION_TURNS.computeIfAbsent(mob,
+			m -> new NavigationTurnState(m.yBodyRotO, m.yHeadRotO));
+		if (!mob.isAlive()) {
 			NAVIGATION_TURNS.remove(mob);
 			return;
 		}
 		if (state.appliedTick == mob.tickCount) return;
 		state.appliedTick = mob.tickCount;
+
+		// Idle & Strolling Smoothing: If no explicit combat turn requested this tick,
+		// smoothly govern body alignment to keep head within a natural 55-degree look cone.
+		if (state.requestedTick != mob.tickCount) {
+			float headDelta = net.minecraft.util.Mth.wrapDegrees(mob.getYHeadRot() - state.heading);
+			float targetYaw;
+			if (Math.abs(headDelta) > 55.0F) {
+				targetYaw = mob.getYHeadRot() - Math.signum(headDelta) * 45.0F;
+			} else if (mob.getDeltaMovement().horizontalDistanceSqr() > 0.0025) {
+				targetYaw = mob.getYRot();
+			} else {
+				targetYaw = state.heading;
+			}
+			state.requestedYaw = targetYaw;
+		}
+
 		float previous = state.heading, previousHead = state.headHeading;
 		float yaw = state.advanceYaw(state.requestedYaw);
-		state.headHeading = net.minecraft.util.Mth.approachDegrees(previousHead, state.requestedYaw, NAVIGATION_HEAD_TURN_SPEED);
+		state.headHeading = net.minecraft.util.Mth.approachDegrees(previousHead, state.requestedTick == mob.tickCount ? state.requestedYaw : mob.getYHeadRot(), NAVIGATION_HEAD_TURN_SPEED);
 		mob.yRotO = previous;
 		mob.yBodyRotO = previous;
 		mob.yHeadRotO = previousHead;
@@ -634,10 +650,10 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		processLightExtinctionPulseTick(mob, mData);
 
 		// Cognitive decision-making: decay success/failure biases slightly over time (0.5% per tick towards 0.0)
-		if (mData.contains("ai_bias_infect")) mData.putDouble("ai_bias_infect", mData.getDouble("ai_bias_infect") * 0.995);
-		if (mData.contains("ai_bias_leech")) mData.putDouble("ai_bias_leech", mData.getDouble("ai_bias_leech") * 0.995);
-		if (mData.contains("ai_bias_incinerate")) mData.putDouble("ai_bias_incinerate", mData.getDouble("ai_bias_incinerate") * 0.995);
-		if (mData.contains("ai_bias_vaporize")) mData.putDouble("ai_bias_vaporize", mData.getDouble("ai_bias_vaporize") * 0.995);
+		if (mData.contains("ai_bias_infect")) mData.putDouble("ai_bias_infect", persistentDouble(mData, "ai_bias_infect", 0.0) * 0.995);
+		if (mData.contains("ai_bias_leech")) mData.putDouble("ai_bias_leech", persistentDouble(mData, "ai_bias_leech", 0.0) * 0.995);
+		if (mData.contains("ai_bias_incinerate")) mData.putDouble("ai_bias_incinerate", persistentDouble(mData, "ai_bias_incinerate", 0.0) * 0.995);
+		if (mData.contains("ai_bias_vaporize")) mData.putDouble("ai_bias_vaporize", persistentDouble(mData, "ai_bias_vaporize", 0.0) * 0.995);
 
 		// Track damage taken by Weaver for Leech mode condition
 		float currentHp = mob.getHealth();
@@ -748,7 +764,6 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			} else {
 				mData.putInt("hypno_los_lost_ticks", 0);
 			}
-
 			boolean losGraceExpired = (losLostTicks >= 10); // ~0.5 sec spotlight grace period before canceling hypnosis
 
 			// Phase 1 (Opening/Charging): Damage taken does NOT interrupt, and LOS loss does NOT cut off charging animation.
@@ -1132,9 +1147,9 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					mob.xRotO = targetPitch;
 					mob.getLookControl().setLookAt(flashTargetEye.x, flashTargetEye.y, flashTargetEye.z, 30.0F, 30.0F);
 				} else if (mData.contains("flash_last_target_x")) {
-					double lastX = mData.getDouble("flash_last_target_x");
-					double lastY = mData.getDouble("flash_last_target_y");
-					double lastZ = mData.getDouble("flash_last_target_z");
+					double lastX = persistentDouble(mData, "flash_last_target_x", mob.getX());
+					double lastY = persistentDouble(mData, "flash_last_target_y", mob.getEyeY());
+					double lastZ = persistentDouble(mData, "flash_last_target_z", mob.getZ());
 					float savedYaw = persistentFloat(mData, "flash_saved_yaw", persistentFloat(mData, "weaver_hypnosis_yaw", mob.getYRot()));
 					float savedPitch = persistentFloat(mData, "flash_saved_pitch", mob.getXRot());
 
@@ -1187,6 +1202,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					mob.level().playSound(null, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.RESPAWN_ANCHOR_DEPLETE, SoundSource.HOSTILE, 8.0F, 0.80F);
 				}
 
+				// Calculate Exact Beam Origin (Head Orb) matching BeamRendererWeaver.txt (height 4.20, forward 1.90)
 				Vec3 look = mob.getLookAngle();
 				Vec3 orbPos = new Vec3(
 					mob.getX() + look.x * 1.9,
@@ -1233,9 +1249,9 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					mob.xRotO = targetPitch;
 					mob.getLookControl().setLookAt(flashTargetEye.x, flashTargetEye.y, flashTargetEye.z, 30.0F, 30.0F);
 				} else if (mData.contains("flash_last_target_x")) {
-					double lastX = mData.getDouble("flash_last_target_x");
-					double lastY = mData.getDouble("flash_last_target_y");
-					double lastZ = mData.getDouble("flash_last_target_z");
+					double lastX = persistentDouble(mData, "flash_last_target_x", mob.getX());
+					double lastY = persistentDouble(mData, "flash_last_target_y", mob.getEyeY());
+					double lastZ = persistentDouble(mData, "flash_last_target_z", mob.getZ());
 					Vec3 lastTargetPos = new Vec3(lastX, lastY, lastZ);
 
 					Vec3 rawBeamDir = lastTargetPos.subtract(orbPos);
@@ -1444,7 +1460,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			mob.setTarget(null);
 
 			hypnoCooldown = persistentInt(mData, "hypno_cooldown", 0);
-			boolean isMiningOrAttackActive = mData.getBoolean("is_block_attack") || mData.getBoolean("is_attacking");
+			boolean isMiningOrAttackActive = persistentBoolean(mData, "is_block_attack", false) || persistentBoolean(mData, "is_attacking", false);
 			boolean isGrounded = mob.onGround();
 			double minGazeDist = 4.0;
 
@@ -1886,7 +1902,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				}
 
 				hypnoCooldown = persistentInt(mData, "hypno_cooldown", 0);
-				boolean isMiningOrAttackActive = mData.getBoolean("is_block_attack") || mData.getBoolean("is_attacking");
+				boolean isMiningOrAttackActive = persistentBoolean(mData, "is_block_attack", false) || persistentBoolean(mData, "is_attacking", false);
 
 				if (hypnoCooldown <= 0 && landTarget instanceof Player playerTarget && !isMiningOrAttackActive) {
 					double distToTarget = mob.distanceTo(playerTarget);
@@ -1983,8 +1999,11 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				mData.putDouble("dash_start_x", mob.getX());
 				mData.putDouble("dash_start_y", mob.getY());
 				mData.putDouble("dash_start_z", mob.getZ());
-				mData.putDouble("dash_total_dist", 50.0); // Dash far to ensure breakthrough
+				mData.putDouble("dash_total_dist", 50.0);
 				mData.putBoolean("dash_is_override", false);
+				boolean ambushUnderground = isTargetUnderground(mob.level(), mob.getTarget());
+				mData.putBoolean("dash_target_underground", ambushUnderground);
+				mData.putDouble("dash_locked_y", ambushUnderground && mob.getTarget() != null ? mob.getTarget().getY() : mob.getY());
 
 				mob.level().playSound(null, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.RAVAGER_ROAR, SoundSource.HOSTILE, 2.5F, 0.60F);
 				mob.level().playSound(null, mob.getX(), mob.getY(), mob.getZ(), SoundEvents.WARDEN_ROAR, SoundSource.HOSTILE, 2.0F, 0.65F);
@@ -2063,7 +2082,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				}
 			}
 
-			boolean wasFreeFalling = mData.contains("dash_free_fall") && mData.getBoolean("dash_free_fall");
+			boolean wasFreeFalling = persistentBoolean(mData, "dash_free_fall", false);
 			boolean isFreeFalling = wasFreeFalling;
 
 			if (hasSharpDropAhead) {
@@ -2074,17 +2093,31 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			}
 			mData.putBoolean("dash_free_fall", isFreeFalling);
 
+			boolean isUndergroundDash = persistentBoolean(mData, "dash_target_underground", false);
+			double lockedDashY = persistentDouble(mData, "dash_locked_y", targetY);
 			double yVel = mob.getDeltaMovement().y;
-			if (!isFreeFalling) {
-				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 1.0, probeZ);
+
+			if (isUndergroundDash) {
+				// Bunker-Buster Mode: Player is confirmed underground beneath the hill/bunker.
+				// Do NOT climb the surface slope; lock Y level and bore straight through terrain.
+				double yDiff = lockedDashY - mob.getY();
+				if (Math.abs(yDiff) > 0.4) {
+					yVel = net.minecraft.util.Mth.clamp(yDiff * 0.30, -0.45, 0.45);
+				} else {
+					yVel = 0.0;
+				}
+				mob.setOnGround(true);
+			} else if (!isFreeFalling) {
+				// Surface Target Mode: Step up slopes up to 4.0 blocks or stick to downward slopes
+				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 3.0, probeZ);
 				if (groundPos != null) {
 					double groundY = groundPos.getY();
 					double heightDiff = groundY - mob.getY();
-					if (heightDiff > 0.1 && heightDiff <= 1.5) {
-						yVel = 0.25 + heightDiff * 0.15; // Smoothly scale step-up
+					if (heightDiff > 0.1 && heightDiff <= 4.0) {
+						yVel = Math.min(0.85, 0.25 + heightDiff * 0.28); // Smoothly ride up slope
 						mob.setOnGround(true);
 					} else if (heightDiff < -0.1) {
-						yVel = Math.max(-0.6, yVel - 0.08); // Stick to downward slope
+						yVel = Math.max(-0.65, yVel - 0.10); // Stick to downward slope
 					}
 				}
 			} else {
@@ -2094,6 +2127,12 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					yVel -= 0.08;
 				}
 			}
+
+			// Dynamic body pitch matching slope or penetration angle
+			float dashPitch = (float) -Math.toDegrees(Math.atan2(yVel, Math.max(0.1, currentSpeed)));
+			dashPitch = net.minecraft.util.Mth.clamp(dashPitch, -45.0F, 45.0F);
+			mob.setXRot(dashPitch);
+			mob.xRotO = dashPitch;
 
 			mob.setDeltaMovement(dirX * currentSpeed, yVel, dirZ * currentSpeed);
 			mob.hasImpulse = true;
@@ -2299,7 +2338,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			}
 
 			if (chargeTimer >= maxChargeTicks) {
-				long targetSpotLong = mData.getLong("charge_tp_pos");
+				long targetSpotLong = persistentLong(mData, "charge_tp_pos", 0L);
 				BlockPos destPos = (targetSpotLong != 0) ? BlockPos.of(targetSpotLong) : null;
 
 				if (destPos != null) {
@@ -2337,8 +2376,8 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			clearOtherStates(mData, "ATTACKING");
 			updateStateAndLog(mob, mData, "ATTACKING");
 			int attackTime = persistentInt(mData, "attack_timer", 0);
-			boolean isBlockAttack = mData.getBoolean("is_block_attack");
-			boolean isParrying = mData.getBoolean("is_parrying");
+			boolean isBlockAttack = persistentBoolean(mData, "is_block_attack", false);
+			boolean isParrying = persistentBoolean(mData, "is_parrying", false);
 			float attackYaw = persistentFloat(mData, "attack_facing_yaw", mob.getYRot());
 
 			if (isParrying) {
@@ -2365,7 +2404,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				int targetPeakTick = persistentInt(mData, "attack_peak_tick", ATTACK_DAMAGE_TICK);
 				int elapsedTicks = maxDuration - attackTime;
 
-				long blockPosLong = mData.getLong("attack_block_pos");
+				long blockPosLong = persistentLong(mData, "attack_block_pos", 0L);
 				BlockPos minePos = (blockPosLong != 0) ? BlockPos.of(blockPosLong) : null;
 
 				if (elapsedTicks <= targetPeakTick + 10) {
@@ -2442,7 +2481,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 
 			if (attackTime == maxDuration - targetPeakTick) {
 				if (isBlockAttack) {
-					long blockPosLong = mData.getLong("attack_block_pos");
+					long blockPosLong = persistentLong(mData, "attack_block_pos", 0L);
 					if (blockPosLong != 0) {
 						BlockPos minePos = BlockPos.of(blockPosLong);
 						double rad = Math.toRadians(attackYaw);
@@ -2958,7 +2997,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			mData.putDouble("weaver_prev_z", mob.getZ());
 
 			int stuckTicks = persistentInt(mData, "weaver_stuck_ticks", 0);
-			boolean isTryingToReachTarget = (target != null && target.isAlive() && distToTarget > MELEE_ATTACK_RANGE && !isAnyHypnoActive && !mData.getBoolean("is_attacking"));
+			boolean isTryingToReachTarget = (target != null && target.isAlive() && distToTarget > MELEE_ATTACK_RANGE && !isAnyHypnoActive && !persistentBoolean(mData, "is_attacking", false));
 			if (isTryingToReachTarget && horizMovedSqr < 0.0025 && (isPhysicallyBlocked || !mob.getNavigation().isInProgress())) {
 				stuckTicks++;
 			} else {
@@ -3239,7 +3278,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 					// Mine through obstruction if within claw mining reach (5.5 blocks)
 					if (distToMine <= 5.5) {
 						stopMobMotion(mob);
-						if (!mData.getBoolean("is_block_attack")) {
+						if (!persistentBoolean(mData, "is_block_attack", false)) {
 							clearOtherStates(mData, "ATTACKING");
 							updateStateAndLog(mob, mData, "OBSTRUCTION_DESTRUCTION");
 							mData.putBoolean("is_attacking", true);
@@ -3359,8 +3398,8 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				}
 			}
 
-			// HYPNOSIS INITIALIZATION TRIGGER (Requires Grounded, Line of Sight, and 4.0 - 22.0 block proximity)
-			boolean isMiningOrAttackActive = mData.getBoolean("is_block_attack") || mData.getBoolean("is_attacking");
+			// HYPNOSIS INITIALIZATION TRIGGER (Requires Grounded, Line of Sight, and 3.0 - 22.0 block proximity)
+			boolean isMiningOrAttackActive = persistentBoolean(mData, "is_block_attack", false) || persistentBoolean(mData, "is_attacking", false);
 			boolean isAirborne = !mob.onGround() || persistentBoolean(mData, "is_leaping", false) || persistentBoolean(mData, "is_preparing_leap", false);
 			double minHypnoDist = 4.0;
 
@@ -3506,7 +3545,17 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				mData.putDouble("dash_target_x", savedTargetX);
 				mData.putDouble("dash_target_y", savedTargetY);
 				mData.putDouble("dash_target_z", savedTargetZ);
-				mData.putDouble("dash_total_dist", distToTarget + 4.0); // Dash through and past saved target position
+				mData.putDouble("dash_total_dist", distToTarget + 4.0);
+				boolean isUnderground = isTargetUnderground(world, target);
+				mData.putBoolean("dash_target_underground", isUnderground);
+				double lockedDashY = isUnderground ? savedTargetY : mob.getY();
+				mData.putDouble("dash_locked_y", lockedDashY);
+				if (isUnderground && mob.getY() > savedTargetY + 1.5) {
+					BlockPos targetLevelPos = findGroundPos(world, mob.getX(), savedTargetY + 1.0, mob.getZ());
+					if (targetLevelPos != null && Math.abs(targetLevelPos.getY() - savedTargetY) <= 2.0) {
+						mob.setPos(mob.getX(), targetLevelPos.getY(), mob.getZ());
+					}
+				}
 
 				if (targetGettingAwayQuickly) {
 					mData.putBoolean("dash_is_override", true);
@@ -3806,6 +3855,13 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		mData.putBoolean("is_hypnotizing", phase == 1 || phase == 2);
 		mData.putBoolean("is_closing_hypno", phase == 3);
 		mData.putBoolean("is_backing_up", false);
+		if (phase == 0 || phase == 3) {
+			// Hypnosis ended or closing: Release any projectiles trapped in the hypno beam
+			if (mData.contains("weaver_entity_id")) {
+				int mobId = persistentInt(mData, "weaver_entity_id", 0);
+				// releaseTrappedProjectiles will be triggered via entity reference
+			}
+		}
 		if (phase == 1 || phase == 2) {
 			mData.putInt("hypno_attack_lockout", 0);
 			mData.putBoolean("is_block_attack", false);
@@ -4360,10 +4416,10 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	private static void updateCatchDamageWindow(Mob mob, CompoundTag data, float damage) {
 		long now = mob.level().getGameTime();
 		int slot = (int) (now % CATCH_DAMAGE_WINDOW);
-		long lastSample = data.getLong("weaver_catch_last_sample_time");
+		long lastSample = persistentLong(data, "weaver_catch_last_sample_time", -1L);
 		double total = (lastSample >= 0 && now - lastSample < CATCH_DAMAGE_WINDOW)
 			? persistentDouble(data, "weaver_catch_recent_damage", 0.0) : 0.0;
-		long previousTime = data.getLong("weaver_catch_damage_time_" + slot);
+		long previousTime = persistentLong(data, "weaver_catch_damage_time_" + slot, -1L);
 		float previousDamage = persistentFloat(data, "weaver_catch_damage_" + slot, 0.0F);
 		if (lastSample >= 0 && now - lastSample < CATCH_DAMAGE_WINDOW
 			&& previousTime >= 0 && now >= previousTime && now - previousTime <= CATCH_DAMAGE_WINDOW) {
@@ -4800,7 +4856,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			// Melee attack animation state synchronization (Strict Mutual Exclusivity)
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingLeft, isAttacking && attackType == 1);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingRight, isAttacking && attackType == 2);
-			setEntityDataIfPresent(woodweaver, "DATA_isAttackingBoth", isAttacking && attackType == 3);
+			setEntityDataIfPresent(woodweaver, "DATA_isAttackingboth", isAttacking && attackType == 3);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingLeft, isAttacking && attackType == 4);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingRight, isAttacking && attackType == 5);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isSweepingLeft, isAttacking && attackType == 6);
@@ -5204,6 +5260,21 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		return WoodweaverSurfaceNavigation.validLeap(mob, new Vec3(landPos.getX() + 0.5, (landPos.getY() + 1.01), landPos.getZ() + 0.5));
 	}
 
+	private static boolean isTargetUnderground(LevelAccessor world, LivingEntity target) {
+		if (target == null) return false;
+		BlockPos targetPos = target.blockPosition();
+		if (!world.canSeeSky(targetPos)) {
+			for (int dy = 1; dy <= 12; dy++) {
+				BlockPos abovePos = targetPos.above(dy);
+				if (!world.getBlockState(abovePos).isAir()) {
+					return true;
+				}
+			}
+		}
+		BlockPos surfaceGround = findGroundPos(world, target.getX(), target.getY() + 15.0, target.getZ());
+		return surfaceGround != null && target.getY() < (surfaceGround.getY() - 2.5);
+	}
+
 	private static BlockPos findGroundPos(LevelAccessor world, double x, double y, double z) {
 		BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos(x, y, z);
 		for (int i = 0; i < 10; i++) {
@@ -5259,23 +5330,27 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	}
 
 	private static int persistentInt(CompoundTag tag, String key, int fallback) {
-		return tag.contains(key) ? tag.getInt(key) : fallback;
+		return tag != null && tag.contains(key) ? tag.getInt(key) : fallback;
 	}
 
 	private static double persistentDouble(CompoundTag tag, String key, double fallback) {
-		return tag.contains(key) ? tag.getDouble(key) : fallback;
+		return tag != null && tag.contains(key) ? tag.getDouble(key) : fallback;
 	}
 
 	private static boolean persistentBoolean(CompoundTag tag, String key, boolean fallback) {
-		return tag.contains(key) ? tag.getBoolean(key) : fallback;
+		return tag != null && tag.contains(key) ? tag.getBoolean(key) : fallback;
+	}
+
+	private static long persistentLong(CompoundTag tag, String key, long fallback) {
+		return tag != null && tag.contains(key) ? tag.getLong(key) : fallback;
 	}
 
 	private static float persistentFloat(CompoundTag tag, String key, float fallback) {
-		return tag.contains(key) ? tag.getFloat(key) : fallback;
+		return tag != null && tag.contains(key) ? tag.getFloat(key) : fallback;
 	}
 
 	private static String persistentString(CompoundTag tag, String key, String fallback) {
-		return tag.contains(key) ? tag.getString(key) : fallback;
+		return tag != null && tag.contains(key) ? tag.getString(key) : fallback;
 	}
 
 	@SubscribeEvent
@@ -5286,13 +5361,13 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			String name = player.getGameProfile().getName();
 			if (name.equals("honeypie_3301") || name.equals("Dev") || player.hasPermissions(2) || player.isCreative()) {
 				if (msg.equals("weaver debug")) {
-					player.sendSystemMessage(Component.literal("§e[Weaver] Debug mode (final): " + (WEAVER_DEBUG ? "§a§lON" : "§c§lOFF")), true);
+					player.displayClientMessage(Component.literal("§e[Weaver] Debug mode (final): " + (WEAVER_DEBUG ? "§a§lON" : "§c§lOFF")), true);
 					event.setCanceled(true);
 				} else if (msg.equals("weaver dash") || msg.equals("weaver config dash")) {
-					player.sendSystemMessage(Component.literal("§e[Weaver] Ramming Dash (final): " + (ENABLE_DASH ? "§a§lON" : "§c§lOFF")), true);
+					player.displayClientMessage(Component.literal("§e[Weaver] Ramming Dash (final): " + (ENABLE_DASH ? "§a§lON" : "§c§lOFF")), true);
 					event.setCanceled(true);
 				} else if (msg.equals("weaver hypno effects") || msg.equals("weaver config hypno effects")) {
-					player.sendSystemMessage(Component.literal("§e[Weaver] Hypnosis Bad Effects (final): " + (HYPNO_EFFECTS_ENABLED ? "§a§lON" : "§c§lOFF")), true);
+					player.displayClientMessage(Component.literal("§e[Weaver] Hypnosis Bad Effects (final): " + (HYPNO_EFFECTS_ENABLED ? "§a§lON" : "§c§lOFF")), true);
 					event.setCanceled(true);
 				} else if (msg.equals("weaver leap")) {
 					ServerLevel level = (ServerLevel) player.level();
@@ -5312,13 +5387,13 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						tag.putDouble("leap_requested_z", landPos.getZ() + 0.5);
 						tag.putBoolean("leap_requested", true);
 						
-						player.sendSystemMessage(Component.literal("§a[Weaver] Force leap ordered to: §e" + landPos.getX() + ", " + (landPos.getY() + 1.01) + ", " + landPos.getZ()), true);
+						player.displayClientMessage(Component.literal("§a[Weaver] Force leap ordered to: §e" + landPos.getX() + ", " + (landPos.getY() + 1.01) + ", " + landPos.getZ()), true);
 					}
 					event.setCanceled(true);
 				} else if (msg.equals("weaver hypno") || msg.equals("weaver infect")) {
 					ServerLevel level = (ServerLevel) player.level();
 					if (player.isCreative() || player.isSpectator()) {
-						player.sendSystemMessage(Component.literal("§c[Weaver] Hypnosis can only target players in Survival or Adventure mode!"), true);
+						player.displayClientMessage(Component.literal("§c[Weaver] Hypnosis can only target players in Survival or Adventure mode!"), true);
 					} else {
 						AABB box = player.getBoundingBox().inflate(64.0);
 						List<WoodweaverEntity> weavers = level.getEntitiesOfClass(WoodweaverEntity.class, box);
@@ -5336,7 +5411,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 							tag.putInt("hypno_ticks", 0);
 							tag.putInt("hypno_hits_received", 0);
 							weaver.setTarget(player);
-							player.sendSystemMessage(Component.literal("§a[Weaver] Force " + assignedMode.toUpperCase() + " mode activated!" + (assignedMode.equals("infect") ? "" : " (Target already has Cellular Collapse, redirected)")), true);
+							player.displayClientMessage(Component.literal("§a[Weaver] Force " + assignedMode.toUpperCase() + " mode activated!" + (assignedMode.equals("infect") ? "" : " (Target already has Cellular Collapse, redirected)")), true);
 						}
 					}
 					event.setCanceled(true);
@@ -5357,7 +5432,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						tag.putInt("hypno_ticks", 0);
 						tag.putInt("hypno_hits_received", 0);
 						weaver.setTarget(player);
-						player.sendSystemMessage(Component.literal("§a[Weaver] Force LEECH mode activated (permanent max HP growth)!"), true);
+						player.displayClientMessage(Component.literal("§a[Weaver] Force LEECH mode activated (permanent max HP growth)!"), true);
 					}
 					event.setCanceled(true);
 
@@ -5378,7 +5453,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						tag.putInt("hypno_ticks", 0);
 						tag.putInt("hypno_hits_received", 0);
 						weaver.setTarget(player);
-						player.sendSystemMessage(Component.literal("§a[Weaver] Force INCINERATE mode activated!"), true);
+						player.displayClientMessage(Component.literal("§a[Weaver] Force INCINERATE mode activated!"), true);
 					}
 					event.setCanceled(true);
 				} else if (msg.equals("weaver flash") || msg.equals("weaver vaporize")) {
@@ -5401,7 +5476,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						tag.putDouble("hypno_start_z", weaver.getZ());
 						tag.putInt("weapon_flash_saved_target", player.getId());
 						weaver.setTarget(player);
-						player.sendSystemMessage(Component.literal("§a[Weaver] Force FLASH VAPORIZE mode activated!"), true);
+						player.displayClientMessage(Component.literal("§a[Weaver] Force FLASH VAPORIZE mode activated!"), true);
 					}
 					event.setCanceled(true);
 				} else if (msg.equals("weaver stop") || msg.equals("stop")) {
@@ -5414,7 +5489,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 							clearOtherStates(tag, "NORMAL");
 							weaver.setTarget(null);
 						}
-						player.sendSystemMessage(Component.literal("§e[Weaver] Stopped all active behaviors."), true);
+						player.displayClientMessage(Component.literal("§e[Weaver] Stopped all active behaviors."), true);
 					}
 					event.setCanceled(true);
 				} else if (msg.equals("weaver kill")) {
@@ -5427,7 +5502,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 							for (WoodweaverEntity weaver : weavers) {
 								weaver.setTarget(le);
 							}
-							player.sendSystemMessage(Component.literal("§a[Weaver] Target set to: §e" + le.getDisplayName().getString()), true);
+							player.displayClientMessage(Component.literal("§a[Weaver] Target set to: §e" + le.getDisplayName().getString()), true);
 						}
 					}
 					event.setCanceled(true);
@@ -5450,7 +5525,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 										tag.putInt(K_DREAD_METER, DREAD_MAX_AWAKEN);
 									}
 								}
-								player.sendSystemMessage(Component.literal("§e[Weaver] Encounter phase set to: " + (p == 0 ? "§6§lDORMANT (0)" : "§c§lAWAKENED (1)")), true);
+								player.displayClientMessage(Component.literal("§e[Weaver] Encounter phase set to: " + (p == 0 ? "§6§lDORMANT (0)" : "§c§lAWAKENED (1)")), true);
 							}
 						} catch (Exception e) {}
 					}
@@ -5471,7 +5546,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 										tag.putInt(K_ENCOUNTER_PHASE, ENCOUNTER_PHASE_AWAKENED);
 									}
 								}
-								player.sendSystemMessage(Component.literal("§e[Weaver] Dread meter set to: §f" + val), true);
+								player.displayClientMessage(Component.literal("§e[Weaver] Dread meter set to: §f" + val), true);
 							}
 						} catch (Exception e) {}
 					}
@@ -5554,12 +5629,12 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		double dz = mob.getZ() - target.getZ();
 		double currentAngle = Math.atan2(dz, dx);
 
-		int orbitDir = mData.getInt("orbit_direction");
+		int orbitDir = persistentInt(mData, "orbit_direction", 1);
 		if (orbitDir == 0) {
 			orbitDir = mob.getRandom().nextBoolean() ? 1 : -1;
 			mData.putInt("orbit_direction", orbitDir);
 		}
-		int orbitCooldown = mData.getInt("orbit_cooldown");
+		int orbitCooldown = persistentInt(mData, "orbit_cooldown", 0);
 		if (orbitCooldown > 0) {
 			mData.putInt("orbit_cooldown", orbitCooldown - 1);
 		} else {
@@ -6320,7 +6395,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	                    || owner.position().distanceToSqr(pearl == null ? track.previousPearl : pearl.position()) < 64)
 	                && canSee(weaver, owner)) {
 	                var tag = weaver.getPersistentData();
-	                tag.putInt(EXPERIENCE, Math.min(64, tag.getInt(EXPERIENCE) + 1));
+	                tag.putInt(EXPERIENCE, Math.min(64, persistentInt(tag, EXPERIENCE, 0) + 1));
 	                iterator.remove(); continue;
 	            }
 	            if (removed && tick - track.removedAt > 8) { iterator.remove(); continue; }
@@ -6345,10 +6420,10 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	            track.predicted = predict(level, pearl);
 	            if (visited == 0) { memory.attention = new WeakReference<>(pearl); memory.attentionUntil = tick + 6; }
 	            if (!busy(weaver)) weaver.getLookControl().setLookAt(pearl, 8, 12);
-	            if (weaver.getPersistentData().getInt(EXPERIENCE) < OBSERVATIONS_TO_LEARN
+	            if (persistentInt(weaver.getPersistentData(), EXPERIENCE, 0) < OBSERVATIONS_TO_LEARN
 	                || tick < memory.reactAfter || track.predicted == null || busy(weaver) || !weaver.onGround()
 	                || weaver.getTarget() != owner) continue;
-	            if (weaver.getPersistentData().getInt("leap_cooldown") > 0) continue;
+	            if (persistentInt(weaver.getPersistentData(), "leap_cooldown", 0) > 0) continue;
 	            if (track.predicted.distanceToSqr(weaver.position()) > MAX_LEAP_RANGE * MAX_LEAP_RANGE
 	                || track.predicted.distanceToSqr(weaver.position()) < 36) continue;
 	            Vec3 landing = WoodweaverSurfaceNavigation.landingNear(weaver, track.predicted);
@@ -6384,9 +6459,9 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	
 	    private static boolean busy(Mob mob) {
 	        var tag = mob.getPersistentData();
-	        return tag.getBoolean("is_dying") || tag.getBoolean("is_attacking") || tag.getBoolean("is_dashing")
-	            || tag.getBoolean("is_leaping") || tag.getBoolean("is_preparing_leap") || tag.getBoolean("is_landing_anim")
-	            || tag.getBoolean("is_playing_anim") || tag.getInt("hypno_phase") != 0 || tag.getInt("stare_ticks") > 0;
+	        return persistentBoolean(tag, "is_dying", false) || persistentBoolean(tag, "is_attacking", false) || persistentBoolean(tag, "is_dashing", false)
+	            || persistentBoolean(tag, "is_leaping", false) || persistentBoolean(tag, "is_preparing_leap", false) || persistentBoolean(tag, "is_landing_anim", false)
+	            || persistentBoolean(tag, "is_playing_anim", false) || persistentInt(tag, "hypno_phase", 0) != 0 || persistentInt(tag, "stare_ticks", 0) > 0;
 	    }
 	    private static boolean canSee(Mob mob, Entity target) {
 	        Vec3 up = WoodweaverSurfaceNavigation.up(mob, 1);
@@ -6473,7 +6548,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 				// Only collapse if there is actually air beneath (suspended) AND thickness is <= 3 blocks
 				if (hasAirBeneath && solidThickness >= 1 && solidThickness <= 3) {
 					String posKey = bx + "_" + by + "_" + bz;
-					int progress = collapsingMap.getInt(posKey);
+					int progress = persistentInt(collapsingMap, posKey, 0);
 
 					int rate = 1;
 					if (solidThickness == 1) rate = 15;
@@ -6524,7 +6599,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 						// If the Weaver is no longer standing close to this block, decay progress
 						double distSqr = mob.distanceToSqr(kx + 0.5, ky + 1.0, kz + 0.5);
 						if (distSqr > 16.0) {
-							int currentProgress = collapsingMap.getInt(key);
+							int currentProgress = persistentInt(collapsingMap, key, 0);
 							if (currentProgress > 5) {
 								collapsingMap.putInt(key, currentProgress - 5);
 							} else {
@@ -6542,5 +6617,5 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		}
 	}
 }
-// Version: 1.21.1
+// 1.21.1
 // 1.21.1
