@@ -149,7 +149,46 @@ private static MultiBufferSource wrapBuffers(MultiBufferSource original, Resourc
 
 
 
-### 1. Multi-Version Support & File Conventions
+### 10. DamageType Identification & Scoreboard Tag Purification (1.21.1)
+
+#### A. DamageSource & DamageType Inspection
+In 1.21.1, inspect registered damage types using `typeHolder().unwrapKey()` and `location()`:
+```java
+if (source.typeHolder() != null && source.typeHolder().unwrapKey().isPresent()) {
+    ResourceLocation typeLoc = source.typeHolder().unwrapKey().get().location();
+    String typeStr = typeLoc.toString().toLowerCase(java.util.Locale.ROOT);
+    // Matches e.g. "apotheosis:execute", "ronova:doom", "cruisemissiles:warhead"
+}
+```
+
+#### B. Vanilla Scoreboard Tags vs Forge PersistentData
+* `entity.getTags()` returns `java.util.Set<String>` (vanilla score tags managed via `/tag` or `entity.addTag(...)`). External mods (e.g., Ronova death mechanics) attach doom markers via `entity.addTag("ronova_doomed")`.
+* `entity.getPersistentData()` is Forge's custom `CompoundTag`.
+* Always inspect and purge both channels:
+```java
+boolean hasDoomTag = (entity.getTags() != null && entity.getTags().contains("ronova_doomed"))
+    || (entity.getPersistentData() != null && entity.getPersistentData().getBoolean("ronova_doomed"));
+
+entity.removeTag("ronova_doomed");
+if (entity.getPersistentData() != null) entity.getPersistentData().remove("ronova_doomed");
+```
+
+#### C. Scoreboard Team Purge
+To disassociate an entity from a hostile team (e.g. `ronova_doom`):
+```java
+if (entity.level() instanceof ServerLevel sLvl) {
+    var sb = sLvl.getScoreboard();
+    var team = sb.getPlayersTeam(entity.getScoreboardName());
+    if (team != null && team.getName().equalsIgnoreCase("ronova_doom")) {
+        sb.removePlayerFromTeam(entity.getScoreboardName(), team);
+    }
+}
+```
+
+---
+
+### 11. Multi-Version Support & File Conventions
 * Minecraft `1.21.1` and `1.21.8` (1.21.4+) files are maintained in parallel in `/Fractus/`.
 * The last line of `FractusLaserBeam` must strictly be `// 1.21.1` or `// 1.21.8`.
+
 

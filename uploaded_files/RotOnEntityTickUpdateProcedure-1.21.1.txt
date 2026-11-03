@@ -1,5 +1,6 @@
 package net.mcreator.thebackwoods.procedures;
-// 26.1.2 - Sentinel Adaptive Overhaul
+// 1.21.1 - Sentinel Adaptive Overhaul
+import net.mcreator.thebackwoods.BlackHole;
 import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
@@ -22,7 +23,7 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.entity.player.Player;
-import net.minecraft.world.entity.npc.villager.Villager;
+import net.minecraft.world.entity.npc.Villager;
 import net.minecraft.world.entity.monster.Slime;
 import net.minecraft.world.entity.monster.Monster;
 import net.minecraft.world.entity.animal.Animal;
@@ -45,7 +46,7 @@ import net.minecraft.sounds.SoundSource;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.resources.Identifier;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.network.chat.Component;
 import net.minecraft.core.registries.Registries;
@@ -68,10 +69,8 @@ import java.util.HashMap;
 import java.util.Set;
 import java.util.HashSet;
 import net.minecraft.world.level.saveddata.SavedData;
-import net.minecraft.world.level.saveddata.SavedDataType;
 import net.minecraft.core.HolderLookup;
 import net.minecraft.nbt.CompoundTag;
-import com.mojang.serialization.Codec;
 
 @EventBusSubscriber
 public class RotOnEntityTickUpdateProcedure {
@@ -92,19 +91,13 @@ public class RotOnEntityTickUpdateProcedure {
 	public static int SMART_DESPAWN_SCAN_TICKS = 40;
 	public static double SMART_DESPAWN_THREAT_RADIUS = 128.0;
 
-	public static final boolean ROT_DEATH_EXPLOSION_ENABLED = true;
-	public static final boolean ROT_DEATH_EXPLOSION_GRIEFING = true;
-	public static final float ROT_DEATH_EXPLOSION_DAMAGE = 1500.0F;
-	public static final double ROT_DEATH_CRATER_RADIUS = 48.0;
-	public static final double ROT_DEATH_BLAST_RADIUS = 56.0;
-
 	public static boolean dealTrueDamageToBosses(net.minecraft.world.entity.Entity target, net.minecraft.world.damagesource.DamageSource ds, float amount) {
 		if (target == null || !target.isAlive()) return false;
 		amount = RotViltrumiteAdaptation.attackDamage(ds != null ? ds.getEntity() : null, target, amount);
 		if (target instanceof net.minecraft.world.entity.player.Player player) {
 			if (player.isCreative() || player.isSpectator() || player.getAbilities().invulnerable) return false;
 			float hpBefore = player.getHealth();
-			player.hurt(ds, amount);
+			boolean hurtSuccess = player.hurt(ds, amount);
 			float hpAfter = player.getHealth();
 			float actualDealt = Math.max(0.0F, hpBefore - hpAfter);
 			if (actualDealt <= 0.0F && amount > 0.0F && !player.isInvulnerable() && !RotViltrumiteAdaptation.isViltrumite(player)) {
@@ -113,7 +106,7 @@ public class RotOnEntityTickUpdateProcedure {
 			if (ds != null && ds.getEntity() instanceof Entity attacker) {
 				recordDamageDealtMetrics(attacker, target, actualDealt);
 			}
-			return true;
+			return hurtSuccess;
 		}
 		if (target.isInvulnerable()) return false;
 
@@ -130,11 +123,11 @@ public class RotOnEntityTickUpdateProcedure {
 			});
 
 			float oldHealth = living.getHealth();
-			living.hurt(ds, amount);
+			boolean hurtSuccess = living.hurt(ds, amount);
 			float newHealth = living.getHealth();
 			float actualDealt = Math.max(0.0F, oldHealth - newHealth);
 
-			if (newHealth >= oldHealth && amount > 0) {
+			if ((!hurtSuccess || newHealth >= oldHealth) && amount > 0) {
 				float targetHealth = Math.max(0.0F, oldHealth - amount);
 				actualDealt = oldHealth - targetHealth;
 				living.setHealth(targetHealth);
@@ -152,13 +145,13 @@ public class RotOnEntityTickUpdateProcedure {
 			if (ds != null && ds.getEntity() instanceof Entity attacker) {
 				recordDamageDealtMetrics(attacker, target, actualDealt);
 			}
-			return newHealth < oldHealth;
+			return hurtSuccess;
 		}
-		target.hurt(ds, amount);
+		boolean res = target.hurt(ds, amount);
 		if (ds != null && ds.getEntity() instanceof Entity attacker) {
 			recordDamageDealtMetrics(attacker, target, amount);
 		}
-		return true;
+		return res;
 	}
 
 	private static void recordDamageDealtMetrics(Entity attacker, Entity victim, float dealtAmount) {
@@ -261,7 +254,7 @@ public class RotOnEntityTickUpdateProcedure {
 		if ((entity instanceof LivingEntity _liv ? _liv.hurtTime : 0) <= 0) {
 			entity.setDeltaMovement(nx * speed, entity.getDeltaMovement().y, nz * speed);
 		}
-		entity.needsSync = true;
+		entity.hasImpulse = true;
 	}
 
 	public static final double PARTICLE_QUALITY = 1.0;
@@ -488,7 +481,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (event == null || event.getEntity() == null) return;
 		Entity entity = event.getEntity();
 		if (entity instanceof Player player && !player.level().isClientSide()) {
-			int disTicks = player.getPersistentData().getInt("rot_stellar_remote_disabled_ticks").orElse(0);
+			int disTicks = player.getPersistentData().getInt("rot_stellar_remote_disabled_ticks");
 			if (disTicks > 0) {
 				player.getPersistentData().putInt("rot_stellar_remote_disabled_ticks", disTicks - 1);
 			}
@@ -576,7 +569,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		List<LivingEntity> threats = world.getEntitiesOfClass(LivingEntity.class, box, candidate -> {
 			if (candidate == self || candidate == guardPlayer || !candidate.isAlive()) return false;
 			if (candidate instanceof Player p) {
-				String pName = p.getGameProfile().name();
+				String pName = p.getGameProfile().getName();
 				if (pName.equals("honeypie_3301") || pName.equals("Dev") || isWhitelistedFriend(pName)) return false;
 				return candidate.getLastHurtMob() == guardPlayer || guardPlayer.getLastHurtByMob() == candidate;
 			}
@@ -724,6 +717,24 @@ private static float lerpAngle(float pct, float start, float end) {
 				syncDataBool(rot, entity, RotEntity.DATA_isLand2, "isLand2");
 				syncDataBool(rot, entity, RotEntity.DATA_isDeath, "isDead");
 			}
+		if (entity instanceof LivingEntity living && !living.level().isClientSide()) {
+			try {
+				net.mcreator.thebackwoods.RotDataGuardian.RonovaGuard.purgeDoom(entity);
+				if ((entity.getPersistentData() != null && entity.getPersistentData().getBoolean("ronova_doomed"))) {
+					double magRes = entity.getPersistentData().getDouble("sentinel_bio_magic_resist");
+					entity.getPersistentData().putDouble("sentinel_bio_magic_resist", Math.min(0.90, magRes + 0.20));
+				}
+				living.getActiveEffects().removeIf(effect -> {
+					var effKey = BuiltInRegistries.MOB_EFFECT.getKey(effect.getEffect().value());
+					if (effKey == null) return false;
+					String effectId = effKey.toString().toLowerCase(java.util.Locale.ROOT);
+					return effectId.contains("ronova") || effectId.contains("doom")
+						|| effectId.contains("apotheosis") || effectId.contains("apothic")
+						|| effectId.contains("bleeding") || effectId.contains("sundering") || effectId.contains("detonation");
+				});
+			} catch (Throwable ignored) {}
+		}
+
 			return;
 		}
 		if (!(entity instanceof RotEntity)) return;
@@ -755,7 +766,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static void removeIrradiatedEffect(Entity entity) {
 		if (!(entity instanceof LivingEntity living)) return;
-		BuiltInRegistries.MOB_EFFECT.get(Identifier.parse("alexscaves:irradiated"))
+		BuiltInRegistries.MOB_EFFECT.getHolder(ResourceLocation.parse("alexscaves:irradiated"))
 			.ifPresent(living::removeEffect);
 	}
 
@@ -878,7 +889,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			putD(entity, "rot_death_hole_size", randomHoleSize);
 
 			entity.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
-			entity.needsSync = false;
+			entity.hasImpulse = false;
 			entity.noPhysics = true;
 		}
 
@@ -902,7 +913,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				}
 			}
 			entity.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
-			entity.needsSync = false;
+			entity.hasImpulse = false;
 			entity.fallDistance = 0.0F;
 			entity.noPhysics = true;
 
@@ -959,147 +970,29 @@ private static float lerpAngle(float pct, float start, float end) {
 				setMotion(entity, 0.0, 0.0, 0.0);
 			}
 
-			// Flash particles erupting across its body in growing amounts as it floats up
-			if (world instanceof net.minecraft.server.level.ServerLevel serverLevel) {
-				double elapsedLev = Math.max(0.0, 240.0 - deathTicks);
-				double deathProgress = Math.min(1.0, elapsedLev / 240.0);
+			if (deathTicks <= 140.0) {
+				if (!getB(entity, "rot_death_hole_spawned")) {
+					putB(entity, "rot_death_hole_spawned", true);
+					if (world instanceof net.minecraft.world.level.Level lvl && !lvl.isClientSide()) {
+						double holeSize = getRotPersistentDouble(entity, "rot_death_hole_size", 8.0);
+						if (holeSize < 5.0) holeSize = 8.0 + (Math.random() * 0.5);
 
-				int flashCount = (int) (1 + Math.pow(deathProgress, 2.5) * 45.0);
-				double width = entity.getBbWidth();
-				double height = entity.getBbHeight();
-
-				for (int fi = 0; fi < flashCount; fi++) {
-					double px = entity.getX() + (serverLevel.getRandom().nextDouble() - 0.5) * (width * 1.3);
-					double py = entity.getY() + (serverLevel.getRandom().nextDouble() * height);
-					double pz = entity.getZ() + (serverLevel.getRandom().nextDouble() - 0.5) * (width * 1.3);
-					serverLevel.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), px, py, pz, 1, 0.0, 0.0, 0.0, 0.0);
-				}
-
-				if ((int) deathTicks % 16 == 0) {
-					serverLevel.playSound(null, entity.getX(), entity.getY() + height * 0.5, entity.getZ(),
-						net.minecraft.sounds.SoundEvents.WARDEN_HEARTBEAT, net.minecraft.sounds.SoundSource.HOSTILE,
-						16.0F, (float) (0.6 + deathProgress * 0.8));
-					serverLevel.playSound(null, entity.getX(), entity.getY() + height * 0.5, entity.getZ(),
-						net.minecraft.sounds.SoundEvents.BEACON_AMBIENT, net.minecraft.sounds.SoundSource.HOSTILE,
-						12.0F, (float) (0.4 + deathProgress * 1.0));
+						double torsoY = entity.getY() + (entity.getBbHeight() * 0.5);
+						BlackHole.spawnRotDeathHole(lvl, entity.getX(), torsoY, entity.getZ(), (float) holeSize, 7.0f);
+					}
 				}
 			}
 
 			if (deathTicks <= 1.0) {
 				putD(entity, "rot_death_ticks", 0.0);
-				if (world instanceof net.minecraft.server.level.ServerLevel serverLevel && ROT_DEATH_EXPLOSION_ENABLED) {
-					double cx = entity.getX();
-					double cy = entity.getY() + (entity.getBbHeight() * 0.5);
-					double cz = entity.getZ();
-
-					serverLevel.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), cx, cy, cz, 40, 4.0, 4.0, 4.0, 0.0);
-					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.EXPLOSION_EMITTER, cx, cy, cz, 48, 6.0, 6.0, 6.0, 0.0);
-					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.CAMPFIRE_COSY_SMOKE, cx, cy, cz, 220, 5.0, 5.0, 5.0, 0.12);
-					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.LARGE_SMOKE, cx, cy, cz, 260, 5.5, 5.5, 5.5, 0.25);
-					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.SQUID_INK, cx, cy, cz, 240, 5.0, 5.0, 5.0, 0.28);
-					// Spawn BlackHole shockwave entity upon death
-					net.minecraft.world.entity.AreaEffectCloud shockwave = new net.minecraft.world.entity.AreaEffectCloud(net.minecraft.world.entity.EntityType.AREA_EFFECT_CLOUD, serverLevel);
-					shockwave.setPos(cx, cy, cz);
-					shockwave.setRadius(0.0F);
-					shockwave.setRadiusPerTick(0.0F);
-					shockwave.setWaitTime(0);
-					float radius = (float) Math.max(12.0, ROT_DEATH_CRATER_RADIUS > 0 ? ROT_DEATH_CRATER_RADIUS : 16.0);
-					int totalShockTicks = Math.max(20, (int) (radius * 5.0f));
-					shockwave.setDuration(totalShockTicks + 20);
-					shockwave.addTag("BH_SHOCKWAVE_ENTITY");
-					shockwave.addTag("BH_RAD_" + radius);
-					shockwave.addTag("BH_SW_MAXTICKS_" + totalShockTicks);
-					double randYaw = serverLevel.getRandom().nextDouble() * Math.PI * 2.0;
-					double randPitch = (serverLevel.getRandom().nextDouble() - 0.5) * Math.PI * 0.85;
-					double randRoll = serverLevel.getRandom().nextDouble() * Math.PI * 2.0;
-					double nx = Math.cos(randYaw) * Math.cos(randPitch);
-					double ny = Math.sin(randPitch);
-					double nz = Math.sin(randYaw) * Math.cos(randPitch);
-					net.minecraft.world.phys.Vec3 normal = new net.minecraft.world.phys.Vec3(nx, ny, nz).normalize();
-					net.minecraft.world.phys.Vec3 arbitrary = Math.abs(normal.y) < 0.85 ? new net.minecraft.world.phys.Vec3(0, 1, 0) : new net.minecraft.world.phys.Vec3(1, 0, 0);
-					net.minecraft.world.phys.Vec3 u = normal.cross(arbitrary).normalize();
-					net.minecraft.world.phys.Vec3 v = normal.cross(u).normalize();
-					net.minecraft.world.phys.Vec3 rotU = u.scale(Math.cos(randRoll)).add(v.scale(Math.sin(randRoll))).normalize();
-					net.minecraft.world.phys.Vec3 rotV = normal.cross(rotU).normalize();
-					shockwave.addTag("BH_UX_" + (float) rotU.x);
-					shockwave.addTag("BH_UY_" + (float) rotU.y);
-					shockwave.addTag("BH_UZ_" + (float) rotU.z);
-					shockwave.addTag("BH_VX_" + (float) rotV.x);
-					shockwave.addTag("BH_VY_" + (float) rotV.y);
-					shockwave.addTag("BH_VZ_" + (float) rotV.z);
-					shockwave.setCustomName(net.minecraft.network.chat.Component.literal("BH_SW:" + radius + ":" + totalShockTicks));
-					shockwave.setCustomNameVisible(false);
-					serverLevel.addFreshEntity(shockwave);
-
-					serverLevel.playSound(null, cx, cy, cz, net.minecraft.sounds.SoundEvents.GENERIC_EXPLODE.value(), net.minecraft.sounds.SoundSource.BLOCKS, 64.0F, 0.35F);
-					serverLevel.playSound(null, cx, cy, cz, net.minecraft.sounds.SoundEvents.WARDEN_SONIC_BOOM, net.minecraft.sounds.SoundSource.HOSTILE, 64.0F, 0.35F);
-					serverLevel.playSound(null, cx, cy, cz, net.minecraft.sounds.SoundEvents.ENDER_DRAGON_GROWL, net.minecraft.sounds.SoundSource.HOSTILE, 48.0F, 0.30F);
-					serverLevel.playSound(null, cx, cy, cz, net.minecraft.sounds.SoundEvents.LIGHTNING_BOLT_THUNDER, net.minecraft.sounds.SoundSource.WEATHER, 48.0F, 0.50F);
-
-					sendCameraShake(1.2F, 60, 100.0F);
-
-					if (ROT_DEATH_EXPLOSION_GRIEFING && ROT_DEATH_CRATER_RADIUS > 0.0) {
-						double blastCraterR = ROT_DEATH_CRATER_RADIUS;
-						double coreVoidR = Math.max(1.0, blastCraterR * 0.47);
-						double coreVoidR2 = coreVoidR * coreVoidR;
-						double blastCraterR2 = blastCraterR * blastCraterR;
-
-						net.minecraft.core.BlockPos.MutableBlockPos mpos = new net.minecraft.core.BlockPos.MutableBlockPos();
-						int minX = (int) Math.floor(cx - blastCraterR);
-						int maxX = (int) Math.floor(cx + blastCraterR);
-						int minY = Math.max((int) serverLevel.getMinY() + 1, (int) Math.floor(cy - blastCraterR));
-						int maxY = Math.min((int) serverLevel.getMaxY() - 1, (int) Math.floor(cy + blastCraterR));
-						int minZ = (int) Math.floor(cz - blastCraterR);
-						int maxZ = (int) Math.floor(cz + blastCraterR);
-
-						for (int bx = minX; bx <= maxX; bx++) {
-							for (int by = minY; by <= maxY; by++) {
-								for (int bz = minZ; bz <= maxZ; bz++) {
-									double dx = (bx + 0.5) - cx;
-									double dy = (by + 0.5) - cy;
-									double dz = (bz + 0.5) - cz;
-									double dist2 = dx * dx + dy * dy + dz * dz;
-
-									if (dist2 <= blastCraterR2) {
-										mpos.set(bx, by, bz);
-										if (!serverLevel.hasChunkAt(mpos)) continue;
-										net.minecraft.world.level.block.state.BlockState st = serverLevel.getBlockState(mpos);
-										if (st.isAir() || st.getBlock() == net.minecraft.world.level.block.Blocks.BEDROCK) continue;
-
-										if (dist2 <= coreVoidR2) {
-											serverLevel.setBlock(mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
-										} else {
-											double dist = Math.sqrt(dist2);
-											double rimNorm = (dist - coreVoidR) / (blastCraterR - coreVoidR);
-											double noise = 0.5 + 0.25 * Math.sin(bx * 0.35 + bz * 0.3) * Math.cos(by * 0.3) + 0.15 * Math.cos(bx * 0.6 - by * 0.4) * Math.sin(bz * 0.5);
-
-											if (rimNorm + (0.35 * (1.0 - noise)) < 0.72) {
-												serverLevel.setBlock(mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-
-					if (ROT_DEATH_EXPLOSION_DAMAGE > 0.0F && ROT_DEATH_BLAST_RADIUS > 0.0) {
-						double blastRadius = ROT_DEATH_BLAST_RADIUS;
-						AABB dmgBox = new AABB(cx - blastRadius, cy - blastRadius, cz - blastRadius, cx + blastRadius, cy + blastRadius, cz + blastRadius);
-						List<LivingEntity> victims = serverLevel.getEntitiesOfClass(LivingEntity.class, dmgBox, e -> e != entity && e.isAlive());
-						for (LivingEntity victim : victims) {
-							double dist = victim.position().distanceTo(new Vec3(cx, cy, cz));
-							if (dist < blastRadius) {
-								float falloff = (float) (1.0 - (dist / blastRadius));
-								victim.hurt(serverLevel.damageSources().explosion(null, null), ROT_DEATH_EXPLOSION_DAMAGE * falloff);
-								Vec3 push = victim.position().subtract(cx, cy, cz).normalize().scale(falloff * 4.5);
-								victim.push(push.x, Math.max(push.y, 0.8), push.z);
-							}
-						}
-					}
+				if (world instanceof net.minecraft.server.level.ServerLevel serverLevel) {
+					double torsoY = entity.getY() + (entity.getBbHeight() * 0.5);
+					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.FLASH, entity.getX(), torsoY, entity.getZ(), 4, 0.2, 0.2, 0.2, 0.0);
+					serverLevel.sendParticles(net.minecraft.core.particles.ParticleTypes.SONIC_BOOM, entity.getX(), torsoY, entity.getZ(), 1, 0.0, 0.0, 0.0, 0.0);
 				}
 				if (!entity.level().isClientSide()) {
 					putB(entity, "rot_death_sequence_finished", true);
+					saveThreatRotAdaptation(entity);
 					try {
 						net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceFinished(entity);
 						net.mcreator.thebackwoods.RotDataGuardian.unregisterProtectedDeathEntity(entity);
@@ -1126,7 +1019,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (living.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT) != null) {
 				living.getAttribute(net.minecraft.world.entity.ai.attributes.Attributes.STEP_HEIGHT).setBaseValue(1.25D);
 			}
-			BuiltInRegistries.MOB_EFFECT.get(Identifier.parse("legendary_monsters:soul_fracture")).ifPresent(soulFractureHolder -> {
+			BuiltInRegistries.MOB_EFFECT.getHolder(ResourceLocation.parse("legendary_monsters:soul_fracture")).ifPresent(soulFractureHolder -> {
 				if (living.hasEffect(soulFractureHolder)) {
 					living.removeEffect(soulFractureHolder);
 					if (world instanceof net.minecraft.server.level.ServerLevel level) {
@@ -1258,7 +1151,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 			if (entity instanceof net.minecraft.world.entity.Mob mob) {
-				BuiltInRegistries.MOB_EFFECT.get(Identifier.parse("mowziesmobs:frozen")).ifPresent(frozenHolder -> {
+				BuiltInRegistries.MOB_EFFECT.getHolder(ResourceLocation.parse("mowziesmobs:frozen")).ifPresent(frozenHolder -> {
 					if (mob.hasEffect(frozenHolder)) {
 						if (getB(mob, "unlocked_cryo_beam")) {
 							mob.removeEffect(frozenHolder);
@@ -1304,7 +1197,7 @@ private static float lerpAngle(float pct, float start, float end) {
 						putI(mob, "sentinel_frozen_break_ticks", 0);
 					}
 				});
-				if (mob.isNoAi() && !mob.hasEffect(BuiltInRegistries.MOB_EFFECT.get(Identifier.parse("mowziesmobs:frozen")).orElse(null))) {
+				if (mob.isNoAi() && BuiltInRegistries.MOB_EFFECT.getHolder(ResourceLocation.parse("mowziesmobs:frozen")).map(frozenHolder -> !mob.hasEffect(frozenHolder)).orElse(true)) {
 					if (entity.tickCount > 20 && !getB(entity, "mapmaker_noai")) {
 						mob.setNoAi(false);
 					}
@@ -1350,7 +1243,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				Entity attacker = living.getLastHurtByMob();
 				if (BuiltInRegistries.ENTITY_TYPE.getKey(attacker.getType()).toString().equals("spore:scent")) {
 					living.setLastHurtByMob(null);
-				} else if (!shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(attacker) && (attacker instanceof RotEntity || attacker.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse(K_WOODBOUND))))) {
+				} else if (!shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(attacker) && (attacker instanceof RotEntity || attacker.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse(K_WOODBOUND))))) {
 					living.setLastHurtByMob(null);
 				}
 			}
@@ -1397,9 +1290,9 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (mob.getTarget() != null) {
 				Entity t = mob.getTarget();
 				boolean isRetaliation = (mob.getLastHurtByMob() == t || (t instanceof Mob tm && tm.getTarget() == mob));
-				if (!shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(t) && (t instanceof RotEntity || t.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse(K_WOODBOUND))))) {
+				if (!shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(t) && (t instanceof RotEntity || t.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse(K_WOODBOUND))))) {
 					mob.setTarget(null);
-				} else if (!isRetaliation && !shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(t) && (t instanceof Villager || t instanceof AmbientCreature || t instanceof Animal || t instanceof Slime || t instanceof net.minecraft.world.entity.animal.fish.WaterAnimal)) {
+				} else if (!isRetaliation && !shouldIgnoreCombatFilter(entity) && !shouldIgnoreCombatFilter(t) && (t instanceof Villager || t instanceof AmbientCreature || t instanceof Animal || t instanceof Slime || t instanceof net.minecraft.world.entity.animal.WaterAnimal)) {
 					mob.setTarget(null);
 				}
 			}
@@ -1574,8 +1467,8 @@ private static float lerpAngle(float pct, float start, float end) {
 					floorState = net.minecraft.world.level.block.Blocks.DIRT.defaultBlockState();
 				}
 				net.minecraft.core.particles.BlockParticleOption dustPillarOptions = new net.minecraft.core.particles.BlockParticleOption(ParticleTypes.DUST_PILLAR, floorState);
-				net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(Identifier.parse("trial_spawner_detection")).map(ref -> ref.value()).orElse(null);
-				net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : ParticleTypes.SMOKE;
+				net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(ResourceLocation.parse("trial_spawner_detection"));
+				net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : net.minecraft.core.particles.ParticleTypes.EFFECT;
 
 				for (int i = 0; i < particleCount; i++) {
 					double angle = (2 * Math.PI / particleCount) * i;
@@ -1695,7 +1588,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (living.tickCount % 40 == 0 || !living.getPersistentData().contains("sentinel_cached_in_cold_biome")) {
 				try {
 					inColdBiome = living.level().getBiome(living.blockPosition()).unwrapKey().map(key -> {
-						String path = key.identifier().getPath().toLowerCase(java.util.Locale.ROOT);
+						String path = key.location().getPath().toLowerCase(java.util.Locale.ROOT);
 						return path.contains("snow") || path.contains("frozen") || path.contains("ice") || path.contains("cold");
 					}).orElse(false);
 					putB(living, "sentinel_cached_in_cold_biome", inColdBiome);
@@ -1792,7 +1685,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (totemInspectTicks > 0) {
 			if (entity instanceof LivingEntity living) {
 				boolean isInfinity = getB(entity, "sentinel_is_infinity_totem");
-				net.minecraft.world.item.Item infinityTotemItem = isInfinity ? BuiltInRegistries.ITEM.get(Identifier.parse("avaritia:infinity_totem")).map(ref -> ref.value()).orElse(null) : null;
+				net.minecraft.world.item.Item infinityTotemItem = isInfinity ? BuiltInRegistries.ITEM.get(ResourceLocation.parse("avaritia:infinity_totem")) : null;
 				net.minecraft.world.item.ItemStack stackToHold = (infinityTotemItem != null) ? new net.minecraft.world.item.ItemStack(infinityTotemItem) : new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.TOTEM_OF_UNDYING);
 				living.setItemInHand(InteractionHand.MAIN_HAND, stackToHold);
 			}
@@ -1837,7 +1730,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			boolean totemPoppedEarly = false;
 			if (entity instanceof LivingEntity living && totemInspectTicks < 178.0) {
 				boolean isInfinity = getB(entity, "sentinel_is_infinity_totem");
-				net.minecraft.world.item.Item infinityTotemItem = isInfinity ? BuiltInRegistries.ITEM.get(Identifier.parse("avaritia:infinity_totem")).map(ref -> ref.value()).orElse(null) : null;
+				net.minecraft.world.item.Item infinityTotemItem = isInfinity ? BuiltInRegistries.ITEM.get(ResourceLocation.parse("avaritia:infinity_totem")) : null;
 				net.minecraft.world.item.Item expectedItem = (infinityTotemItem != null) ? infinityTotemItem : net.minecraft.world.item.Items.TOTEM_OF_UNDYING;
 				if (living.getItemInHand(InteractionHand.MAIN_HAND).getItem() != expectedItem) {
 					totemPoppedEarly = true;
@@ -1850,8 +1743,8 @@ private static float lerpAngle(float pct, float start, float end) {
 					boolean isInfinity = getB(entity, "sentinel_is_infinity_totem");
 					level.sendParticles(ParticleTypes.TOTEM_OF_UNDYING, entity.getX(), entity.getY() + 1.0, entity.getZ(), 45, 0.6, 0.6, 0.6, 0.25);
 					if (isInfinity) {
-						level.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), entity.getX(), entity.getY() + 1.0, entity.getZ(), 5, 0.5, 0.5, 0.5, 0.0);
-						level.sendParticles(net.minecraft.core.particles.PowerParticleOption.create(ParticleTypes.DRAGON_BREATH, 1.0f), entity.getX(), entity.getY() + 1.0, entity.getZ(), 100, 0.8, 0.8, 0.8, 0.15);
+						level.sendParticles(ParticleTypes.FLASH, entity.getX(), entity.getY() + 1.0, entity.getZ(), 5, 0.5, 0.5, 0.5, 0.0);
+						level.sendParticles(ParticleTypes.DRAGON_BREATH, entity.getX(), entity.getY() + 1.0, entity.getZ(), 100, 0.8, 0.8, 0.8, 0.15);
 						level.sendParticles(ParticleTypes.SMOKE, entity.getX(), entity.getY() + 1.0, entity.getZ(), 80, 0.8, 0.8, 0.8, 0.15);
 					}
 					playHostileSound(level, entity, "item.totem.use", 2.0F, isInfinity ? 0.45F : 0.85F);
@@ -1996,7 +1889,7 @@ private static float lerpAngle(float pct, float start, float end) {
 						}
 
 						if (level.getRandom().nextDouble() < progress * 0.85) {
-							level.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), entity.getX(), entity.getY() + 1.2, entity.getZ(), 1, 0.1, 0.1, 0.1, 0.0);
+							level.sendParticles(ParticleTypes.FLASH, entity.getX(), entity.getY() + 1.2, entity.getZ(), 1, 0.1, 0.1, 0.1, 0.0);
 						}
 					} else {
 						double decayTotal = OMNI_SONIC_BOOM_TRIGGER_TICK;
@@ -2125,8 +2018,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				if (combatTarget != null) {
 					double tdx = combatTarget.getX() - entity.getX();
 					double tdz = combatTarget.getZ() - entity.getZ();
-					double targetYFactor = entity.distanceTo(combatTarget) < 5.0 ? SONIC_BOOM_TORSO_Y_FACTOR : 0.5;
-					double tdy = (combatTarget.getY() + combatTarget.getBbHeight() * targetYFactor) - (entity.getY() + entity.getBbHeight() * SONIC_BOOM_TORSO_Y_FACTOR);
+					double tdy = (combatTarget.getY() + combatTarget.getBbHeight() * 0.5) - (entity.getY() + entity.getBbHeight() * SONIC_BOOM_TORSO_Y_FACTOR);
 					double flatD = Math.sqrt(tdx * tdx + tdz * tdz);
 					double pitchAngle = -Math.toDegrees(Math.atan2(tdy, flatD));
 
@@ -2289,7 +2181,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				putD(entity, "sentinel_judgment_dir_z", dir.z);
 
 				playHostileSound(world, entity, "entity.warden.sonic_charge", 1.8F, 0.65F);
-				spawnParticles(world, net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), entity.getX(), entity.getY() + 0.5, entity.getZ(), 1, 0, 0, 0, 0);
+				spawnParticles(world, ParticleTypes.FLASH, entity.getX(), entity.getY() + 0.5, entity.getZ(), 1, 0, 0, 0, 0);
 			} else if (judgmentTicks > 1) {
 				double dirX = getD(entity, "sentinel_judgment_dir_x");
 				double dirY = getD(entity, "sentinel_judgment_dir_y");
@@ -2369,8 +2261,8 @@ private static float lerpAngle(float pct, float start, float end) {
 						floorState = net.minecraft.world.level.block.Blocks.DIRT.defaultBlockState();
 					}
 					net.minecraft.core.particles.BlockParticleOption dustPillarOptions = new net.minecraft.core.particles.BlockParticleOption(ParticleTypes.DUST_PILLAR, floorState);
-					net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(Identifier.parse("trial_spawner_detection")).map(ref -> ref.value()).orElse(null);
-					net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : ParticleTypes.SMOKE;
+					net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(ResourceLocation.parse("trial_spawner_detection"));
+					net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : net.minecraft.core.particles.ParticleTypes.EFFECT;
 
 					for (int r = 1; r <= 3; r++) {
 						double radiusVal = r * 1.2;
@@ -2620,7 +2512,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				}
 				for (Player p : world.getEntitiesOfClass(Player.class, new AABB(x - 128, y - 128, z - 128, x + 128, y + 128, z + 128))) {
 					if (master != null) break;
-					String name = p.getGameProfile().name();
+					String name = p.getGameProfile().getName();
 					if (name.equals("honeypie_3301") || name.equals("Dev")) {
 						boolean isDueling = getB(mob, "is_dueling");
 						if (!isDueling) {
@@ -3544,7 +3436,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			}
 
 			ls.setRemainingFireTicks(0);
-			ls.removeEffect(MobEffects.SLOWNESS);
+			ls.removeEffect(MobEffects.MOVEMENT_SLOWDOWN);
 
 		} else if (mode == 2) {
 			level.sendParticles(ParticleTypes.SNOWFLAKE, ls.getX(), ls.getY() + 1.3, ls.getZ(), 1, 0.4, 0.5, 0.4, 0.005);
@@ -3598,8 +3490,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					}
 				}
 				if (!shield.isEmpty()) {
-					player.getCooldowns().addCooldown(shield, cooldownTicks);
-					UniversalCombatPredictionEngine.recordExterminationMilestone(null, player, "SHIELD_BROKEN", 1.0);
+					player.getCooldowns().addCooldown(shield.getItem(), cooldownTicks);
 				}
 			}
 
@@ -3750,7 +3641,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				destroyContraption(level, entity, possible, possible.position(), true);
 				continue;
 			}
-			if (possible instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+			if (possible instanceof net.minecraft.world.entity.projectile.ThrownEnderpearl pearl) {
 				level.sendParticles(ParticleTypes.EXPLOSION, pearl.getX(), pearl.getY(), pearl.getZ(), 3, 0.2, 0.2, 0.2, 0.05);
 				playHostileSound(level, pearl, "entity.generic.explode", 0.8F, 1.8F);
 				pearl.discard();
@@ -3875,7 +3766,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			}
 
 			BlockPos firePos = hitPos.relative(blockHit.getDirection());
-			if (level.isEmptyBlock(firePos) && level.getBlockState(firePos.below()).isSolidRender()) {
+			if (level.isEmptyBlock(firePos) && level.getBlockState(firePos.below()).isSolidRender(level, firePos.below())) {
 				level.setBlock(firePos, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
 			}
 		}
@@ -3886,7 +3777,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				beamEnd.y + (level.getRandom().nextDouble() - 0.5) * 4.0,
 				beamEnd.z + (level.getRandom().nextDouble() - 0.5) * 4.0
 			);
-			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender()) {
+			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender(level, nearBeam.below())) {
 				level.setBlock(nearBeam, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
 			}
 		}
@@ -3898,7 +3789,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		level.sendParticles(ParticleTypes.DRIPPING_LAVA, beamEnd.x, beamEnd.y, beamEnd.z, 3, 0.1, 0.1, 0.1, 0.02);
 
 		Entity targetVictim = (hitEntity != null) ? hitEntity : target;
-		if (targetVictim instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl && pearl.isAlive()) {
+		if (targetVictim instanceof net.minecraft.world.entity.projectile.ThrownEnderpearl pearl && pearl.isAlive()) {
 			level.sendParticles(ParticleTypes.EXPLOSION, pearl.getX(), pearl.getY(), pearl.getZ(), 3, 0.2, 0.2, 0.2, 0.05);
 			level.sendParticles(ParticleTypes.LAVA, pearl.getX(), pearl.getY(), pearl.getZ(), 5, 0.2, 0.2, 0.2, 0.05);
 			playHostileSound(level, pearl, "entity.generic.explode", 0.8F, 1.8F);
@@ -3969,7 +3860,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			level.sendParticles(ParticleTypes.SNOWFLAKE, pPos.x, pPos.y, pPos.z, 1, 0.01, 0.01, 0.01, 0.0);
 		}
 
-		level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), facePos.x, facePos.y, facePos.z, 1, 0.15, 0.15, 0.15, 0.01);
+		level.sendParticles(ParticleTypes.INSTANT_EFFECT, facePos.x, facePos.y, facePos.z, 1, 0.15, 0.15, 0.15, 0.01);
 
 		if (chargeTicks % 6 == 0) {
 			playHostileSound(level, entity, "block.powder_snow.break", 1.2F, 0.8F);
@@ -4037,7 +3928,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				destroyContraption(level, entity, possible, possible.position(), true);
 				continue;
 			}
-			if (possible instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl) {
+			if (possible instanceof net.minecraft.world.entity.projectile.ThrownEnderpearl pearl) {
 				level.sendParticles(ParticleTypes.EXPLOSION, pearl.getX(), pearl.getY(), pearl.getZ(), 3, 0.2, 0.2, 0.2, 0.05);
 				playHostileSound(level, pearl, "entity.generic.explode", 0.8F, 1.8F);
 				pearl.discard();
@@ -4065,7 +3956,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			level.sendParticles(ParticleTypes.SNOWFLAKE, facePos.x + oX, facePos.y + oY, facePos.z + oZ, 1, 0.01, 0.01, 0.01, 0.0);
 		}
 		if (living.getRandom().nextFloat() < 0.25F) {
-			level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), facePos.x, facePos.y, facePos.z, 2, 0.2, 0.2, 0.2, 0.1);
+			level.sendParticles(ParticleTypes.INSTANT_EFFECT, facePos.x, facePos.y, facePos.z, 2, 0.2, 0.2, 0.2, 0.1);
 		}
 
 		double spacing = (0.22 / Mth.clamp(PARTICLE_QUALITY, 0.1, 1.0));
@@ -4092,11 +3983,11 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (level.getRandom().nextFloat() < 0.70F) {
 				Vec3 offset1 = sideVec.scale(Math.cos(angle) * cylinderRadius).add(vertVec.scale(Math.sin(angle) * cylinderRadius));
 				Vec3 p1 = pos.add(offset1);
-				level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), p1.x, p1.y, p1.z, 1, 0.01, 0.01, 0.01, 0.0);
+				level.sendParticles(ParticleTypes.INSTANT_EFFECT, p1.x, p1.y, p1.z, 1, 0.01, 0.01, 0.01, 0.0);
 
 				Vec3 offset2 = sideVec.scale(Math.cos(angle + Math.PI) * cylinderRadius).add(vertVec.scale(Math.sin(angle + Math.PI) * cylinderRadius));
 				Vec3 p2 = pos.add(offset2);
-				level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), p2.x, p2.y, p2.z, 1, 0.01, 0.01, 0.01, 0.0);
+				level.sendParticles(ParticleTypes.INSTANT_EFFECT, p2.x, p2.y, p2.z, 1, 0.01, 0.01, 0.01, 0.0);
 			}
 		}
 
@@ -4129,7 +4020,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 					if (level.getRandom().nextFloat() < 0.45F) {
 						level.sendParticles(ParticleTypes.SNOWFLAKE, hitPos.getX() + 0.5, hitPos.getY() + 0.5, hitPos.getZ() + 0.5, 4, 0.2, 0.2, 0.2, 0.05);
-						level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), hitPos.getX() + 0.5, hitPos.getY() + 0.5, hitPos.getZ() + 0.5, 2, 0.2, 0.2, 0.2, 0.01);
+						level.sendParticles(ParticleTypes.INSTANT_EFFECT, hitPos.getX() + 0.5, hitPos.getY() + 0.5, hitPos.getZ() + 0.5, 2, 0.2, 0.2, 0.2, 0.01);
 					}
 
 					if (drillProgress >= 1.0) {
@@ -4160,7 +4051,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			}
 
 			BlockPos surfacePos = hitPos.relative(blockHit.getDirection());
-			if (level.isEmptyBlock(surfacePos) && level.getBlockState(surfacePos.below()).isSolidRender()) {
+			if (level.isEmptyBlock(surfacePos) && level.getBlockState(surfacePos.below()).isSolidRender(level, surfacePos.below())) {
 				level.setBlock(surfacePos, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
 			}
 		}
@@ -4171,7 +4062,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				beamEnd.y + (level.getRandom().nextDouble() - 0.5) * 4.0,
 				beamEnd.z + (level.getRandom().nextDouble() - 0.5) * 4.0
 			);
-			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender()) {
+			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender(level, nearBeam.below())) {
 				level.setBlock(nearBeam, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
 			}
 		}
@@ -4181,9 +4072,9 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		Entity targetVictim = (hitEntity != null) ? hitEntity : target;
-		if (targetVictim instanceof net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl && pearl.isAlive()) {
+		if (targetVictim instanceof net.minecraft.world.entity.projectile.ThrownEnderpearl pearl && pearl.isAlive()) {
 			level.sendParticles(ParticleTypes.SNOWFLAKE, pearl.getX(), pearl.getY(), pearl.getZ(), 10, 0.2, 0.2, 0.2, 0.05);
-			level.sendParticles(net.minecraft.core.particles.SpellParticleOption.create(ParticleTypes.INSTANT_EFFECT, 0xFFFFFFFF, 1.0f), pearl.getX(), pearl.getY(), pearl.getZ(), 5, 0.2, 0.2, 0.2, 0.05);
+			level.sendParticles(ParticleTypes.INSTANT_EFFECT, pearl.getX(), pearl.getY(), pearl.getZ(), 5, 0.2, 0.2, 0.2, 0.05);
 			playHostileSound(level, pearl, "block.glass.break", 1.0F, 1.5F);
 			pearl.discard();
 		}
@@ -4210,7 +4101,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					float finalCryoDmg = Math.min(20.0F, dmg * (float) getAdaptationMultiplier(entity));
 					dealTrueDamageToBosses(targetVictim, getBackwoodsDamage(level, "rot_cryo_laser", entity), finalCryoDmg);
 					((LivingEntity) targetVictim).setTicksFrozen(((LivingEntity) targetVictim).getTicksFrozen() + 180);
-					applyEffectSafe((LivingEntity) targetVictim, new MobEffectInstance(MobEffects.SLOWNESS, 120, 4, false, false));
+					applyEffectSafe((LivingEntity) targetVictim, new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 120, 4, false, false));
 					playHostileSound(level, targetVictim, "entity.player.hurt_freeze", 1.2F, 0.8F);
 
 					Vec3 push = targetVictim.position().subtract(entity.position()).normalize();
@@ -4264,8 +4155,8 @@ private static float lerpAngle(float pct, float start, float end) {
 			List<LivingEntity> targets = level.getEntitiesOfClass(LivingEntity.class, entity.getBoundingBox().inflate(24.0), e -> e != entity && !isWoodboundEntity(e, entity) && !(e instanceof Player p && (p.isCreative() || p.isSpectator())));
 			for (LivingEntity victim : targets) {
 				applyEffectSafe(victim, new MobEffectInstance(MobEffects.BLINDNESS, 140, 0, false, false));
-				applyEffectSafe(victim, new MobEffectInstance(MobEffects.NAUSEA, 140, 2, false, false));
-				applyEffectSafe(victim, new MobEffectInstance(MobEffects.SLOWNESS, 60, 4, false, false));
+				applyEffectSafe(victim, new MobEffectInstance(MobEffects.CONFUSION, 140, 2, false, false));
+				applyEffectSafe(victim, new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 60, 4, false, false));
 
 				if (victim instanceof Player player) {
 					player.getPersistentData().putInt("rot_stellar_remote_disabled_ticks", 30);
@@ -4401,7 +4292,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		} else {
 			target.setDeltaMovement(0, -0.05, 0);
 			if (target instanceof LivingEntity liv) {
-				applyEffectSafe(liv, new MobEffectInstance(MobEffects.SLOWNESS, 30, 4, false, false));
+				applyEffectSafe(liv, new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 30, 4, false, false));
 				applyEffectSafe(liv, new MobEffectInstance(MobEffects.BLINDNESS, 40, 1, false, false));
 			}
 
@@ -4427,7 +4318,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		setMotion(target, diff.x * liftStrength, 0.15, diff.z * liftStrength);
 
 		if (target instanceof LivingEntity liv) {
-			applyEffectSafe(liv, new MobEffectInstance(MobEffects.SLOWNESS, 10, 3, false, false));
+			applyEffectSafe(liv, new MobEffectInstance(MobEffects.MOVEMENT_SLOWDOWN, 10, 3, false, false));
 		}
 
 		if (ticksLeft <= 0) {
@@ -4635,7 +4526,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					else if (selectCombo == 103) comboName = "KNOCKBACK DROPKICK COMBO (CC3)";
 					else if (selectCombo == 104) comboName = "KNOCKBACK RIDER COMBO (CC4)";
 					else if (selectCombo == 105) comboName = "HEAVENLY REPENTANCE PLUS (CC5)";
-					logActionToChat(level, self, "Selected combo/ability: §a" + comboName + " (ID: " + selectCombo + ") §ftargeting " + target.getDisplayName().getString());
+					logActionToChat(level, self, "Selected combo/ability: Â§a" + comboName + " (ID: " + selectCombo + ") Â§ftargeting " + target.getDisplayName().getString());
 				}
 				double coreCd = getDynamicGlobalCooldown(self);
 				putD(self, "sentinel_global_ability_cooldown", coreCd);
@@ -4761,7 +4652,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			level.sendParticles(ParticleTypes.SWEEP_ATTACK, self.getX(), self.getY() + 1.2, self.getZ(), 1, 0.2, 0.2, 0.2, 0.0);
 		} else if (selectCombo == 5 && target instanceof LivingEntity liv) {
 			setMotion(liv, 0.0, 0.45, 0.0);
-			applyEffectSafe(liv, new MobEffectInstance(net.minecraft.world.effect.MobEffects.SLOWNESS, 40, 4, false, false));
+			applyEffectSafe(liv, new MobEffectInstance(net.minecraft.world.effect.MobEffects.MOVEMENT_SLOWDOWN, 40, 4, false, false));
 			dealTrueDamageToBosses(liv, ls != null ? ls.damageSources().mobAttack(ls) : getMobAttackDamage(level), (float) (finalDamage * 1.5) * (float) getAdaptationMultiplier(ls));
 			setMotion(liv, sweepPush.x * 0.2, -1.8, sweepPush.z * 0.2);
 
@@ -4770,7 +4661,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			level.sendParticles(ParticleTypes.EXPLOSION, target.getX(), target.getY(), target.getZ(), 5, 0.5, 0.1, 0.5, 0.1);
 			level.sendParticles(ParticleTypes.CRIT, target.getX(), target.getY(), target.getZ(), 10, 0.4, 0.4, 0.4, 0.2);
 		} else if (selectCombo == 6 && target instanceof LivingEntity liv) {
-			applyEffectSafe(liv, new MobEffectInstance(net.minecraft.world.effect.MobEffects.SLOWNESS, 60, 2, false, false));
+			applyEffectSafe(liv, new MobEffectInstance(net.minecraft.world.effect.MobEffects.MOVEMENT_SLOWDOWN, 60, 2, false, false));
 			dealTrueDamageToBosses(liv, ls != null ? ls.damageSources().mobAttack(ls) : getMobAttackDamage(level), (float) (finalDamage * 1.35) * (float) getAdaptationMultiplier(ls));
 
 			level.sendParticles(ParticleTypes.SNOWFLAKE, target.getX(), target.getY() + 1.0, target.getZ(), 10, 0.3, 0.3, 0.3, 0.05);
@@ -4849,7 +4740,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (world instanceof ServerLevel s) {
 			s.players().stream()
 				.filter(p -> p.position().distanceToSqr(pos) <= range * range)
-				.forEach(p -> p.sendOverlayMessage(Component.literal(text)));
+				.forEach(p -> p.displayClientMessage(Component.literal(text), true));
 		}
 	}
 
@@ -4857,8 +4748,8 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (!ENABLE_CHAT_LOGGING) return;
 		if (world instanceof ServerLevel s) {
 			String name = self.getDisplayName().getString();
-			String formatted = "§6[Rot AI Log] §e" + name + " §f" + message;
-			s.players().forEach(p -> p.sendSystemMessage(Component.literal(formatted)));
+			String formatted = "Â§6[Rot AI Log] Â§e" + name + " Â§f" + message;
+			s.players().forEach(p -> p.displayClientMessage(Component.literal(formatted), false));
 		}
 	}
 
@@ -4872,7 +4763,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (currentTargetId != lastTargetId) {
 				putI(self, "log_last_target_id", currentTargetId);
 				if (currentTarget != null) {
-					logActionToChat(world, self, "Target acquired: §d" + currentTarget.getDisplayName().getString() + " §7(HP: " + (int)currentTarget.getHealth() + "/" + (int)currentTarget.getMaxHealth() + ")");
+					logActionToChat(world, self, "Target acquired: Â§d" + currentTarget.getDisplayName().getString() + " Â§7(HP: " + (int)currentTarget.getHealth() + "/" + (int)currentTarget.getMaxHealth() + ")");
 				} else {
 					logActionToChat(world, self, "Lost combat target / entered passive state");
 				}
@@ -4930,26 +4821,26 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static String getActionStartMessage(String key, double val) {
 		switch (key) {
-			case "sentinel_melee_windup": return "Winding up a melee attack... §7(Ticks: " + (int)val + ")";
-			case "sentinel_solar_charge_ticks": return "Charging §cSolar Laser Beam§f... §7(Powering up)";
-			case "sentinel_solar_fire_ticks": return "§cFIRES SOLAR LASER BEAM! §e(High Thermal Damage)§f";
-			case "sentinel_cryo_charge_ticks": return "Charging §bCryo Laser Beam§f... §7(Freezing up)";
-			case "sentinel_cryo_fire_ticks": return "§bFIRES CRYO LASER BEAM! §d(Freezing Target)§f";
-			case "sentinel_sonic_ticks": return "Charging §aSonic Blast§f...";
-			case "sentinel_omni_sonic_charge_ticks": return "Preparing §aOmnidirectional Sonic Shockwave§f...";
-			case "sentinel_sonic_scream_ticks": return "§aSCREAMING SONIC BLAST! §e(Huge Knockback & Damage)";
-			case "sentinel_slam_phase": return "Preparing §eGravity Seismic Slam §7(Phase: " + (int)val + ")";
-			case "sentinel_sky_warp_slam_ticks": return "Executing §eSky Warp Teleport Slam§f!";
-			case "rot_overhead_ticks": return "Executing §eOverhead Strike§f!";
-			case "sentinel_judgment_ticks": return "Charging §4Judgment Kick/Charge§f... §7(Ticks: " + (int)val + ")";
-			case "sentinel_die_kick_phase": return "Executing §dDie Rider Kick §7(Phase: " + (int)val + ")";
-			case "sentinel_armor_rip_ticks": return "Executing §cArmor Rip Choke move§f! §7(Ticks: " + (int)val + ")";
-			case "sentinel_grapple_ticks": return "Executing §dGrapple Siphon§f! §7(Sucking HP)";
-			case "sentinel_tk_ticks": return "Lifting target with §dTelekinesis§f!";
-			case "rot_superheat_charging": return "§4ALERT: Charging Superheat Catalyst Ultimate State!§f";
-			case "rot_superheat_active": return "§4ALERT: SUPERHEAT CATALYST ENRAGED MODE IS NOW ACTIVE!§f";
-			case "is_blocking": return "Raised guard: §aNow BLOCKING/SHIELDING incoming attacks§f";
-			case "is_uppercutting": return "Executing §eUppercut Strike§f!";
+			case "sentinel_melee_windup": return "Winding up a melee attack... Â§7(Ticks: " + (int)val + ")";
+			case "sentinel_solar_charge_ticks": return "Charging Â§cSolar Laser BeamÂ§f... Â§7(Powering up)";
+			case "sentinel_solar_fire_ticks": return "Â§cFIRES SOLAR LASER BEAM! Â§e(High Thermal Damage)Â§f";
+			case "sentinel_cryo_charge_ticks": return "Charging Â§bCryo Laser BeamÂ§f... Â§7(Freezing up)";
+			case "sentinel_cryo_fire_ticks": return "Â§bFIRES CRYO LASER BEAM! Â§d(Freezing Target)Â§f";
+			case "sentinel_sonic_ticks": return "Charging Â§aSonic BlastÂ§f...";
+			case "sentinel_omni_sonic_charge_ticks": return "Preparing Â§aOmnidirectional Sonic ShockwaveÂ§f...";
+			case "sentinel_sonic_scream_ticks": return "Â§aSCREAMING SONIC BLAST! Â§e(Huge Knockback & Damage)";
+			case "sentinel_slam_phase": return "Preparing Â§eGravity Seismic Slam Â§7(Phase: " + (int)val + ")";
+			case "sentinel_sky_warp_slam_ticks": return "Executing Â§eSky Warp Teleport SlamÂ§f!";
+			case "rot_overhead_ticks": return "Executing Â§eOverhead StrikeÂ§f!";
+			case "sentinel_judgment_ticks": return "Charging Â§4Judgment Kick/ChargeÂ§f... Â§7(Ticks: " + (int)val + ")";
+			case "sentinel_die_kick_phase": return "Executing Â§dDie Rider Kick Â§7(Phase: " + (int)val + ")";
+			case "sentinel_armor_rip_ticks": return "Executing Â§cArmor Rip Choke moveÂ§f! Â§7(Ticks: " + (int)val + ")";
+			case "sentinel_grapple_ticks": return "Executing Â§dGrapple SiphonÂ§f! Â§7(Sucking HP)";
+			case "sentinel_tk_ticks": return "Lifting target with Â§dTelekinesisÂ§f!";
+			case "rot_superheat_charging": return "Â§4ALERT: Charging Superheat Catalyst Ultimate State!Â§f";
+			case "rot_superheat_active": return "Â§4ALERT: SUPERHEAT CATALYST ENRAGED MODE IS NOW ACTIVE!Â§f";
+			case "is_blocking": return "Raised guard: Â§aNow BLOCKING/SHIELDING incoming attacksÂ§f";
+			case "is_uppercutting": return "Executing Â§eUppercut StrikeÂ§f!";
 			default: return null;
 		}
 	}
@@ -4957,8 +4848,8 @@ private static float lerpAngle(float pct, float start, float end) {
 	private static String getActionStopMessage(String key) {
 		switch (key) {
 			case "sentinel_melee_windup": return "Melee windup finished";
-			case "sentinel_solar_fire_ticks": return "§cSolar Laser Beam finished firing";
-			case "sentinel_cryo_fire_ticks": return "§bCryo Laser Beam finished firing";
+			case "sentinel_solar_fire_ticks": return "Â§cSolar Laser Beam finished firing";
+			case "sentinel_cryo_fire_ticks": return "Â§bCryo Laser Beam finished firing";
 			case "sentinel_sonic_scream_ticks": return "Sonic scream completed";
 			case "sentinel_slam_phase": return "Gravity Seismic Slam completed";
 			case "sentinel_sky_warp_slam_ticks": return "Sky Warp Slam completed";
@@ -4968,7 +4859,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			case "sentinel_armor_rip_ticks": return "Armor Rip Choke completed";
 			case "sentinel_grapple_ticks": return "Grapple Siphon finished";
 			case "sentinel_tk_ticks": return "Telekinesis dropped";
-			case "rot_superheat_active": return "§7Superheat Catalyst enraged mode expired";
+			case "rot_superheat_active": return "Â§7Superheat Catalyst enraged mode expired";
 			case "is_blocking": return "Lowered guard: Stopped blocking";
 			case "is_uppercutting": return "Uppercut completed";
 			default: return null;
@@ -5183,7 +5074,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				continue;
 			}
 			if (entity instanceof Player p) {
-				String name = p.getGameProfile().name();
+				String name = p.getGameProfile().getName();
 				if (name.equals("honeypie_3301") || name.equals("Dev")) {
 					continue;
 				}
@@ -5221,7 +5112,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				continue;
 			}
 			if (entity instanceof Player p) {
-				String name = p.getGameProfile().name();
+				String name = p.getGameProfile().getName();
 				if (name.equals("honeypie_3301") || name.equals("Dev")) {
 					continue;
 				}
@@ -5259,7 +5150,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 			if (killId == -1) {
 				for (Player p : world.getEntitiesOfClass(Player.class, new AABB(x - 64, y - 32, z - 64, x + 64, y + 32, z + 64))) {
-					String name = p.getGameProfile().name();
+					String name = p.getGameProfile().getName();
 					if (name.equals("honeypie_3301") || name.equals("Dev")) {
 						List<LivingEntity> fovTargets = getEntitiesInPlayerFOV(p, 64.0);
 						if (!fovTargets.isEmpty()) {
@@ -5426,7 +5317,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (target == null && self instanceof Mob mob) {
 			Player master = null;
 			for (Player p : world.getEntitiesOfClass(Player.class, new AABB(x - 48, y - 16, z - 48, x + 48, y + 16, z + 48))) {
-				String name = p.getGameProfile().name();
+				String name = p.getGameProfile().getName();
 				if (name.equals("honeypie_3301") || name.equals("Dev")) {
 					boolean isDueling = getB(self, "is_dueling");
 					if (!isDueling) {
@@ -5487,7 +5378,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					return false;
 				}
 				if (target instanceof Player p) {
-					String name = p.getGameProfile().name();
+					String name = p.getGameProfile().getName();
 					if (name.equals("honeypie_3301") || name.equals("Dev")) {
 						boolean isDueling = getB(self, "is_dueling");
 						if (!isDueling) {
@@ -5500,7 +5391,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		if (target instanceof Player p) {
-			String name = p.getGameProfile().name();
+			String name = p.getGameProfile().getName();
 			if (name.equals("honeypie_3301") || name.equals("Dev") || isWhitelistedFriend(name)) {
 				boolean isDueling = getB(self, "is_dueling");
 				if (!isDueling) {
@@ -5525,7 +5416,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 		boolean isArphexTarget = isArphexEntity(target);
 
-		if (!isArphexTarget && (target instanceof Villager || target instanceof AmbientCreature || target instanceof Animal || target instanceof Slime || target instanceof net.minecraft.world.entity.animal.fish.WaterAnimal)) {
+		if (!isArphexTarget && (target instanceof Villager || target instanceof AmbientCreature || target instanceof Animal || target instanceof Slime || target instanceof net.minecraft.world.entity.animal.WaterAnimal)) {
 		    return false;
 		}
 
@@ -5576,9 +5467,9 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static boolean isArphexEntity(Entity target) {
 		if (target == null) return false;
-		Identifier entityId = BuiltInRegistries.ENTITY_TYPE.getKey(target.getType());
+		ResourceLocation entityId = BuiltInRegistries.ENTITY_TYPE.getKey(target.getType());
 		String tid = entityId.toString().toLowerCase(java.util.Locale.ROOT);
-		return target.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse("arphex:arphex")))
+		return target.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse("arphex:arphex")))
 			|| "arphex".equals(entityId.getNamespace())
 			|| tid.contains("arphex");
 	}
@@ -5603,9 +5494,9 @@ private static float lerpAngle(float pct, float start, float end) {
 
 		if (target instanceof RotEntity) return true;
 
-		if (target.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse(K_WOODBOUND)))
-			|| target.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse("mod:woodbound_entities")))
-			|| target.is(TagKey.create(Registries.ENTITY_TYPE, Identifier.parse("minecraft:woodbound_entities")))) {
+		if (target.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse(K_WOODBOUND)))
+			|| target.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse("mod:woodbound_entities")))
+			|| target.getType().is(TagKey.create(Registries.ENTITY_TYPE, ResourceLocation.parse("minecraft:woodbound_entities")))) {
 			return true;
 		}
 
@@ -5698,9 +5589,9 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (!SENTINEL_MODE) {
 			// Combat time and teleport learning are shared with Minos; the buffs below are Sentinel only.
 			if (living.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED))
-				living.getAttribute(Attributes.MOVEMENT_SPEED).removeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_speed"));
+				living.getAttribute(Attributes.MOVEMENT_SPEED).removeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_speed"));
 			if (living.getAttributes().hasAttribute(Attributes.ATTACK_DAMAGE))
-				living.getAttribute(Attributes.ATTACK_DAMAGE).removeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_damage"));
+				living.getAttribute(Attributes.ATTACK_DAMAGE).removeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_damage"));
 			return;
 		}
 
@@ -5795,7 +5686,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 		if (living.getAttributes().hasAttribute(Attributes.MOVEMENT_SPEED)) {
 			var attr = living.getAttribute(Attributes.MOVEMENT_SPEED);
-			attr.removeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_speed"));
+			attr.removeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_speed"));
 			double speedBonus;
 			boolean tpUnlocked = getB(entity, "unlocked_teleportation");
 			if (tpUnlocked) {
@@ -5829,24 +5720,24 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (getB(entity, "sentinel_totem_active") && !getB(entity, "sentinel_is_infinity_totem")) {
 				speedBonus += 0.125;
 			}
-			attr.addTransientModifier(new AttributeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_speed"), speedBonus, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
+			attr.addTransientModifier(new AttributeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_speed"), speedBonus, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
 
-			attr.removeModifier(Identifier.parse("the_backwoods:sentinel_laser_slowdown"));
+			attr.removeModifier(ResourceLocation.parse("the_backwoods:sentinel_laser_slowdown"));
 			double solarCharge = getD(entity, "sentinel_solar_charge_ticks");
 			double solarFire = getD(entity, "sentinel_solar_fire_ticks");
 			if (solarCharge > 0 || solarFire > 0) {
-				attr.addTransientModifier(new AttributeModifier(Identifier.parse("the_backwoods:sentinel_laser_slowdown"), -0.85, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
+				attr.addTransientModifier(new AttributeModifier(ResourceLocation.parse("the_backwoods:sentinel_laser_slowdown"), -0.85, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
 			}
 		}
 
 		if (living.getAttributes().hasAttribute(Attributes.ATTACK_DAMAGE)) {
 			var attr = living.getAttribute(Attributes.ATTACK_DAMAGE);
-			attr.removeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_damage"));
+			attr.removeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_damage"));
 			double damageBonus = -0.20 + (combatTicks / 1000.0) * 0.40;
 			if (getB(entity, "sentinel_totem_active")) {
 				damageBonus += 0.50;
 			}
-			attr.addTransientModifier(new AttributeModifier(Identifier.parse("the_backwoods:sentinel_adaptation_damage"), damageBonus, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
+			attr.addTransientModifier(new AttributeModifier(ResourceLocation.parse("the_backwoods:sentinel_adaptation_damage"), damageBonus, AttributeModifier.Operation.ADD_MULTIPLIED_BASE));
 		}
 	}
 
@@ -6134,7 +6025,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 			Entity directEnt = event.getSource().getDirectEntity();
 			String directType = directEnt != null ? net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(directEnt.getType()).toString().toLowerCase(java.util.Locale.ROOT) : "";
-			if (SENTINEL_MODE && (directEnt instanceof net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull
+			if (SENTINEL_MODE && (directEnt instanceof net.minecraft.world.entity.projectile.WitherSkull
 				|| directType.contains("wither_missile")
 				|| directType.contains("wither_homing_missile")
 				|| directType.contains("wither_skull")
@@ -6186,7 +6077,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			String targetId = BuiltInRegistries.ENTITY_TYPE.getKey(target.getType()).toString();
 			if (targetId.contains("enderman") || targetId.contains("shulker")) {
 				mainParticle = ParticleTypes.SMOKE;
-				secondaryParticle = net.minecraft.core.particles.PowerParticleOption.create(ParticleTypes.DRAGON_BREATH, 1.0f);
+				secondaryParticle = ParticleTypes.DRAGON_BREATH;
 				sound = "entity.enderman.teleport";
 				vol = 1.0f;
 				pitch = 1.0f;
@@ -6288,7 +6179,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			BlockPos refPos = BlockPos.containing(tx, referenceY + 2, tz);
 			boolean inTunnel = !level.getBlockState(refPos).isAir() && level.getBlockState(refPos).isSolid();
 			int startY = inTunnel ? (int) Math.floor(referenceY) + 2 : (int) Math.floor(referenceY) + 6;
-			int minSearchY = inTunnel ? Math.max(level.getMinY(), (int) Math.floor(referenceY) - 4) : Math.max(level.getMinY(), (int) Math.floor(referenceY) - 24);
+			int minSearchY = inTunnel ? Math.max(level.getMinBuildHeight(), (int) Math.floor(referenceY) - 4) : Math.max(level.getMinBuildHeight(), (int) Math.floor(referenceY) - 24);
 			BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 			for (int y = startY; y >= minSearchY; y--) {
 				pos.set((int) Math.floor(tx), y, (int) Math.floor(tz));
@@ -6825,7 +6716,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			double jumpForward = 0.35;
 			self.setDeltaMovement(motion.x + dirX * jumpForward, jumpY, motion.z + dirZ * jumpForward);
 			living.setJumping(true);
-			self.needsSync = true;
+			self.hasImpulse = true;
 
 			if (world instanceof ServerLevel level) {
 				net.minecraft.core.BlockPos belowPos = net.minecraft.core.BlockPos.containing(self.getX(), self.getY() - 0.5, self.getZ());
@@ -6978,22 +6869,30 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static void playHostileSound(LevelAccessor world, double x, double y, double z, String soundId, float volume, float pitch) {
 		if (!(world instanceof Level level)) return;
-		net.minecraft.sounds.SoundEvent sound = BuiltInRegistries.SOUND_EVENT.get(Identifier.parse(soundId)).map(ref -> ref.value()).orElse(null);
-		if (sound != null) {
-			if (!level.isClientSide()) {
-				level.playSound(null, BlockPos.containing(x, y, z), sound, SoundSource.HOSTILE, volume, pitch);
-			} else {
-				level.playLocalSound(x, y, z, sound, SoundSource.HOSTILE, volume, pitch, false);
+		try {
+			ResourceLocation rl = ResourceLocation.tryParse(soundId);
+			if (rl == null) rl = ResourceLocation.parse(soundId.toLowerCase(java.util.Locale.ROOT));
+			net.minecraft.sounds.SoundEvent sound = BuiltInRegistries.SOUND_EVENT.get(rl);
+			if (sound != null) {
+				if (!level.isClientSide()) {
+					level.playSound(null, BlockPos.containing(x, y, z), sound, SoundSource.HOSTILE, volume, pitch);
+				} else {
+					level.playLocalSound(x, y, z, sound, SoundSource.HOSTILE, volume, pitch, false);
+				}
 			}
-		}
+		} catch (Exception ignored) {}
 	}
 
 	private static void stopHostileSound(LevelAccessor world, double x, double y, double z, String soundId, double range) {
 		if (world instanceof ServerLevel level) {
-			net.minecraft.network.protocol.game.ClientboundStopSoundPacket packet = new net.minecraft.network.protocol.game.ClientboundStopSoundPacket(Identifier.parse(soundId), SoundSource.HOSTILE);
-			for (ServerPlayer player : level.getPlayers(p -> p.position().distanceToSqr(x, y, z) <= range * range)) {
-				player.connection.send(packet);
-			}
+			try {
+				ResourceLocation rl = ResourceLocation.tryParse(soundId);
+				if (rl == null) rl = ResourceLocation.parse(soundId.toLowerCase(java.util.Locale.ROOT));
+				net.minecraft.network.protocol.game.ClientboundStopSoundPacket packet = new net.minecraft.network.protocol.game.ClientboundStopSoundPacket(rl, SoundSource.HOSTILE);
+				for (ServerPlayer player : level.getPlayers(p -> p.position().distanceToSqr(x, y, z) <= range * range)) {
+					player.connection.send(packet);
+				}
+			} catch (Exception ignored) {}
 		}
 	}
 
@@ -7030,7 +6929,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 		if (ent.level() instanceof ServerLevel level) {
 			if (ent.distanceToSqr(x, y, z) >= 400.0) {
-				level.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), startX, startY + ent.getBbHeight() / 2.0, startZ, 1, 0, 0, 0, 0);
+				level.sendParticles(net.minecraft.core.particles.ParticleTypes.FLASH, startX, startY + ent.getBbHeight() / 2.0, startZ, 1, 0, 0, 0, 0);
 			}
 		}
 
@@ -7405,7 +7304,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				playHostileSound(serverLevel, entity, "entity.generic.explode", 2.2F, 0.5F);
 				playHostileSound(serverLevel, entity, "entity.warden.sonic_boom", 2.0F, 0.4F);
 				playHostileSound(serverLevel, entity, "block.lava.extinguish", 2.5F, 0.7F);
-				serverLevel.sendParticles(net.minecraft.core.particles.ColorParticleOption.create(ParticleTypes.FLASH, 0xFFFFFFFF), entity.getX(), entity.getY() + 1.2, entity.getZ(), 2, 0, 0, 0, 0);
+				serverLevel.sendParticles(ParticleTypes.FLASH, entity.getX(), entity.getY() + 1.2, entity.getZ(), 2, 0, 0, 0, 0);
 			}
 			return true;
 		}
@@ -7426,8 +7325,8 @@ private static float lerpAngle(float pct, float start, float end) {
 			BlockPos centerPos = entity.blockPosition();
 			int minX = Mth.floor(centerPos.getX() - curRadius);
 			int maxX = Mth.ceil(centerPos.getX() + curRadius);
-			int minY = Math.max(serverLevel.getMinY(), Mth.floor(centerPos.getY() - curRadius * 0.6));
-			int maxY = Math.min(serverLevel.getMaxY(), Mth.ceil(centerPos.getY() + curRadius * 0.9));
+			int minY = Math.max(serverLevel.getMinBuildHeight(), Mth.floor(centerPos.getY() - curRadius * 0.6));
+			int maxY = Math.min(serverLevel.getMaxBuildHeight(), Mth.ceil(centerPos.getY() + curRadius * 0.9));
 			int minZ = Mth.floor(centerPos.getZ() - curRadius);
 			int maxZ = Mth.ceil(centerPos.getZ() + curRadius);
 
@@ -7574,38 +7473,38 @@ private static float lerpAngle(float pct, float start, float end) {
 
 				if (overheadTicks == strikeTick) {
 					if (targetEntity instanceof LivingEntity liv) {
-						double originalY = liv.getY();
-						double targetSunkY = originalY - 1.0;
-						BlockPos belowPos = BlockPos.containing(liv.getX(), targetSunkY, liv.getZ());
-						if (world.getBlockState(belowPos).isCollisionShapeFullBlock(world, belowPos)) {
-							targetSunkY = originalY;
-						}
-						disablePlayerShield(world, liv, 25.0 * getAdaptationMultiplier(entity), 100);
-						net.minecraft.world.damagesource.DamageSource damageSource;
-						if (world instanceof ServerLevel level) {
-							damageSource = getBackwoodsDamage(level, "rot_overhead", entity);
-						} else {
-							damageSource = liv.damageSources().generic();
-						}
-						dealTrueDamageToBosses(liv, damageSource, 25.0F * (float) getAdaptationMultiplier(entity));
-						RotViltrumiteAdaptation.slam(entity, liv, liv.position());
-						liv.teleportTo(liv.getX(), targetSunkY, liv.getZ());
-						setMotion(liv, liv.getDeltaMovement().x(), OVERHEAD_STRIKE_FALL_VELOCITY, liv.getDeltaMovement().z());
-						liv.hurtMarked = true;
-						liv.fallDistance += 5.0F;
-						putD(entity, "sentinel_shockwave_stage", 1);
-						putD(entity, "sentinel_shockwave_x", liv.getX());
-						putD(entity, "sentinel_shockwave_y", liv.getY());
-						putD(entity, "sentinel_shockwave_z", liv.getZ());
-						putB(entity, "sentinel_shockwave_vertical", false);
-						playHostileSound(world, liv, "entity.generic.explode", 1.5F, 0.55F);
-						playHostileSound(world, liv, "entity.iron_golem.attack", 1.8F, 0.45F);
-						if (world instanceof ServerLevel level) {
-							level.sendParticles(ParticleTypes.SONIC_BOOM, liv.getX(), liv.getY() + 0.5, liv.getZ(), 1, 0, 0, 0, 0);
-							boolean totemActive = getB(entity, "sentinel_totem_active");
-							sendCameraShake(totemActive ? 0.4F : 0.25F, totemActive ? 12 : 6, totemActive ? 15.0F : 10.0F);
-						}
+					double originalY = liv.getY();
+					double targetSunkY = originalY - 1.0;
+					BlockPos belowPos = BlockPos.containing(liv.getX(), targetSunkY, liv.getZ());
+					if (world.getBlockState(belowPos).isCollisionShapeFullBlock(world, belowPos)) {
+						targetSunkY = originalY;
 					}
+					disablePlayerShield(world, liv, 25.0 * getAdaptationMultiplier(entity), 100);
+					net.minecraft.world.damagesource.DamageSource damageSource;
+					if (world instanceof ServerLevel level) {
+						damageSource = getBackwoodsDamage(level, "rot_overhead", entity);
+					} else {
+						damageSource = liv.damageSources().generic();
+					}
+					dealTrueDamageToBosses(liv, damageSource, 25.0F * (float) getAdaptationMultiplier(entity));
+					RotViltrumiteAdaptation.slam(entity, liv, liv.position());
+					liv.teleportTo(liv.getX(), targetSunkY, liv.getZ());
+					setMotion(liv, liv.getDeltaMovement().x(), OVERHEAD_STRIKE_FALL_VELOCITY, liv.getDeltaMovement().z());
+					liv.hurtMarked = true;
+					liv.fallDistance += 5.0F;
+					putD(entity, "sentinel_shockwave_stage", 1);
+					putD(entity, "sentinel_shockwave_x", liv.getX());
+					putD(entity, "sentinel_shockwave_y", liv.getY());
+					putD(entity, "sentinel_shockwave_z", liv.getZ());
+					putB(entity, "sentinel_shockwave_vertical", false);
+					playHostileSound(world, liv, "entity.generic.explode", 1.5F, 0.55F);
+					playHostileSound(world, liv, "entity.iron_golem.attack", 1.8F, 0.45F);
+					if (world instanceof ServerLevel level) {
+						level.sendParticles(ParticleTypes.SONIC_BOOM, liv.getX(), liv.getY() + 0.5, liv.getZ(), 1, 0, 0, 0, 0);
+						boolean totemActive = getB(entity, "sentinel_totem_active");
+						sendCameraShake(totemActive ? 0.4F : 0.25F, totemActive ? 12 : 6, totemActive ? 15.0F : 10.0F);
+					}
+				}
 				} else if (overheadTicks < strikeTick) {
 					if (targetEntity instanceof LivingEntity liv && !liv.onGround()) {
 						setMotion(liv, liv.getDeltaMovement().x(), OVERHEAD_POST_STRIKE_FALL_VELOCITY, liv.getDeltaMovement().z());
@@ -7657,8 +7556,8 @@ private static float lerpAngle(float pct, float start, float end) {
 			}
 		}
 
-		if (livTarget.hasEffect(net.minecraft.world.effect.MobEffects.STRENGTH)) {
-			var eff = livTarget.getEffect(net.minecraft.world.effect.MobEffects.STRENGTH);
+		if (livTarget.hasEffect(net.minecraft.world.effect.MobEffects.DAMAGE_BOOST)) {
+			var eff = livTarget.getEffect(net.minecraft.world.effect.MobEffects.DAMAGE_BOOST);
 			if (eff != null) estimatedDmg *= (1.0 + (eff.getAmplifier() + 1) * 0.5);
 		}
 
@@ -8269,8 +8168,8 @@ private static float lerpAngle(float pct, float start, float end) {
 			level.sendParticles(dustPillarOptions, px, targetY + 0.2, pz, 1, 0.0, 0.1, 0.0, 0.05);
 		}
 
-		net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(Identifier.parse("trial_spawner_detection")).map(ref -> ref.value()).orElse(null);
-		net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : ParticleTypes.SMOKE;
+		net.minecraft.core.particles.ParticleType<?> _tsdType = BuiltInRegistries.PARTICLE_TYPE.get(ResourceLocation.parse("trial_spawner_detection"));
+		net.minecraft.core.particles.ParticleOptions trialSpawnerDetection = _tsdType instanceof net.minecraft.core.particles.ParticleOptions _tsdOpt ? _tsdOpt : net.minecraft.core.particles.ParticleTypes.EFFECT;
 
 		level.sendParticles(dustPillarOptions, targetX, targetY + 0.2, targetZ, totemActive ? 90 : 55, 1.5, 0.6, 1.5, 0.25);
 		if (totemActive || getB(self, "sentinel_is_infinity_totem")) {
@@ -8318,7 +8217,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static double findGroundY(LevelAccessor world, Entity entity) {
 		BlockPos pos = entity.blockPosition();
-		int minY = world.getMinY();
+		int minY = world.getMinBuildHeight();
 		int startY = pos.getY();
 		int maxDist = Math.max(64, startY - minY + 2);
 		for (int i = 0; i < maxDist; i++) {
@@ -8582,24 +8481,24 @@ private static float lerpAngle(float pct, float start, float end) {
 		double nextCc5 = getD(entity, "sentinel_cc5_stage");
 
 		if (nextCc1 != cc1) {
-			if (nextCc1 > 0) logActionToChat(world, entity, "TRIPLE THREAT COMBO (CC1) progressed to §aStage " + (int)nextCc1);
-			else logActionToChat(world, entity, "TRIPLE THREAT COMBO (CC1) §cFinished/Cooldown started");
+			if (nextCc1 > 0) logActionToChat(world, entity, "TRIPLE THREAT COMBO (CC1) progressed to Â§aStage " + (int)nextCc1);
+			else logActionToChat(world, entity, "TRIPLE THREAT COMBO (CC1) Â§cFinished/Cooldown started");
 		}
 		if (nextCc2 != cc2) {
-			if (nextCc2 > 0) logActionToChat(world, entity, "HIGH SKY SLAM COMBO (CC2) progressed to §aStage " + (int)nextCc2);
-			else logActionToChat(world, entity, "HIGH SKY SLAM COMBO (CC2) §cFinished/Cooldown started");
+			if (nextCc2 > 0) logActionToChat(world, entity, "HIGH SKY SLAM COMBO (CC2) progressed to Â§aStage " + (int)nextCc2);
+			else logActionToChat(world, entity, "HIGH SKY SLAM COMBO (CC2) Â§cFinished/Cooldown started");
 		}
 		if (nextCc3 != cc3) {
-			if (nextCc3 > 0) logActionToChat(world, entity, "KNOCKBACK DROPKICK COMBO (CC3) progressed to §aStage " + (int)nextCc3);
-			else logActionToChat(world, entity, "KNOCKBACK DROPKICK COMBO (CC3) §cFinished/Cooldown started");
+			if (nextCc3 > 0) logActionToChat(world, entity, "KNOCKBACK DROPKICK COMBO (CC3) progressed to Â§aStage " + (int)nextCc3);
+			else logActionToChat(world, entity, "KNOCKBACK DROPKICK COMBO (CC3) Â§cFinished/Cooldown started");
 		}
 		if (nextCc4 != cc4) {
-			if (nextCc4 > 0) logActionToChat(world, entity, "KNOCKBACK RIDER COMBO (CC4) progressed to §aStage " + (int)nextCc4);
-			else logActionToChat(world, entity, "KNOCKBACK RIDER COMBO (CC4) §cFinished/Cooldown started");
+			if (nextCc4 > 0) logActionToChat(world, entity, "KNOCKBACK RIDER COMBO (CC4) progressed to Â§aStage " + (int)nextCc4);
+			else logActionToChat(world, entity, "KNOCKBACK RIDER COMBO (CC4) Â§cFinished/Cooldown started");
 		}
 		if (nextCc5 != cc5) {
-			if (nextCc5 > 0) logActionToChat(world, entity, "HEAVENLY REPENTANCE PLUS (CC5) progressed to §aStage " + (int)nextCc5);
-			else logActionToChat(world, entity, "HEAVENLY REPENTANCE PLUS (CC5) §cFinished/Cooldown started");
+			if (nextCc5 > 0) logActionToChat(world, entity, "HEAVENLY REPENTANCE PLUS (CC5) progressed to Â§aStage " + (int)nextCc5);
+			else logActionToChat(world, entity, "HEAVENLY REPENTANCE PLUS (CC5) Â§cFinished/Cooldown started");
 		}
 
 		return result;
@@ -9401,7 +9300,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		if (combatTarget instanceof LivingEntity livTarget) {
-			applyEffectSafe(livTarget, new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.NAUSEA, 60, 1, false, false, false));
+			applyEffectSafe(livTarget, new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.CONFUSION, 60, 1, false, false, false));
 			try {
 				applyEffectSafe(livTarget, new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.DARKNESS, 60, 0, false, false, false));
 			} catch (Throwable t) {
@@ -9432,11 +9331,11 @@ private static float lerpAngle(float pct, float start, float end) {
 							level.addFreshEntity(itemEntity);
 
 							level.playSound(null, livTarget.getX(), livTarget.getY(), livTarget.getZ(),
-								net.minecraft.sounds.SoundEvents.ITEM_BREAK.value(), net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
+								net.minecraft.sounds.SoundEvents.ITEM_BREAK, net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
 							level.playSound(null, livTarget.getX(), livTarget.getY(), livTarget.getZ(),
-								net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC.value(), net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
+								net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC, net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
 
-							level.sendParticles(new net.minecraft.core.particles.ItemParticleOption(ParticleTypes.ITEM, net.minecraft.world.item.ItemStackTemplate.fromNonEmptyStack(armorPiece)),
+							level.sendParticles(new net.minecraft.core.particles.ItemParticleOption(ParticleTypes.ITEM, armorPiece),
 								livTarget.getX(), livTarget.getY() + 1.0, livTarget.getZ(), 20, 0.2, 0.2, 0.2, 0.05);
 						}
 					}
@@ -9446,16 +9345,16 @@ private static float lerpAngle(float pct, float start, float end) {
 							if (livTarget instanceof ServerPlayer serverPlayer) {
 								armorPiece.hurtAndBreak(CHOKE_ARMOR_DURABILITY_LOSS, level, serverPlayer, (item) -> {
 									level.playSound(null, livTarget.getX(), livTarget.getY(), livTarget.getZ(),
-										net.minecraft.sounds.SoundEvents.ITEM_BREAK.value(), net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
+										net.minecraft.sounds.SoundEvents.ITEM_BREAK, net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
 								});
 							} else {
 								armorPiece.hurtAndBreak(CHOKE_ARMOR_DURABILITY_LOSS, level, null, (item) -> {
 									level.playSound(null, livTarget.getX(), livTarget.getY(), livTarget.getZ(),
-										net.minecraft.sounds.SoundEvents.ITEM_BREAK.value(), net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
+										net.minecraft.sounds.SoundEvents.ITEM_BREAK, net.minecraft.sounds.SoundSource.PLAYERS, 1.0F, 0.85F);
 								});
 							}
 							level.playSound(null, livTarget.getX(), livTarget.getY(), livTarget.getZ(),
-								net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC.value(), net.minecraft.sounds.SoundSource.PLAYERS, 0.8F, 0.7F);
+								net.minecraft.sounds.SoundEvents.ARMOR_EQUIP_GENERIC, net.minecraft.sounds.SoundSource.PLAYERS, 0.8F, 0.7F);
 						}
 					}
 				}
@@ -9488,17 +9387,17 @@ private static float lerpAngle(float pct, float start, float end) {
 	private static boolean shouldIgnoreCombatFilter(Entity entity) {
 		if (entity == null) return false;
 		if (getB(entity, "has_kill_command_override")
-			|| entity.entityTags().contains("mob_battle")
-			|| entity.entityTags().contains("mobbattle")
-			|| entity.entityTags().contains("test")
-			|| entity.entityTags().contains("ignore_targets")
+			|| entity.getTags().contains("mob_battle")
+			|| entity.getTags().contains("mobbattle")
+			|| entity.getTags().contains("test")
+			|| entity.getTags().contains("ignore_targets")
 			|| entity.getTeam() != null
 			|| getB(entity, "mob_battle_mode")
 			|| entity.getPersistentData().contains("MobBattleTarget")
-			|| (entity instanceof Mob mob && mob.getTarget() != null && (mob.getTarget().entityTags().contains("mob_battle") || mob.getTarget().getTeam() != null))) {
+			|| (entity instanceof Mob mob && mob.getTarget() != null && (mob.getTarget().getTags().contains("mob_battle") || mob.getTarget().getTeam() != null))) {
 			return true;
 		}
-		for (String tag : entity.entityTags()) {
+		for (String tag : entity.getTags()) {
 			String lower = tag.toLowerCase(java.util.Locale.ROOT);
 			if (lower.contains("battle") || lower.contains("stick") || lower.contains("target")) {
 				return true;
@@ -10128,8 +10027,8 @@ private static float lerpAngle(float pct, float start, float end) {
 
 		if (target.level() instanceof ServerLevel sLvl) {
 			AABB searchBox = target.getBoundingBox().inflate(48.0);
-			java.util.List<net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl> pearls = sLvl.getEntitiesOfClass(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl.class, searchBox);
-			for (net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl p : pearls) {
+			java.util.List<net.minecraft.world.entity.projectile.ThrownEnderpearl> pearls = sLvl.getEntitiesOfClass(net.minecraft.world.entity.projectile.ThrownEnderpearl.class, searchBox);
+			for (net.minecraft.world.entity.projectile.ThrownEnderpearl p : pearls) {
 				if (p.isAlive() && (p.getOwner() == null || p.getOwner().equals(target))) {
 					return TargetIntent.REPOSITIONING;
 				}
@@ -10418,7 +10317,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					putB(entity, "sentinel_totem_learned", true);
 
 					if (entity instanceof LivingEntity living) {
-						net.minecraft.world.item.Item infinityTotemItem = isInfinityTotem ? BuiltInRegistries.ITEM.get(Identifier.parse("avaritia:infinity_totem")).map(ref -> ref.value()).orElse(null) : null;
+						net.minecraft.world.item.Item infinityTotemItem = isInfinityTotem ? BuiltInRegistries.ITEM.get(ResourceLocation.parse("avaritia:infinity_totem")) : null;
 						net.minecraft.world.item.ItemStack stackToHold = (infinityTotemItem != null) ? new net.minecraft.world.item.ItemStack(infinityTotemItem) : new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.TOTEM_OF_UNDYING);
 
 						if (getD(entity, "sentinel_totem_inspect_ticks") > 0) {
@@ -10531,7 +10430,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	public static boolean isHazardousLocation(LevelAccessor world, double x, double y, double z) {
 		if (world == null) return true;
-		if (y <= world.getMinY() + 1.0) return true;
+		if (y <= world.getMinBuildHeight() + 1.0) return true;
 
 		BlockPos posFeet = BlockPos.containing(x, y, z);
 		BlockPos posHead = posFeet.above();
@@ -10571,10 +10470,10 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (!(world instanceof ServerLevel level) || self == null || target == null) return false;
 
 		AABB box = target.getBoundingBox().inflate(48.0);
-		java.util.List<net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl> pearls = level.getEntitiesOfClass(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl.class, box);
+		java.util.List<net.minecraft.world.entity.projectile.ThrownEnderpearl> pearls = level.getEntitiesOfClass(net.minecraft.world.entity.projectile.ThrownEnderpearl.class, box);
 
-		net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl targetPearl = null;
-		for (net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl p : pearls) {
+		net.minecraft.world.entity.projectile.ThrownEnderpearl targetPearl = null;
+		for (net.minecraft.world.entity.projectile.ThrownEnderpearl p : pearls) {
 			if (p.isAlive() && (p.getOwner() == null || p.getOwner().equals(target))) {
 				targetPearl = p;
 				break;
@@ -11376,10 +11275,10 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (tag == null || !hasNBTKey(tag, "rot_personality_initialized")) {
 				return new PersonalityVector();
 			}
-			double a = tag.getDoubleOr("rot_personality_aggression", 0.5);
-			double p = tag.getDoubleOr("rot_personality_patience", 0.5);
-			double r = tag.getDoubleOr("rot_personality_risk_tolerance", 0.5);
-			double s = tag.getDoubleOr("rot_personality_spite", 0.5);
+			double a = tag.getDouble("rot_personality_aggression");
+			double p = tag.getDouble("rot_personality_patience");
+			double r = tag.getDouble("rot_personality_risk_tolerance");
+			double s = tag.getDouble("rot_personality_spite");
 			return new PersonalityVector(a, p, r, s);
 		}
 	}
@@ -12054,18 +11953,108 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 	}
 
+
+	// Transfer only learned progression; runtime combat, health and Guardian state stay fresh.
+	private static final String[] INHERITED_ROT_FLAGS = "unlocked_armor_rip unlocked_block unlocked_counter unlocked_cryo_beam unlocked_die_rider_kick unlocked_dropkick_combo unlocked_explosion_boom unlocked_grapple unlocked_heavenly_repentance_plus unlocked_high_sky_slam_combo unlocked_judgment unlocked_knockback_dropkick_combo unlocked_knockback_rider_combo unlocked_minos_combo unlocked_overhead_combo unlocked_overhead_slam unlocked_parry unlocked_phase_shift unlocked_regen unlocked_sky_warp_slam unlocked_solar_beam unlocked_sonic_boom unlocked_sonic_scream unlocked_telekinesis unlocked_teleportation unlocked_triple_threat_combo unlocked_water_evaporation unlocked_wither_skulls adapted_forcefield_repulsion adapted_gravitational_mass fought_cold_entity fought_nether_entity fought_warden_entity rot_mobile_scream_learned sentinel_totem_learned sentinel_adapted_cbc".split(" ");
+	private static final String[] INHERITED_ROT_NUMBERS = {
+		"sentinel_combat_ticks", "sentinel_teleport_learning_progress", "sentinel_flying_target_ticks",
+		"sentinel_total_damage_taken", "sentinel_total_damage_dealt", "adapted_punch_damage", "rot_phase_mastery"
+	};
+
+	private static UUID threatRotOwner(Entity rot) {
+		if (!(rot instanceof net.mcreator.thebackwoods.entity.RotEntity) || rot.level().isClientSide()) return null;
+		// Threat encounters keep their owner; any other Rot contributes to its credited combatant.
+		for (String key : new String[]{"bw_threat_owner", "bw_rot_adaptation_player"}) {
+			String owner = getRotPersistentString(rot, key, "");
+			try { return UUID.fromString(owner); }
+			catch (IllegalArgumentException invalidOwner) { /* Try the next attribution source. */ }
+		}
+		if (rot instanceof LivingEntity living && living.getKillCredit() instanceof Player player)
+			return player.getUUID();
+		return null;
+	}
+
+	private static double boundedInheritedRotNumber(String key, double value) {
+		if (!Double.isFinite(value)) return 0;
+		double cap = key.equals("rot_phase_mastery") ? 1.0
+			: key.equals("adapted_punch_damage") ? 60.0
+			: key.equals("sentinel_combat_ticks") ? 72000.0
+			: key.equals("sentinel_teleport_learning_progress") ? 160.0 : 1.0e9;
+		return Math.max(0, Math.min(cap, value));
+	}
+
+
+	/** Server-time decay, sampled by the threat system even while no Rot is alive. */
+	public static void tickThreatRotInheritance(Player player) {
+		if (!(player.level() instanceof ServerLevel level)) return;
+		RotHivemindSavedData hive = RotHivemindSavedData.get(level);
+		if (hive == null) return;
+		CompoundTag memory = hive.getMemory(player.getUUID());
+		long now = level.getServer().overworld().getGameTime();
+		long last = memory.getLong("ThreatRotDecayAt");
+		boolean easy = level.getDifficulty() == net.minecraft.world.Difficulty.EASY;
+		boolean wasEasy = memory.getBoolean("ThreatRotDecayEasy");
+		if (memory.contains("ThreatRotDecayAt") && now >= last && now - last < 20 && easy == wasEasy) return;
+		long elapsed = memory.contains("ThreatRotDecayAt") && now > last && easy && wasEasy ? now - last : 0;
+		memory.putLong("ThreatRotDecayAt", now);
+		memory.putBoolean("ThreatRotDecayEasy", easy);
+		CompoundTag inherited = memory.getCompound("ThreatRotAdaptation");
+		if (elapsed > 0 && !inherited.isEmpty()) {
+			double factor = Math.pow(0.5, elapsed / 168000.0); // Seven Minecraft days.
+			for (String key : INHERITED_ROT_NUMBERS) {
+				if (!inherited.contains(key)) continue;
+				double value = boundedInheritedRotNumber(key, inherited.getDouble(key)) * factor;
+				inherited.putDouble(key, value < 0.001 ? 0 : value);
+			}
+			long progress = Math.max(0L, memory.getLong("ThreatRotUnlockDecayTicks"));
+			long total = Math.min(168000L * (INHERITED_ROT_FLAGS.length + 1), progress + elapsed);
+			int losses = (int)(total / 168000L);
+			for (String key : INHERITED_ROT_FLAGS) {
+				if (losses == 0) break;
+				if (inherited.getBoolean(key)) {
+					inherited.putBoolean(key, false);
+					losses--;
+				}
+			}
+			memory.putLong("ThreatRotUnlockDecayTicks", total % 168000L);
+			memory.put("ThreatRotAdaptation", inherited);
+		}
+		hive.updateMemory(player.getUUID(), memory);
+	}
+	public static void saveThreatRotAdaptation(Entity rot) {
+		UUID owner = threatRotOwner(rot);
+		if (owner == null) return;
+		RotHivemindSavedData hive = RotHivemindSavedData.get(rot.level());
+		if (hive == null) return;
+		CompoundTag memory = hive.getMemory(owner);
+		CompoundTag previous = memory.getCompound("ThreatRotAdaptation");
+		CompoundTag inherited = new CompoundTag();
+		// Union/max merging prevents overlapping encounters from erasing previous learning.
+		for (String key : INHERITED_ROT_FLAGS)
+			inherited.putBoolean(key, getRotPersistentBoolean(rot, key, false) || previous.getBoolean(key));
+		for (String key : INHERITED_ROT_NUMBERS)
+			inherited.putDouble(key, Math.max(boundedInheritedRotNumber(key, getRotPersistentDouble(rot, key, 0)),
+				boundedInheritedRotNumber(key, previous.getDouble(key))));
+		memory.put("ThreatRotAdaptation", inherited);
+		hive.updateMemory(owner, memory);
+	}
+
+	public static void restoreThreatRotAdaptation(Entity rot) {
+		UUID owner = threatRotOwner(rot);
+		if (owner == null) return;
+		RotHivemindSavedData hive = RotHivemindSavedData.get(rot.level());
+		if (hive == null) return;
+		CompoundTag inherited = hive.getMemory(owner).getCompound("ThreatRotAdaptation");
+		for (String key : INHERITED_ROT_FLAGS)
+			if (inherited.getBoolean(key)) setRotPersistentBoolean(rot, key, true);
+		for (String key : INHERITED_ROT_NUMBERS) {
+			if (!inherited.contains(key)) continue;
+			setRotPersistentDouble(rot, key, Math.max(boundedInheritedRotNumber(key, getRotPersistentDouble(rot, key, 0)),
+				boundedInheritedRotNumber(key, inherited.getDouble(key))));
+		}
+	}
 	public static class RotHivemindSavedData extends SavedData {
 		public static final String DATA_NAME = "rot_hivemind_data";
-		public static final Codec<RotHivemindSavedData> CODEC = CompoundTag.CODEC.xmap(
-			tag -> load(tag, null),
-			data -> data.save(new CompoundTag(), null)
-		);
-		public static final SavedDataType<RotHivemindSavedData> TYPE = new SavedDataType<>(
-			net.minecraft.resources.Identifier.parse(DATA_NAME),
-			RotHivemindSavedData::new,
-			CODEC,
-			null
-		);
 		public final Map<UUID, CompoundTag> playerMemories = new HashMap<>();
 
 		public RotHivemindSavedData() {}
@@ -12073,11 +12062,11 @@ private static float lerpAngle(float pct, float start, float end) {
 		public static RotHivemindSavedData load(CompoundTag tag, HolderLookup.Provider provider) {
 			RotHivemindSavedData data = new RotHivemindSavedData();
 			if (tag != null && tag.contains("PlayerMemories")) {
-				CompoundTag mems = tag.getCompoundOrEmpty("PlayerMemories");
-				for (String key : mems.keySet()) {
+				CompoundTag mems = tag.getCompound("PlayerMemories");
+				for (String key : mems.getAllKeys()) {
 					try {
 						UUID uuid = UUID.fromString(key);
-						data.playerMemories.put(uuid, mems.getCompoundOrEmpty(key));
+						data.playerMemories.put(uuid, mems.getCompound(key));
 					} catch (Exception ignored) {}
 				}
 			}
@@ -12106,7 +12095,10 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (world instanceof ServerLevel serverLevel) {
 				ServerLevel overworld = serverLevel.getServer().getLevel(Level.OVERWORLD);
 				if (overworld != null) {
-					return overworld.getDataStorage().computeIfAbsent(TYPE);
+					return overworld.getDataStorage().computeIfAbsent(
+						new SavedData.Factory<>(RotHivemindSavedData::new, RotHivemindSavedData::load, null),
+						DATA_NAME
+					);
 				}
 			}
 			return null;
@@ -12518,7 +12510,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					increaseTraitConfidence(EnemyTrait.GRAVITY_MANIPULATION, 0.25);
 				}
 				if (rotLiv.hasEffect(MobEffects.BLINDNESS)) increaseTraitConfidence(EnemyTrait.BLINDNESS, 0.30);
-				if (rotLiv.hasEffect(MobEffects.SLOWNESS)) increaseTraitConfidence(EnemyTrait.SLOWNESS, 0.30);
+				if (rotLiv.hasEffect(MobEffects.MOVEMENT_SLOWDOWN)) increaseTraitConfidence(EnemyTrait.SLOWNESS, 0.30);
 				if (rotLiv.hasEffect(MobEffects.POISON)) increaseTraitConfidence(EnemyTrait.POISON, 0.30);
 				if (rotLiv.hasEffect(MobEffects.WITHER)) increaseTraitConfidence(EnemyTrait.WITHER, 0.30);
 			}
@@ -12736,7 +12728,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			// Index 64: INPUT_TARGET_VULNERABILITY_WINDOW
 			boolean isTargetVuln = !target.onGround() 
 					|| target.getTicksUsingItem() > 0 
-					|| (target instanceof Player p && p.getCooldowns().isOnCooldown(net.minecraft.world.item.Items.SHIELD.getDefaultInstance()))
+					|| (target instanceof Player p && p.getCooldowns().isOnCooldown(net.minecraft.world.item.Items.SHIELD))
 					|| target.swingTime > 0;
 			inputs[64] = isTargetVuln ? 1.0 : 0.0;
 
@@ -13442,60 +13434,57 @@ private static float lerpAngle(float pct, float start, float end) {
 		public void loadFromNbt(CompoundTag mem) {
 			if (mem == null) return;
 			if (mem.contains("RotNNWeights")) {
-				long[] savedW = mem.getLongArray("RotNNWeights").orElseGet(() -> new long[0]);
+				long[] savedW = mem.getLongArray("RotNNWeights");
 				if (savedW != null && savedW.length == TacticalNeuralNetwork.TOTAL_WEIGHTS) {
 					neuralNet = TacticalNeuralNetwork.fromLongArray(savedW);
 				}
 			}
 
 			if (mem.contains("RotHabits")) {
-				long[] savedH = mem.getLongArray("RotHabits").orElseGet(() -> new long[0]);
-				if (savedH != null) {
-					opponentHabits.deserialize(savedH);
-				}
+				opponentHabits.deserialize(mem.getLongArray("RotHabits"));
 			}
 
 			if (mem.contains("TraitConfidence")) {
-				CompoundTag tag = mem.getCompoundOrEmpty("TraitConfidence");
-				for (String k : tag.keySet()) {
+				CompoundTag tag = mem.getCompound("TraitConfidence");
+				for (String k : tag.getAllKeys()) {
 					try {
 						EnemyTrait trait = EnemyTrait.valueOf(k);
-						traitConfidence.put(trait, tag.getDoubleOr(k, 0.0));
+						traitConfidence.put(trait, tag.getDouble(k));
 					} catch (Exception ignored) {}
 				}
 			}
 
 			if (mem.contains("DefenseAlpha")) {
-				CompoundTag tag = mem.getCompoundOrEmpty("DefenseAlpha");
-				for (String k : tag.keySet()) defenseAlpha.put(k, tag.getDoubleOr(k, 0.0));
+				CompoundTag tag = mem.getCompound("DefenseAlpha");
+				for (String k : tag.getAllKeys()) defenseAlpha.put(k, tag.getDouble(k));
 			}
 
 			if (mem.contains("DefenseBeta")) {
-				CompoundTag tag = mem.getCompoundOrEmpty("DefenseBeta");
-				for (String k : tag.keySet()) defenseBeta.put(k, tag.getDoubleOr(k, 0.0));
+				CompoundTag tag = mem.getCompound("DefenseBeta");
+				for (String k : tag.getAllKeys()) defenseBeta.put(k, tag.getDouble(k));
 			}
 
 			if (mem.contains("DefenseSuccessRates")) {
-				CompoundTag tag = mem.getCompoundOrEmpty("DefenseSuccessRates");
-				for (String k : tag.keySet()) defenseSuccessRates.put(k, tag.getDoubleOr(k, 0.0));
+				CompoundTag tag = mem.getCompound("DefenseSuccessRates");
+				for (String k : tag.getAllKeys()) defenseSuccessRates.put(k, tag.getDouble(k));
 			}
 
 			if (mem.contains("PersonalityVector")) {
-				personality = PersonalityVector.loadFromNbt(mem.getCompoundOrEmpty("PersonalityVector"));
+				personality = PersonalityVector.loadFromNbt(mem.getCompound("PersonalityVector"));
 			}
 
 			if (mem.contains("PlanSuccessRate")) {
-				CompoundTag tag = mem.getCompoundOrEmpty("PlanSuccessRate");
-				for (String k : tag.keySet()) {
+				CompoundTag tag = mem.getCompound("PlanSuccessRate");
+				for (String k : tag.getAllKeys()) {
 					try {
 						TacticalPlan plan = TacticalPlan.valueOf(k);
-						planSuccessRate.put(plan, tag.getDoubleOr(k, 0.0));
+						planSuccessRate.put(plan, tag.getDouble(k));
 					} catch (Exception ignored) {}
 				}
 			}
 
 			if (mem.contains("SuccessfulCounters")) {
-				String str = mem.getStringOr("SuccessfulCounters", "");
+				String str = mem.getString("SuccessfulCounters");
 				successfulCounters.clear();
 				if (!str.isEmpty()) {
 					for (String s : str.split(",")) if (!s.trim().isEmpty()) successfulCounters.add(s.trim());
@@ -13503,7 +13492,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			}
 
 			if (mem.contains("FailedCounters")) {
-				String str = mem.getStringOr("FailedCounters", "");
+				String str = mem.getString("FailedCounters");
 				failedCounters.clear();
 				if (!str.isEmpty()) {
 					for (String s : str.split(",")) if (!s.trim().isEmpty()) failedCounters.add(s.trim());
@@ -14413,7 +14402,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				for (LivingEntity enemy : enemies) {
 					Vec3 push = enemy.position().subtract(pos).normalize().scale(0.4).add(0, 0.25, 0);
 					setMotion(enemy, enemy.getDeltaMovement().add(push));
-					applyEffectSafe(enemy, new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.SLOWNESS, 40, 0));
+					applyEffectSafe(enemy, new net.minecraft.world.effect.MobEffectInstance(net.minecraft.world.effect.MobEffects.MOVEMENT_SLOWDOWN, 40, 0));
 				}
 				if (level instanceof ServerLevel serverLevel && !enemies.isEmpty()) {
 					serverLevel.sendParticles(ParticleTypes.EXPLOSION, pos.x, pos.y + 0.2, pos.z, 12, 1.5, 0.2, 1.5, 0.1);
@@ -14547,7 +14536,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			double spreadZ = (level.getRandom().nextDouble() - 0.5) * 0.04;
 			Vec3 finalDir = dir.add(spreadX, spreadY, spreadZ).normalize();
 
-			net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull skull = new net.minecraft.world.entity.projectile.hurtingprojectile.WitherSkull(net.minecraft.world.entity.EntityType.WITHER_SKULL, level);
+			net.minecraft.world.entity.projectile.WitherSkull skull = new net.minecraft.world.entity.projectile.WitherSkull(net.minecraft.world.entity.EntityType.WITHER_SKULL, level);
 			skull.setOwner(living);
 			skull.setPos(headPos.x, headPos.y, headPos.z);
 			skull.setDeltaMovement(finalDir.scale(3.8));
@@ -14581,7 +14570,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	}
 
 	private static boolean isWitherSkullImmuneTarget(ServerLevel level, LivingEntity target) {
-		return isWither(target) || target.isInvulnerableTo(level, level.damageSources().wither());
+		return isWither(target) || target.isInvulnerableTo(level.damageSources().wither());
 	}
 
 	private static void recordWitherSkullFailure(Entity rot, LivingEntity target) {
@@ -14608,8 +14597,8 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		AABB box = entity.getBoundingBox().inflate(64.0);
-		java.util.List<net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl> pearls = level.getEntitiesOfClass(net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl.class, box);
-		for (net.minecraft.world.entity.projectile.throwableitemprojectile.ThrownEnderpearl pearl : pearls) {
+		java.util.List<net.minecraft.world.entity.projectile.ThrownEnderpearl> pearls = level.getEntitiesOfClass(net.minecraft.world.entity.projectile.ThrownEnderpearl.class, box);
+		for (net.minecraft.world.entity.projectile.ThrownEnderpearl pearl : pearls) {
 			if (pearl.isAlive() && pearl.tickCount >= 3) {
 				double dist = entity.distanceTo(pearl);
 				boolean approachingLand = pearl.getDeltaMovement().y() < 0 || pearl.tickCount >= 8 || dist < 30.0;
@@ -14703,22 +14692,26 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static boolean getRotPersistentBoolean(Entity entity, String key, boolean fallback) {
 		if (entity == null) return fallback;
-		return entity.getPersistentData().getBooleanOr(key, fallback);
+		CompoundTag tag = entity.getPersistentData();
+		return tag.contains(key) ? tag.getBoolean(key) : fallback;
 	}
 
 	private static int getRotPersistentInt(Entity entity, String key, int fallback) {
 		if (entity == null) return fallback;
-		return entity.getPersistentData().getIntOr(key, fallback);
+		CompoundTag tag = entity.getPersistentData();
+		return tag.contains(key) ? tag.getInt(key) : fallback;
 	}
 
 	private static double getRotPersistentDouble(Entity entity, String key, double fallback) {
 		if (entity == null) return fallback;
-		return entity.getPersistentData().getDoubleOr(key, fallback);
+		CompoundTag tag = entity.getPersistentData();
+		return tag.contains(key) ? tag.getDouble(key) : fallback;
 	}
 
 	private static String getRotPersistentString(Entity entity, String key, String fallback) {
 		if (entity == null) return fallback;
-		return entity.getPersistentData().getStringOr(key, fallback);
+		CompoundTag tag = entity.getPersistentData();
+		return tag.contains(key) ? tag.getString(key) : fallback;
 	}
 
 	private static void setRotPersistentBoolean(Entity entity, String key, boolean val) {
@@ -15021,8 +15014,8 @@ private static float lerpAngle(float pct, float start, float end) {
 
 			if (self.isInWall() || (ceilingTooLow && distance > 4.0 && mob.tickCount % 40 == 0)) {
 				if (getB(self, "unlocked_teleportation")) {
-					double tx = target.getX() + (level.getRandom().nextDouble() - 0.5) * 3.0;
-					double tz = target.getZ() + (level.getRandom().nextDouble() - 0.5) * 3.0;
+					double tx = target.getX() + (level.random.nextDouble() - 0.5) * 3.0;
+					double tz = target.getZ() + (level.random.nextDouble() - 0.5) * 3.0;
 					double ty = target.getY();
 					teleportEntity(mob, tx, ty, tz);
 				}
@@ -15122,7 +15115,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		double lZ = getD(entity, "last_path_tz");
 		if (target.distanceToSqr(lX, lY, lZ) < 1.44 && mob.getNavigation().getPath() != null) return;
 
-		net.minecraft.server.MinecraftServer server = entity.level().getServer();
+		net.minecraft.server.MinecraftServer server = entity.getServer();
 		if (server == null) return;
 
 		putB(entity, "sentinel_pathfinding_active", true);
@@ -15220,7 +15213,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		Level level = (world instanceof Level l) ? l : null;
 		if (level == null) return null;
 		String path = id.startsWith("the_backwoods:") ? id : "the_backwoods:" + id;
-		var holder = level.holderOrThrow(net.minecraft.resources.ResourceKey.create(Registries.DAMAGE_TYPE, Identifier.parse(path)));
+		var holder = level.holderOrThrow(net.minecraft.resources.ResourceKey.create(Registries.DAMAGE_TYPE, ResourceLocation.parse(path)));
 		return directEntity != null ? new DamageSource(holder, directEntity) : new DamageSource(holder);
 	}
 
@@ -15236,14 +15229,14 @@ private static float lerpAngle(float pct, float start, float end) {
 	private static void setMotion(Entity e, double x, double y, double z) {
 		if (e != null) {
 			e.setDeltaMovement(new Vec3(x, y, z));
-			e.needsSync = true;
+			e.hasImpulse = true;
 		}
 	}
 
 	private static void setMotion(Entity e, Vec3 v) {
 		if (e != null && v != null) {
 			e.setDeltaMovement(v);
-			e.needsSync = true;
+			e.hasImpulse = true;
 		}
 	}
 
@@ -15280,7 +15273,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (className.contains("contraption") || className.contains("physicsentity") || className.contains("valkyrien") || className.contains("shipobject")) {
 			return true;
 		}
-		Identifier typeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
+		ResourceLocation typeId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType());
 		String idStr = typeId.toString().toLowerCase(java.util.Locale.ROOT);
 		return idStr.contains("contraption") || idStr.contains("carriage") || idStr.contains("turret") || idStr.contains("cannon");
 	}
@@ -15289,7 +15282,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (state == null || state.isAir()) {
 			return false;
 		}
-		Identifier blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+		ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
 		String path = blockId.toString().toLowerCase(java.util.Locale.ROOT);
 		return path.contains("radar") || path.contains("scanner") || path.contains("sensor") || path.contains("target")
 			|| path.contains("cannon") || path.contains("autocannon") || path.contains("gun") || path.contains("breech")
@@ -15302,17 +15295,17 @@ private static float lerpAngle(float pct, float start, float end) {
 			return;
 		}
 		level.destroyBlock(pos, false, attacker);
-		Identifier blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
+		ResourceLocation blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
 		String path = blockId.toString().toLowerCase(java.util.Locale.ROOT);
 
 		if (path.contains("radar") || path.contains("scanner") || path.contains("sensor") || path.contains("target")) {
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.REDSTONE, 2 + level.getRandom().nextInt(3)));
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.COPPER_INGOT, 1 + level.getRandom().nextInt(2)));
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.getRandom().nextInt(2)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.REDSTONE, 2 + level.random.nextInt(3)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.COPPER_INGOT, 1 + level.random.nextInt(2)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.random.nextInt(2)));
 		} else {
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.IRON_NUGGET, 3 + level.getRandom().nextInt(5)));
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.RAW_IRON, 1 + level.getRandom().nextInt(2)));
-			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.getRandom().nextInt(2)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.IRON_NUGGET, 3 + level.random.nextInt(5)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.RAW_IRON, 1 + level.random.nextInt(2)));
+			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.random.nextInt(2)));
 			spawnScorchedItem(level, pos.getCenter(), new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BLACKSTONE, 1));
 		}
 
@@ -15377,10 +15370,10 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		if (!disassembledViaReflection) {
-			int scrapCount = 3 + level.getRandom().nextInt(4);
+			int scrapCount = 3 + level.random.nextInt(4);
 			for (int i = 0; i < scrapCount; i++) {
-				spawnScorchedItem(level, center, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.IRON_NUGGET, 3 + level.getRandom().nextInt(4)));
-				spawnScorchedItem(level, center, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.getRandom().nextInt(2)));
+				spawnScorchedItem(level, center, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.IRON_NUGGET, 3 + level.random.nextInt(4)));
+				spawnScorchedItem(level, center, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.CHARCOAL, 1 + level.random.nextInt(2)));
 				spawnScorchedItem(level, center, new net.minecraft.world.item.ItemStack(net.minecraft.world.item.Items.BLACKSTONE, 1));
 			}
 		}
@@ -15414,11 +15407,11 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	private static void spawnScorchedItem(ServerLevel level, Vec3 pos, net.minecraft.world.item.ItemStack stack) {
 		if (stack.isEmpty()) return;
-		double rx = (level.getRandom().nextDouble() - 0.5) * 1.2;
-		double ry = level.getRandom().nextDouble() * 0.6;
-		double rz = (level.getRandom().nextDouble() - 0.5) * 1.2;
+		double rx = (level.random.nextDouble() - 0.5) * 1.2;
+		double ry = level.random.nextDouble() * 0.6;
+		double rz = (level.random.nextDouble() - 0.5) * 1.2;
 		net.minecraft.world.entity.item.ItemEntity itemEntity = new net.minecraft.world.entity.item.ItemEntity(level, pos.x + rx, pos.y + ry, pos.z + rz, stack);
-		itemEntity.setDeltaMovement((level.getRandom().nextDouble() - 0.5) * 0.25, 0.2 + level.getRandom().nextDouble() * 0.25, (level.getRandom().nextDouble() - 0.5) * 0.25);
+		itemEntity.setDeltaMovement((level.random.nextDouble() - 0.5) * 0.25, 0.2 + level.random.nextDouble() * 0.25, (level.random.nextDouble() - 0.5) * 0.25);
 		itemEntity.setDefaultPickUpDelay();
 		level.addFreshEntity(itemEntity);
 	}
@@ -15538,7 +15531,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 	    @SubscribeEvent
 	    public static void hurt(net.neoforged.neoforge.event.entity.living.LivingDamageEvent.Post event) {
-	        if (!ENABLED || event.getHealthDamage() <= 0 || event.getEntity().level().isClientSide()) return;
+	        if (!ENABLED || event.getNewDamage() <= 0 || event.getEntity().level().isClientSide()) return;
 	        Entity attacker = event.getSource().getEntity();
 	        if (event.getEntity() instanceof RotEntity rot && alive(rot)) remember(rot, attacker);
 	        else if (attacker instanceof RotEntity rot && alive(rot)) remember(rot, event.getEntity());
@@ -15548,8 +15541,8 @@ private static float lerpAngle(float pct, float start, float end) {
 	        LivingEntity target = rot.getTarget();
 	        if (target != null && target.isAlive() && isViltrumite(target)) return target;
 	        var data = rot.getPersistentData();
-	        String id = data.getStringOr(THREAT, "");
-	        long age = level.getGameTime() - data.getLongOr(CONTACT, 0L);
+	        String id = data.getString(THREAT);
+	        long age = level.getGameTime() - data.getLong(CONTACT);
 	        if (id.isEmpty() || age < 0 || age > Math.max(0, RECENT_COMBAT_TICKS)) return null;
 	        try {
 	            Entity remembered = level.getEntity(java.util.UUID.fromString(id));
@@ -15561,7 +15554,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	    public static void sample(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {
 	        if (!ENABLED || !(event.getEntity() instanceof RotEntity rot) || !(rot.level() instanceof ServerLevel level) || !alive(rot)) return;
 	        var data = rot.getPersistentData();
-	        long now = level.getGameTime(), previous = data.getLongOr(SAMPLE, 0L);
+	        long now = level.getGameTime(), previous = data.getLong(SAMPLE);
 	        int interval = Math.max(1, SAMPLE_INTERVAL_TICKS);
 	        if (now >= previous && now - previous < interval) return;
 	        data.putLong(SAMPLE, now);
@@ -15570,14 +15563,14 @@ private static float lerpAngle(float pct, float start, float end) {
 	        if (target != null && rot.distanceToSqr(target) <= distance * distance) {
 	            int elapsed = (int)Math.min(interval, Math.max(0L, now - previous));
 	            int cap = Math.max(1, STAGE_THREE_COMBAT_TICKS);
-	            data.putInt(PROGRESS, (int)Math.min(cap, (long)Math.max(0, data.getIntOr(PROGRESS, 0)) + elapsed));
+	            data.putInt(PROGRESS, (int)Math.min(cap, (long)Math.max(0, data.getInt(PROGRESS)) + elapsed));
 	        }
 	    }
 
 	    public static int stage(Entity entity) {
 	        if (!ENABLED || !(entity instanceof RotEntity rot) || !alive(rot)
 	                || !net.mcreator.thebackwoods.procedures.RotOnEntityTickUpdateProcedure.MINOS_MODE) return 0;
-	        int ticks = rot.getPersistentData().getIntOr(PROGRESS, 0);
+	        int ticks = rot.getPersistentData().getInt(PROGRESS);
 	        return ticks >= Math.max(1, STAGE_THREE_COMBAT_TICKS) ? 3
 	                : ticks >= Math.max(1, STAGE_TWO_COMBAT_TICKS) ? 2
 	                : ticks >= Math.max(1, STAGE_ONE_COMBAT_TICKS) ? 1 : 0;
@@ -15681,13 +15674,13 @@ private static float lerpAngle(float pct, float start, float end) {
 	            if (!Double.isFinite(threshold) || !Double.isFinite(fraction) || threshold <= 0 || fraction <= 0.001
 	                    || original * fraction >= threshold) return original;
 	            var data = rot.getPersistentData();
-	            long now = level.getGameTime(), last = data.getLongOr(WEAK_SAMPLE, 0L);
+	            long now = level.getGameTime(), last = data.getLong(WEAK_SAMPLE);
 	            if (!data.contains(WEAK_SAMPLE) || now < last || now - last >= 10) {
-	                data.putInt(WEAK_HITS, Math.min(64, Math.max(0, data.getIntOr(WEAK_HITS, 0)) + 1));
+	                data.putInt(WEAK_HITS, Math.min(64, Math.max(0, data.getInt(WEAK_HITS)) + 1));
 	                data.putLong(WEAK_SAMPLE, now);
 	            }
 	            remember(rot, target);
-	            if (data.getIntOr(WEAK_HITS, 0) < Math.max(1, WEAK_HITS_TO_LEARN)) return original;
+	            if (data.getInt(WEAK_HITS) < Math.max(1, WEAK_HITS_TO_LEARN)) return original;
 	            double cap = Double.isFinite(MAX_THRESHOLD_ADAPTED_DAMAGE) ? Math.max(original, Math.min(2048, MAX_THRESHOLD_ADAPTED_DAMAGE)) : original;
 	            return (float)Math.max(original, Math.min(cap, (threshold + 0.5) / fraction));
 	        } catch (ReflectiveOperationException | RuntimeException failure) { warn(failure); return original; }
@@ -15703,7 +15696,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	        int remaining = 4; // Matches the existing uppercut launch window; never changes combo clocks.
 	        Lift(ServerLevel level, RotEntity owner, Entity victim) {
 	            this.level = level; this.owner = owner.getUUID(); this.victim = victim; startY = victim.getY();
-	            reinforce = owner.getPersistentData().getIntOr(FAILED_LIFTS, 0) >= Math.max(1, FAILED_LAUNCHES_TO_LEARN);
+	            reinforce = owner.getPersistentData().getInt(FAILED_LIFTS) >= Math.max(1, FAILED_LAUNCHES_TO_LEARN);
 	        }
 	    }
 
@@ -15743,16 +15736,16 @@ private static float lerpAngle(float pct, float start, float end) {
 	                    catch (ReflectiveOperationException | RuntimeException failure) { warn(failure); }
 	                }
 	                Vec3 motion = target.getDeltaMovement();
-	                double minimum = Math.min(3.8, 1.6 + rot.getPersistentData().getIntOr(FAILED_LIFTS, 0) * 0.4);
+	                double minimum = Math.min(3.8, 1.6 + rot.getPersistentData().getInt(FAILED_LIFTS) * 0.4);
 	                target.setDeltaMovement(motion.x, Math.min(3.8, Math.max(minimum, motion.y)), motion.z);
-	                target.needsSync = true; target.hurtMarked = true;
+	                target.hasImpulse = true; target.hurtMarked = true;
 	                if (target instanceof net.minecraft.server.level.ServerPlayer player)
 	                    player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket(player));
 	            }
 	            if (--lift.remaining <= 0) {
 	                if (room && lift.rise < 0.75) {
 	                    var data = rot.getPersistentData();
-	                    data.putInt(FAILED_LIFTS, Math.min(8, Math.max(0, data.getIntOr(FAILED_LIFTS, 0)) + 1));
+	                    data.putInt(FAILED_LIFTS, Math.min(8, Math.max(0, data.getInt(FAILED_LIFTS)) + 1));
 	                }
 	                iterator.remove();
 	            }
@@ -15810,7 +15803,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	            Vec3 velocity = limited(launch.velocity);
 	            if (velocity.lengthSqr() < 0.25) { iterator.remove(); continue; }
 	            victim.setDeltaMovement(velocity);
-	            victim.needsSync = true; victim.hurtMarked = true;
+	            victim.hasImpulse = true; victim.hurtMarked = true;
 	            if (victim instanceof net.minecraft.server.level.ServerPlayer player && (launch.remaining & 1) == 0)
 	                player.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityMotionPacket(player));
 	            if ((launch.pending == null || launch.pending.finished)
@@ -15857,7 +15850,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	    public static void debrisTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Pre event) {
 	        if (!(event.getEntity() instanceof net.minecraft.world.entity.item.FallingBlockEntity falling)
 	                || !(falling.level() instanceof ServerLevel level)) return;
-	        long until = falling.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L);
+	        long until = falling.getPersistentData().getLong(DEBRIS_UNTIL);
 	        if (until <= 0) return;
 	        if (!ENABLED || !ENABLE_FALLING_DEBRIS || level.getGameTime() >= until || falling.onGround()) {
 	            falling.discard(); return;
@@ -15878,7 +15871,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	            if (!work.debris.contains(falling)) work.debris.add(falling);
 	            return;
 	        }
-	        long until = falling.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L);
+	        long until = falling.getPersistentData().getLong(DEBRIS_UNTIL);
 	        if (until <= 0) return;
 	        Work work = WORK.computeIfAbsent(level.getServer(), ignored -> new Work());
 	        if (!ENABLED || !ENABLE_FALLING_DEBRIS || level.getGameTime() >= until
@@ -15941,7 +15934,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	        work.debris.removeIf(debris -> {
 	            if (debris.isRemoved()) return true;
 	            if (net.mcreator.thebackwoods.BackwoodsImpactDebris.isRealTerrain(debris)) return false;
-	            if (debris.level() instanceof ServerLevel level && level.getGameTime() >= debris.getPersistentData().getLongOr(DEBRIS_UNTIL, 0L)) { debris.discard(); return true; }
+	            if (debris.level() instanceof ServerLevel level && level.getGameTime() >= debris.getPersistentData().getLong(DEBRIS_UNTIL)) { debris.discard(); return true; }
 	            return false;
 	        });
 	        work.spawnedThisTick = 0;
@@ -15960,7 +15953,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	            for (int slice = 0; slice < 16 && scans > 0 && changes > 0 && job.cursor < job.volume && job.strike.broken < limit; slice++) {
 	                scans--;
 	                BlockPos pos = job.next();
-	                if (!job.includes(pos) || pos.getY() < job.level.getMinY() || pos.getY() >= job.level.getMaxY()) continue;
+	                if (!job.includes(pos) || pos.getY() < job.level.getMinBuildHeight() || pos.getY() >= job.level.getMaxBuildHeight()) continue;
 	                var chunk = job.level.getChunkSource().getChunkNow(pos.getX() >> 4, pos.getZ() >> 4);
 	                if (chunk == null) continue;
 	                BlockState state = chunk.getBlockState(pos);
@@ -15981,5 +15974,4 @@ private static float lerpAngle(float pct, float start, float end) {
 	}
 
 }
-// 26.1.2
-// 26.1.2
+// 1.21.1
