@@ -60,7 +60,14 @@ export const ShortenControl: React.FC<ShortenControlProps> = ({
         </div>
 
         {/* Dynamic Version Badges Filter */}
-        <div className="flex flex-wrap items-center gap-1.5 text-xs font-mono">
+        <div
+          className="flex items-center gap-1.5 text-xs font-mono overflow-x-auto filter-scrollbar pb-1 max-w-full scroll-smooth"
+          onWheel={(e) => {
+            if (e.deltaY !== 0) {
+              e.currentTarget.scrollLeft += e.deltaY;
+            }
+          }}
+        >
           <span className="text-neutral-400 flex items-center gap-1 mr-1">
             <Tag className="w-3.5 h-3.5 text-neutral-500" />
             <span>Filter Version:</span>

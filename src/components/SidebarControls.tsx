@@ -87,7 +87,14 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       </div>
 
       {/* Entity Filter Badges */}
-      <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+      <div
+        className="flex items-center gap-1 overflow-x-auto pb-1 filter-scrollbar scroll-smooth"
+        onWheel={(e) => {
+          if (e.deltaY !== 0) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
+      >
         <span className="text-[#3f5244] text-[10px] uppercase font-bold shrink-0 mr-0.5">
           Entity:
         </span>
@@ -120,7 +127,14 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       </div>
 
       {/* Version Filter Badges */}
-      <div className="flex items-center gap-1 overflow-x-auto pb-0.5 no-scrollbar">
+      <div
+        className="flex items-center gap-1 overflow-x-auto pb-1 filter-scrollbar scroll-smooth"
+        onWheel={(e) => {
+          if (e.deltaY !== 0) {
+            e.currentTarget.scrollLeft += e.deltaY;
+          }
+        }}
+      >
         <span className="text-[#3f5244] text-[10px] uppercase font-bold shrink-0 mr-0.5">
           Version:
         </span>

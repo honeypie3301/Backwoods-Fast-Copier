@@ -48,3 +48,26 @@ body {
   -ms-overflow-style: none;
   scrollbar-width: none;
 }
+
+.filter-scrollbar::-webkit-scrollbar {
+  height: 5px !important;
+}
+
+.filter-scrollbar::-webkit-scrollbar-track {
+  background: #060d08 !important;
+  border-radius: 2px !important;
+}
+
+.filter-scrollbar::-webkit-scrollbar-thumb {
+  background: #193820 !important;
+  border-radius: 2px !important;
+}
+
+.filter-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #24572e !important;
+}
+
+.filter-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #193820 #060d08;
+}

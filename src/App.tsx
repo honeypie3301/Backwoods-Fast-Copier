@@ -33,8 +33,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
   const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
-  const [activePreset, setActivePreset] = useState<ShortenPreset>('medium');
-  const [maxLength, setMaxLength] = useState<number>(SHORTEN_PRESETS.medium);
+  const [activePreset, setActivePreset] = useState<ShortenPreset>('full');
+  const [maxLength, setMaxLength] = useState<number>(SHORTEN_PRESETS.full);
   const [showEditedOnly, setShowEditedOnly] = useState<boolean>(false);
 
   // Tracking state
