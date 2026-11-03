@@ -438,7 +438,7 @@ public class RotEntityIsHurtProcedure {
 					incomingDmg = incEv.getAmount();
 				}
 
-				if (isDeathActive || currentHp <= 20.0F || (currentHp - incomingDmg) <= 0.0F || _livEnt.isDeadOrDying()) {
+				if (isDeathActive || currentHp <= 20.0F || (currentHp <= 25.0F && (currentHp - incomingDmg) <= 0.0F) || _livEnt.isDeadOrDying()) {
 					if (event instanceof LivingDamageEvent.Pre preEv) {
 						preEv.setNewDamage(0.0F);
 					} else if (event instanceof LivingIncomingDamageEvent incEv) {
@@ -454,7 +454,7 @@ public class RotEntityIsHurtProcedure {
 						} catch (Exception e) {}
 						entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
 						try {
-							net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity);
+							net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity, attacker);
 						} catch (Throwable ignored) {}
 						entity.getPersistentData().putDouble("rot_death_ticks", 240.0);
 						entity.getPersistentData().putDouble("rot_death_start_x", entity.getX());
@@ -467,25 +467,17 @@ public class RotEntityIsHurtProcedure {
 						entity.noPhysics = true;
 
 						triggerStageDialogue(entity, targetRecipient, DIALOGUES_DEATH, "rot_dialogue_death_fired");
-
-						ServerPlayer targetPlayer = null;
-						if (attacker instanceof ServerPlayer sp) {
-							targetPlayer = sp;
-						} else if (foundPlayer instanceof ServerPlayer sp) {
-							targetPlayer = sp;
-						}
-
-						if (targetPlayer != null && targetPlayer.level() instanceof ServerLevel _level) {
-							AdvancementHolder _adv = _level.getServer().getAdvancements().get(ResourceLocation.parse("the_backwoods:rot_boss"));
-							if (_adv != null) {
-								AdvancementProgress _ap = targetPlayer.getAdvancements().getOrStartProgress(_adv);
-								if (!_ap.isDone()) {
-									for (String criteria : _ap.getRemainingCriteria())
-										targetPlayer.getAdvancements().award(_adv, criteria);
-								}
-							}
-						}
 					}
+					return;
+				} else if (currentHp > 25.0F && (currentHp - incomingDmg) <= 0.0F) {
+					if (event instanceof LivingDamageEvent.Pre preEv) {
+						preEv.setNewDamage(Math.min(incomingDmg, 20.0F));
+					} else if (event instanceof LivingIncomingDamageEvent incEv) {
+						incEv.setAmount(Math.min(incomingDmg, 20.0F));
+					}
+					entity.getPersistentData().putBoolean("rot_phase_active", true);
+					entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
+					_livEnt.invulnerableTime = 40;
 					return;
 				}
 			}
@@ -534,24 +526,46 @@ public class RotEntityIsHurtProcedure {
 	
 	private static boolean isSbwDamage(DamageSource source) {
 		if (source == null) return false;
+		try {
+			if (source.typeHolder() != null && source.typeHolder().unwrapKey().isPresent()) {
+				String typeId = source.typeHolder().unwrapKey().get().location().toString().toLowerCase(java.util.Locale.ROOT);
+				if (typeId.contains("cruisemissiles") || typeId.contains("warhead") || typeId.contains("iskander")
+					|| typeId.contains("sbw") || typeId.contains("jolt") || typeId.contains("buk9m317")
+					|| typeId.contains("mavic") || typeId.contains("kh59") || typeId.contains("cruise_missile")
+					|| typeId.contains("missile") || typeId.contains("warfare") || typeId.contains("pointblank")
+					|| typeId.contains("tacz") || typeId.contains("cgm") || typeId.contains("artillery")
+					|| typeId.contains("bullet") || typeId.contains("firearm")) {
+					return true;
+				}
+			}
+		} catch (Throwable ignored) {}
 		String msgId = source.getMsgId().toLowerCase(java.util.Locale.ROOT);
 		if (msgId.contains("cruisemissiles") || msgId.contains("warhead") || msgId.contains("iskander")
 			|| msgId.contains("sbw") || msgId.contains("jolt") || msgId.contains("buk9m317")
-			|| msgId.contains("mavic") || msgId.contains("kh59") || msgId.contains("cruise_missile")) {
+			|| msgId.contains("mavic") || msgId.contains("kh59") || msgId.contains("cruise_missile")
+			|| msgId.contains("missile") || msgId.contains("warfare") || msgId.contains("pointblank")
+			|| msgId.contains("tacz") || msgId.contains("cgm") || msgId.contains("artillery")
+			|| msgId.contains("bullet") || msgId.contains("firearm")) {
 			return true;
 		}
 		Entity direct = source.getDirectEntity();
 		if (direct != null) {
 			String className = direct.getClass().getName().toLowerCase(java.util.Locale.ROOT);
 			if (className.contains("cruisemissiles") || className.contains("missile") || className.contains("warhead")
-				|| className.contains("iskander") || className.contains("sbw")) {
+				|| className.contains("iskander") || className.contains("sbw") || className.contains("warfare")
+				|| className.contains("pointblank") || className.contains("tacz") || className.contains("bullet")
+				|| className.contains("artillery")) {
 				return true;
 			}
 			var typeId = BuiltInRegistries.ENTITY_TYPE.getKey(direct.getType());
-			String typeStr = typeId.toString().toLowerCase(java.util.Locale.ROOT);
-			if (typeStr.contains("cruisemissiles") || typeStr.contains("missile") || typeStr.contains("warhead")
-				|| typeStr.contains("iskander") || typeStr.contains("sbw")) {
-				return true;
+			if (typeId != null) {
+				String typeStr = typeId.toString().toLowerCase(java.util.Locale.ROOT);
+				if (typeStr.contains("cruisemissiles") || typeStr.contains("missile") || typeStr.contains("warhead")
+					|| typeStr.contains("iskander") || typeStr.contains("sbw") || typeStr.contains("warfare")
+					|| typeStr.contains("pointblank") || typeStr.contains("tacz") || typeStr.contains("bullet")
+					|| typeStr.contains("artillery")) {
+					return true;
+				}
 			}
 		}
 		return false;
@@ -568,7 +582,7 @@ public class RotEntityIsHurtProcedure {
 		try {
 			if (source.typeHolder() != null && source.typeHolder().unwrapKey().isPresent()) {
 				String typeId = source.typeHolder().unwrapKey().get().location().toString().toLowerCase(java.util.Locale.ROOT);
-				if (typeId.contains("apotheosis") || typeId.contains("execute") || typeId.contains("executing") || typeId.contains("bypasses_") || typeId.contains("apothic")) {
+				if (typeId.contains("apotheosis") || typeId.contains("execute") || typeId.contains("executing") || typeId.contains("bypasses_") || typeId.contains("apothic") || typeId.contains("cleaving") || typeId.contains("sundering") || typeId.contains("giant_slaying")) {
 					return true;
 				}
 			}

@@ -882,7 +882,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			} catch (Exception e) {}
 			putB(entity, "rot_death_sequence_active", true);
 			try {
-				net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity);
+				net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceActive(entity, living.getLastHurtByMob());
 			} catch (Throwable ignored) {}
 			putD(entity, "rot_death_ticks", 240.0);
 			putD(entity, "rot_death_start_x", entity.getX());
@@ -1119,6 +1119,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				if (!entity.level().isClientSide()) {
 					putB(entity, "rot_death_sequence_finished", true);
 					saveThreatRotAdaptation(entity);
+
 					try {
 						net.mcreator.thebackwoods.RotDataGuardian.authorizeDeathSequenceFinished(entity);
 						net.mcreator.thebackwoods.RotDataGuardian.unregisterProtectedDeathEntity(entity);

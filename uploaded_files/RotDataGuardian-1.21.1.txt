@@ -17,8 +17,14 @@ import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
 import net.neoforged.fml.common.EventBusSubscriber;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.bus.api.EventPriority;
+import net.neoforged.neoforge.event.entity.player.AdvancementEvent;
 import net.neoforged.api.distmarker.OnlyIn;
 import net.neoforged.api.distmarker.Dist;
+
+import net.minecraft.advancements.AdvancementHolder;
+import net.minecraft.advancements.AdvancementProgress;
+import net.minecraft.resources.ResourceLocation;
+import javax.annotation.Nullable;
 
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.player.Player;
@@ -144,6 +150,8 @@ public class RotDataGuardian {
 		int expectedTargets;
 		boolean deathSequenceActive;
 		boolean deathSequenceFinished;
+		java.util.UUID authorizedKillerUUID;
+		boolean advancementGranted;
 	}
 
 	private static final java.util.Map<java.util.UUID, RotVaultState> ROT_SECURITY_VAULT = new java.util.concurrent.ConcurrentHashMap<>();
@@ -172,10 +180,88 @@ public class RotDataGuardian {
 	}
 
 	public static void authorizeDeathSequenceActive(Entity entity) {
-		if (entity == null || !isAuthorizedBackwoodsCaller()) return;
+		authorizeDeathSequenceActive(entity, null);
+	}
+
+	public static void authorizeDeathSequenceActive(Entity entity, @Nullable Entity killer) {
+		if (entity == null || !isAuthorizedBackwoodsCaller() || entity.level().isClientSide()) return;
+		if (entity instanceof LivingEntity living && living.getHealth() > 25.0F) return;
 		RotVaultState v = getVault(entity);
 		v.deathSequenceActive = true;
 		entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
+
+		if (!v.advancementGranted && !entity.getPersistentData().getBoolean("rot_boss_advancement_granted")) {
+			ServerPlayer killerPlayer = null;
+			if (killer instanceof ServerPlayer sp) {
+				killerPlayer = sp;
+			} else if (entity instanceof LivingEntity liv && liv.getLastHurtByMob() instanceof ServerPlayer sp) {
+				killerPlayer = sp;
+			} else if (entity.level() instanceof ServerLevel sLevel) {
+				killerPlayer = sLevel.getNearestPlayer(entity, 64.0) instanceof ServerPlayer sp ? sp : null;
+			}
+
+			if (killerPlayer != null) {
+				v.authorizedKillerUUID = killerPlayer.getUUID();
+				entity.getPersistentData().putString("rot_boss_killer_uuid", killerPlayer.getStringUUID());
+				v.advancementGranted = true;
+				entity.getPersistentData().putBoolean("rot_boss_advancement_granted", true);
+				grantRotBossAdvancement(killerPlayer);
+			}
+		}
+	}
+
+	public static void grantRotBossAdvancement(ServerPlayer player) {
+		if (player == null || player.level() == null || player.level().getServer() == null) return;
+		try {
+			AdvancementHolder adv = player.level().getServer().getAdvancements().get(ResourceLocation.parse("the_backwoods:rot_boss"));
+			if (adv != null) {
+				AdvancementProgress ap = player.getAdvancements().getOrStartProgress(adv);
+				if (!ap.isDone()) {
+					for (String criteria : ap.getRemainingCriteria()) {
+						player.getAdvancements().award(adv, criteria);
+					}
+				}
+			}
+		} catch (Throwable ignored) {}
+	}
+
+	public static void revokeRotBossAdvancement(ServerPlayer player, AdvancementHolder adv) {
+		if (player == null || adv == null) return;
+		try {
+			AdvancementProgress ap = player.getAdvancements().getOrStartProgress(adv);
+			for (String criteria : ap.getCompletedCriteria()) {
+				player.getAdvancements().revoke(adv, criteria);
+			}
+		} catch (Throwable ignored) {}
+	}
+
+	public static void revokeRotBossAdvancementFromPlayer(ServerPlayer player) {
+		if (player == null || player.level() == null || player.level().getServer() == null) return;
+		try {
+			AdvancementHolder adv = player.level().getServer().getAdvancements().get(ResourceLocation.parse("the_backwoods:rot_boss"));
+			if (adv != null) {
+				revokeRotBossAdvancement(player, adv);
+			}
+		} catch (Throwable ignored) {}
+	}
+
+	public static boolean isLegitimateBossKillAuthorized(ServerPlayer sp) {
+		if (sp == null) return false;
+		java.util.UUID pUuid = sp.getUUID();
+		for (RotVaultState v : ROT_SECURITY_VAULT.values()) {
+			if (v.deathSequenceActive && pUuid.equals(v.authorizedKillerUUID)) {
+				return true;
+			}
+		}
+		for (Entity ent : PROTECTED_DEATH_ENTITIES.values()) {
+			if (isRot(ent) && isBossDeathSequenceActive(ent)) {
+				String savedKiller = ent.getPersistentData().getString("rot_boss_killer_uuid");
+				if (sp.getStringUUID().equals(savedKiller)) {
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 
 	public static void authorizeDeathSequenceFinished(Entity entity) {
@@ -229,46 +315,6 @@ public class RotDataGuardian {
 		return false;
 	}
 
-	public static boolean isApotheosisBypassDamage(net.minecraft.world.damagesource.DamageSource ds) {
-		if (ds == null) return false;
-		try {
-			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
-				String typeId = ds.typeHolder().unwrapKey().get().location().toString().toLowerCase(java.util.Locale.ROOT);
-				if (typeId.contains("apotheosis") || typeId.contains("apothic_") || typeId.contains("bypasses_")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		String msgId = ds.getMsgId();
-		if (msgId != null) {
-			String lower = msgId.toLowerCase(java.util.Locale.ROOT);
-			return lower.contains("apotheosis") || lower.contains("apothic_") || lower.contains("bypasses_");
-		}
-		return false;
-	}
-
-	public static boolean isSbwWarheadDamage(net.minecraft.world.damagesource.DamageSource ds) {
-		if (ds == null) return false;
-		try {
-			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
-				String typeId = ds.typeHolder().unwrapKey().get().location().toString().toLowerCase(java.util.Locale.ROOT);
-				if (typeId.contains("cruisemissiles") || typeId.contains("warhead") || typeId.contains("iskander") || typeId.contains("sbw")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		String msgId = ds.getMsgId();
-		if (msgId != null) {
-			String lower = msgId.toLowerCase(java.util.Locale.ROOT);
-			if (lower.contains("cruisemissiles") || lower.contains("warhead") || lower.contains("iskander") || lower.contains("sbw")) return true;
-		}
-		Entity direct = ds.getDirectEntity();
-		if (direct != null) {
-			String cls = direct.getClass().getName().toLowerCase(java.util.Locale.ROOT);
-			if (cls.contains("cruisemissiles") || cls.contains("missile") || cls.contains("iskander") || cls.contains("warhead")) return true;
-		}
-		return false;
-	}
 
 
 	public static boolean isRonovaDoomDamage(net.minecraft.world.damagesource.DamageSource ds) {
@@ -695,6 +741,19 @@ public class RotDataGuardian {
 
 		
 		@SubscribeEvent(priority = EventPriority.HIGHEST)
+		public static void onAdvancementEarn(AdvancementEvent.AdvancementEarnEvent event) {
+			if (!ENABLE_GUARDIAN) return;
+			if (event.getEntity() instanceof ServerPlayer sp) {
+				AdvancementHolder adv = event.getAdvancement();
+				if (adv != null && adv.id() != null && "the_backwoods:rot_boss".equals(adv.id().toString())) {
+					if (!isLegitimateBossKillAuthorized(sp)) {
+						revokeRotBossAdvancement(sp, adv);
+					}
+				}
+			}
+		}
+
+		@SubscribeEvent(priority = EventPriority.HIGHEST)
 		public static void onLivingDeath(LivingDeathEvent event) {
 			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
 				return;
@@ -716,9 +775,12 @@ public class RotDataGuardian {
 						living.setHealth(living.getMaxHealth());
 						if (entity instanceof RotEntity rot) {
 							RotVaultState vault = getVault(rot);
-							vault.damageGraceTicks = Math.max(vault.damageGraceTicks, 40);
+							vault.damageGraceTicks = Math.max(vault.damageGraceTicks, 60);
 							vault.validatedHealth = rot.getMaxHealth();
-							rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
+							rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
+							rot.getPersistentData().putBoolean("rot_phase_active", true);
+							rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
+							rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
 						}
 					}
 				}
@@ -750,6 +812,33 @@ public class RotDataGuardian {
 				boolean isRailgun = shootingStarEnabled && (isAbsorbing || msgId.contains("railgun") || msgId.contains("star") || msgId.contains("shooting") || msgId.contains("gungnir") || msgId.contains("erasure"));
 
 				boolean isPhasing = shootingStarEnabled && (entity.getPersistentData().getBoolean("rot_phase_active") || entity.getPersistentData().getDouble("rot_phase_timer") > 0);
+
+				if (!isDying) {
+					event.setCanceled(true);
+					if (entity instanceof LivingEntity living) {
+						RotVaultState v = getVault(entity);
+						float restoredHp = v != null && v.validatedHealth > 25.0 ? (float) v.validatedHealth : Math.max(25.0F, living.getMaxHealth() * 0.25F);
+						living.setHealth(restoredHp);
+						living.deathTime = 0;
+						living.hurtTime = 0;
+						living.hurtDuration = 0;
+						living.invulnerableTime = 60;
+						living.setInvulnerable(true);
+						entity.getPersistentData().putBoolean("rot_phase_active", true);
+						entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
+						entity.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+						entity.getPersistentData().putBoolean("unlocked_phase_shift", true);
+						try {
+							if (entity instanceof RotEntity r) r.getEntityData().set(RotEntity.DATA_isDeath, false);
+						} catch (Throwable ignored) {}
+						entity.getPersistentData().putBoolean("rot_death_sequence_active", false);
+					}
+					if (ds != null && ds.getEntity() instanceof ServerPlayer sp) {
+						revokeRotBossAdvancementFromPlayer(sp);
+					}
+					return;
+				}
+
 				if (isDying || isRailgun || isPhasing) {
 					event.setCanceled(true);
 					if (entity instanceof LivingEntity living) {
@@ -1126,15 +1215,30 @@ public class RotDataGuardian {
 					}
 					return;
 				}
+				if (isKillCmd || (amount >= rot.getHealth() && rot.getHealth() > 25.0F)) {
+					if (ds != null && ds.getEntity() instanceof ServerPlayer sp) {
+						revokeRotBossAdvancementFromPlayer(sp);
+					}
+				}
 				if (isKillCmd) {
 					event.setCanceled(true);
 					event.setAmount(0.0F);
 					return;
 				}
+
+				if (amount >= rot.getHealth() && !isKillCmd) {
+					amount = Math.min(amount, Math.max(1.0F, rot.getHealth() - 1.0F));
+					event.setAmount(amount);
+					rot.getPersistentData().putBoolean("rot_phase_active", true);
+					rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
+					rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
+					rot.invulnerableTime = 40;
+				}
+
 				if (isPlayerAttack) {
 					RotVaultState v = getVault(rot);
 					v.damageGraceTicks = Math.max(v.damageGraceTicks, 40);
-					v.validatedHealth = Math.max(0.0, rot.getHealth() - amount);
+					v.validatedHealth = Math.max(1.0, rot.getHealth() - amount);
 					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 40);
 					rot.getPersistentData().putDouble("sentinel_validated_health", v.validatedHealth);
 					return;
