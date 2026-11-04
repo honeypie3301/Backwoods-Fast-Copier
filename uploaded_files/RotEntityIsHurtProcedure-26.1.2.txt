@@ -247,6 +247,19 @@ public class RotEntityIsHurtProcedure {
 							if (tLoc.contains("doom")) isDoom = true;
 						}
 					} catch (Throwable ignored) {}
+					if (entity instanceof LivingEntity _living) {
+						float curHp = _living.getHealth();
+						if (isDoom || (curHp - incomingAmount) <= 25.0F) {
+							if (event instanceof LivingDamageEvent.Pre _preEv) _preEv.setNewDamage(0.0F);
+							else if (event instanceof LivingIncomingDamageEvent _incEv) _incEv.setAmount(0.0F);
+							try { net.mcreator.thebackwoods.RotDataGuardian.RonovaGuard.purgeDoom(entity); } catch (Throwable ignored) {}
+							entity.getPersistentData().putBoolean("rot_phase_active", true);
+							entity.getPersistentData().putDouble("rot_phase_timer", 75.0);
+							entity.getPersistentData().putBoolean("unlocked_phase_shift", true);
+							_living.invulnerableTime = 40;
+							return;
+						}
+					}
 					if (isDoom) {
 						if (event instanceof LivingDamageEvent.Pre _preEv) _preEv.setNewDamage(0.0F);
 						else if (event instanceof LivingIncomingDamageEvent _incEv) _incEv.setAmount(0.0F);
@@ -438,7 +451,7 @@ public class RotEntityIsHurtProcedure {
 					incomingDmg = incEv.getAmount();
 				}
 
-				if (isDeathActive || currentHp <= 20.0F || (currentHp <= 25.0F && (currentHp - incomingDmg) <= 0.0F) || _livEnt.isDeadOrDying()) {
+				if (!isRonovaDamage(damagesource) && (isDeathActive || currentHp <= 20.0F || (currentHp <= 25.0F && (currentHp - incomingDmg) <= 0.0F) || _livEnt.isDeadOrDying())) {
 					if (event instanceof LivingDamageEvent.Pre preEv) {
 						preEv.setNewDamage(0.0F);
 					} else if (event instanceof LivingIncomingDamageEvent incEv) {
@@ -591,25 +604,7 @@ public class RotEntityIsHurtProcedure {
 	}
 
 	private static boolean isRonovaDamage(DamageSource source) {
-		if (source == null) return false;
-		String msgId = source.getMsgId().toLowerCase(java.util.Locale.ROOT);
-		if (msgId.contains("ronova") || msgId.contains("doom") || msgId.contains("spear") || msgId.contains("beam") || msgId.contains("orb") || msgId.contains("blast") || msgId.contains("slay")) {
-			return true;
-		}
-		try {
-			if (source.typeHolder() != null && source.typeHolder().unwrapKey().isPresent()) {
-				String typeId = source.typeHolder().unwrapKey().get().identifier().toString().toLowerCase(java.util.Locale.ROOT);
-				if (typeId.contains("ronova") || typeId.contains("doom") || typeId.contains("spear") || typeId.contains("beam") || typeId.contains("orb") || typeId.contains("blast")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		Entity direct = source.getDirectEntity();
-		if (direct != null) {
-			String className = direct.getClass().getName().toLowerCase(java.util.Locale.ROOT);
-			if (className.contains("ronova")) return true;
-		}
-		return false;
+		return net.mcreator.thebackwoods.RotDataGuardian.isRonovaDoomDamage(source);
 	}
 
 

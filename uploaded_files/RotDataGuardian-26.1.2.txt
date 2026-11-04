@@ -113,84 +113,46 @@ public class RotDataGuardian {
 	}
 
 	public static void authorizeDeathSequenceActive(Entity entity, @Nullable Entity killer) {
-		if (entity == null || !isAuthorizedBackwoodsCaller() || entity.level().isClientSide()) return;
-		if (entity instanceof LivingEntity living && living.getHealth() > 25.0F) return;
+		if (!(entity instanceof RotEntity rot) || !isAuthorizedBackwoodsCaller() || entity.level().isClientSide()) return;
+		if (rot.getHealth() > 25.0F) return;
 		RotVaultState v = getVault(entity);
 		v.deathSequenceActive = true;
 		entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
-
-		if (!v.advancementGranted && !entity.getPersistentData().getBooleanOr("rot_boss_advancement_granted", false)) {
-			ServerPlayer killerPlayer = null;
-			if (killer instanceof ServerPlayer sp) {
-				killerPlayer = sp;
-			} else if (entity instanceof LivingEntity liv && liv.getLastHurtByMob() instanceof ServerPlayer sp) {
-				killerPlayer = sp;
-			} else if (entity.level() instanceof ServerLevel sLevel) {
-				killerPlayer = sLevel.getNearestPlayer(entity, 64.0) instanceof ServerPlayer sp ? sp : null;
-			}
-
-			if (killerPlayer != null) {
-				v.authorizedKillerUUID = killerPlayer.getUUID();
-				entity.getPersistentData().putString("rot_boss_killer_uuid", killerPlayer.getStringUUID());
-				v.advancementGranted = true;
-				entity.getPersistentData().putBoolean("rot_boss_advancement_granted", true);
-				grantRotBossAdvancement(killerPlayer);
+		// Record credit now; award only after the initialized death countdown is running.
+		if (v.authorizedKillerUUID == null) {
+			ServerPlayer player = killer instanceof ServerPlayer sp ? sp
+				: rot.getKillCredit() instanceof ServerPlayer sp ? sp : null;
+			if (player != null) {
+				v.authorizedKillerUUID = player.getUUID();
+				entity.getPersistentData().putString("rot_boss_killer_uuid", player.getStringUUID());
 			}
 		}
 	}
 
-	public static void grantRotBossAdvancement(ServerPlayer player) {
-		if (player == null || player.level() == null || player.level().getServer() == null) return;
-		try {
-			AdvancementHolder adv = player.level().getServer().getAdvancements().get(Identifier.parse("the_backwoods:rot_boss"));
-			if (adv != null) {
-				AdvancementProgress ap = player.getAdvancements().getOrStartProgress(adv);
-				if (!ap.isDone()) {
-					for (String criteria : ap.getRemainingCriteria()) {
-						player.getAdvancements().award(adv, criteria);
-					}
-				}
-			}
-		} catch (Throwable ignored) {}
-	}
-
-	public static void revokeRotBossAdvancement(ServerPlayer player, AdvancementHolder adv) {
-		if (player == null || adv == null) return;
-		try {
-			AdvancementProgress ap = player.getAdvancements().getOrStartProgress(adv);
-			for (String criteria : ap.getCompletedCriteria()) {
-				player.getAdvancements().revoke(adv, criteria);
-			}
-		} catch (Throwable ignored) {}
-	}
-
-	public static void revokeRotBossAdvancementFromPlayer(ServerPlayer player) {
-		if (player == null || player.level() == null || player.level().getServer() == null) return;
-		try {
-			AdvancementHolder adv = player.level().getServer().getAdvancements().get(Identifier.parse("the_backwoods:rot_boss"));
-			if (adv != null) {
-				revokeRotBossAdvancement(player, adv);
-			}
-		} catch (Throwable ignored) {}
-	}
-
-	public static boolean isLegitimateBossKillAuthorized(ServerPlayer sp) {
-		if (sp == null) return false;
-		java.util.UUID pUuid = sp.getUUID();
-		for (RotVaultState v : ROT_SECURITY_VAULT.values()) {
-			if (v.deathSequenceActive && pUuid.equals(v.authorizedKillerUUID)) {
-				return true;
-			}
-		}
-		for (Entity ent : PROTECTED_DEATH_ENTITIES.values()) {
-			if (isRot(ent) && isBossDeathSequenceActive(ent)) {
-				String savedKiller = ent.getPersistentData().getStringOr("rot_boss_killer_uuid", "");
-				if (sp.getStringUUID().equals(savedKiller)) {
-					return true;
-				}
-			}
-		}
-		return false;
+	public static void grantRotBossAdvancement(Entity entity) {
+		if (!(entity instanceof RotEntity rot) || entity.level().isClientSide()) return;
+		net.minecraft.nbt.CompoundTag tag = entity.getPersistentData();
+		double ticks = tag.getDoubleOr("rot_death_ticks", 0.0);
+		if (!tag.getBooleanOr("rot_death_sequence_active", false)
+			|| !rot.getEntityData().get(RotEntity.DATA_isDeath)
+			|| !Double.isFinite(ticks) || ticks <= 0 || ticks > 240
+			|| rot.getHealth() > 25.0F) return;
+		RotVaultState v = getVault(entity);
+		if (v.advancementGranted || tag.getBooleanOr("rot_boss_advancement_granted", false)) return;
+		String credited = tag.getStringOr("rot_boss_killer_uuid", "");
+		java.util.UUID killer;
+		try { killer = java.util.UUID.fromString(credited); }
+		catch (IllegalArgumentException invalidCredit) { return; }
+		ServerPlayer player = entity.level().getServer().getPlayerList().getPlayer(killer);
+		if (player == null) return;
+		AdvancementHolder adv = player.level().getServer().getAdvancements().get(Identifier.parse("the_backwoods:rot_boss"));
+		if (adv == null) return;
+		// Latch before award callbacks; never revoke progress in response to a later attack.
+		v.advancementGranted = true;
+		tag.putBoolean("rot_boss_advancement_granted", true);
+		AdvancementProgress progress = player.getAdvancements().getOrStartProgress(adv);
+		for (String criterion : progress.getRemainingCriteria())
+			player.getAdvancements().award(adv, criterion);
 	}
 
 	public static void authorizeDeathSequenceFinished(Entity entity) {
@@ -205,25 +167,26 @@ public class RotDataGuardian {
 		return true;
 	}
 
+	public static boolean isRonovaEntity(@Nullable Entity entity) {
+		if (entity == null) return false;
+		String cls = entity.getClass().getName().toLowerCase(java.util.Locale.ROOT);
+		String name = entity.getName().getString().toLowerCase(java.util.Locale.ROOT);
+		return cls.contains("ronova") || name.contains("ronova");
+	}
+
 	public static boolean isRonovaDoomDamage(net.minecraft.world.damagesource.DamageSource ds) {
 		if (ds == null) return false;
 		try {
-			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
-				String typeId = ds.typeHolder().unwrapKey().get().identifier().toString().toLowerCase(java.util.Locale.ROOT);
-				if (typeId.equals("ronova:doom") || typeId.contains("ronova") || typeId.contains("doom") || typeId.contains("spear") || typeId.contains("beam") || typeId.contains("orb") || typeId.contains("blast")) {
-					return true;
-				}
-			}
-		} catch (Throwable ignored) {}
-		String msgId = ds.getMsgId();
-		if (msgId != null) {
-			String lower = msgId.toLowerCase(java.util.Locale.ROOT);
-			if (lower.contains("ronova") || lower.contains("doom") || lower.contains("spear") || lower.contains("slay")) return true;
-		}
-		Entity direct = ds.getDirectEntity();
-		if (direct != null) {
-			String cls = direct.getClass().getName().toLowerCase(java.util.Locale.ROOT);
-			if (cls.contains("ronova")) return true;
+			if (ds.typeHolder().unwrapKey().isPresent()
+				&& ds.typeHolder().unwrapKey().get().identifier().getNamespace().equals("ronova")) return true;
+		} catch (RuntimeException ignored) {}
+		String id = ds.getMsgId();
+		if (id != null && (id.startsWith("ronova:") || id.startsWith("ronova."))) return true;
+		// slay() falls back to generic kill damage, then finish() directly sets health to zero.
+		for (StackTraceElement frame : Thread.currentThread().getStackTrace()) {
+			String cls = frame.getClassName();
+			if (cls.equals("dev.mian.ronova.ability.RonovaDeath")
+				|| cls.equals("dev.mian.ronova.ability.TotemDoom")) return true;
 		}
 		return false;
 	}
@@ -669,18 +632,6 @@ public class RotDataGuardian {
 			}
 		}
 
-		@SubscribeEvent(priority = EventPriority.HIGHEST)
-		public static void onAdvancementEarn(AdvancementEvent.AdvancementEarnEvent event) {
-			if (!ENABLE_GUARDIAN) return;
-			if (event.getEntity() instanceof ServerPlayer sp) {
-				AdvancementHolder adv = event.getAdvancement();
-				if (adv != null && adv.id() != null && "the_backwoods:rot_boss".equals(adv.id().toString())) {
-					if (!isLegitimateBossKillAuthorized(sp)) {
-						revokeRotBossAdvancement(sp, adv);
-					}
-				}
-			}
-		}
 
 		@SubscribeEvent(priority = EventPriority.HIGHEST)
 		public static void onLivingDeath(LivingDeathEvent event) {
@@ -688,6 +639,15 @@ public class RotDataGuardian {
 				return;
 			}
 			Entity entity = event.getEntity();
+			if (entity instanceof RotEntity && isRonovaDoomDamage(event.getSource())
+				&& isBossDeathSequenceActive(entity)) {
+				event.setCanceled(true);
+				RonovaGuard.purgeDoom(entity);
+				// Ronova must not accelerate or restart an already authorized Rot death.
+				event.getEntity().setHealth(1.0F);
+				event.getEntity().deathTime = 0;
+				return;
+			}
 			if (ShootingStarGuard.protects(entity) && isShootingStarDamage(event.getSource())) {
 				event.setCanceled(true);
 				ShootingStarGuard.preventDeath(event.getEntity());
@@ -700,17 +660,27 @@ public class RotDataGuardian {
 					living.deathTime = 0;
 					living.hurtTime = 0;
 					living.invulnerableTime = 40;
-					if (!isBossDeathSequenceActive(entity)) {
-						living.setHealth(living.getMaxHealth());
-						if (entity instanceof RotEntity rot) {
-							RotVaultState vault = getVault(rot);
-							vault.damageGraceTicks = Math.max(vault.damageGraceTicks, 60);
-							vault.validatedHealth = rot.getMaxHealth();
-							rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
-							rot.getPersistentData().putBoolean("rot_phase_active", true);
-							rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
-							rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
-						}
+					RotVaultState vault = getVault(entity);
+					if (vault != null) {
+						vault.deathSequenceActive = false;
+						vault.authorizedKillerUUID = null;
+					}
+					if (entity.getPersistentData() != null) {
+						entity.getPersistentData().putBoolean("rot_death_sequence_active", false);
+						entity.getPersistentData().remove("rot_boss_killer_uuid");
+						entity.getPersistentData().putDouble("rot_death_ticks", 0.0);
+					}
+					try {
+						entity.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, false);
+					} catch (Exception ignored) {}
+					living.setHealth(living.getMaxHealth());
+					if (entity instanceof RotEntity rot) {
+						vault.damageGraceTicks = Math.max(vault.damageGraceTicks, 60);
+						vault.validatedHealth = rot.getMaxHealth();
+						rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
+						rot.getPersistentData().putBoolean("rot_phase_active", true);
+						rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
+						rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
 					}
 				}
 				return;
@@ -761,9 +731,6 @@ public class RotDataGuardian {
 							if (entity instanceof RotEntity r) r.getEntityData().set(RotEntity.DATA_isDeath, false);
 						} catch (Throwable ignored) {}
 						entity.getPersistentData().putBoolean("rot_death_sequence_active", false);
-					}
-					if (ds != null && ds.getEntity() instanceof ServerPlayer sp) {
-						revokeRotBossAdvancementFromPlayer(sp);
 					}
 					return;
 				}
@@ -1025,8 +992,10 @@ public class RotDataGuardian {
 
 		private static boolean isPlayerOrDebugAttack(net.minecraft.world.damagesource.DamageSource ds) {
 			if (ds == null) return false;
+			if (isRonovaDoomDamage(ds)) return false;
 			Entity attacker = ds.getEntity();
 			Entity direct = ds.getDirectEntity();
+			if (isRonovaEntity(attacker) || isRonovaEntity(direct)) return false;
 			if (attacker instanceof Player player) {
 				if (player.isCreative() || player.isSpectator()) return true;
 				ItemStack main = player.getMainHandItem();
@@ -1044,7 +1013,7 @@ public class RotDataGuardian {
 			return false;
 		}
 
-		@SubscribeEvent
+		@SubscribeEvent(priority = EventPriority.HIGHEST)
 		public static void onLivingIncomingDamage(LivingIncomingDamageEvent event) {
 			if (!ENABLE_GUARDIAN || event.getEntity() == null || event.getEntity().level().isClientSide()) {
 				return;
@@ -1069,6 +1038,14 @@ public class RotDataGuardian {
 				event.setCanceled(true);
 				event.setAmount(0.0F);
 				RonovaGuard.purgeDoom(entity);
+				if (entity instanceof RotEntity rot && !isBossDeathSequenceActive(entity)) {
+					// invulnerableTime alone does not satisfy RonovaDeath.slay()'s fallback check.
+					rot.setInvulnerable(true);
+					rot.getPersistentData().putBoolean("rot_phase_active", true);
+					rot.getPersistentData().putDouble("rot_phase_timer", 75.0);
+					rot.getPersistentData().putDouble("rot_phase_total_ticks", 75.0);
+					rot.getPersistentData().putBoolean("unlocked_phase_shift", true);
+				}
 				return;
 			}
 			float amount = event.getAmount();
@@ -1128,11 +1105,6 @@ public class RotDataGuardian {
 						living.setInvulnerable(true);
 					}
 					return;
-				}
-				if (isKillCmd || (amount >= rot.getHealth() && rot.getHealth() > 25.0F)) {
-					if (ds != null && ds.getEntity() instanceof ServerPlayer sp) {
-						revokeRotBossAdvancementFromPlayer(sp);
-					}
 				}
 				if (isKillCmd) {
 					event.setCanceled(true);

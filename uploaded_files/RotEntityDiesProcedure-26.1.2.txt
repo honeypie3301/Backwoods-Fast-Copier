@@ -1,0 +1,27 @@
+package net.mcreator.thebackwoods.procedures;
+
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.resources.Identifier;
+import net.minecraft.advancements.AdvancementProgress;
+import net.minecraft.advancements.AdvancementHolder;
+
+public class RotEntityDiesProcedure {
+	public static void execute(Entity entity, Entity sourceentity) {
+		if (entity == null || sourceentity == null)
+			return;
+		// Vanilla death callbacks can run for blocked forced kills. The Guardian owns the award.
+		entity.getPersistentData().putDouble("sentinel_solar_fire_ticks", 0);
+		entity.getPersistentData().putDouble("rot_overhead_ticks", 0);
+		entity.getPersistentData().putDouble("rot_armor_rip_ticks", 0);
+		entity.getPersistentData().putDouble("rot_block_active_ticks", 0);
+		entity.getPersistentData().putDouble("master_kill_target_id", 0);
+		entity.getPersistentData().putBoolean("is_blocking", false);
+		entity.getPersistentData().putBoolean("is_falling_heavy", false);
+		entity.getPersistentData().putBoolean("is_armor_ripping", false);
+		entity.getPersistentData().putString("overhead_target_uuid", "");
+		entity.getPersistentData().putString("master_target_queue", "");
+	}
+}

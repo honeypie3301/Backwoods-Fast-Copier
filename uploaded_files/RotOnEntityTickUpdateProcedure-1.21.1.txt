@@ -898,6 +898,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		}
 
 		if (isDying) {
+			net.mcreator.thebackwoods.RotDataGuardian.grantRotBossAdvancement(entity);
 			try {
 				entity.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, true);
 			} catch (Exception e) {}
