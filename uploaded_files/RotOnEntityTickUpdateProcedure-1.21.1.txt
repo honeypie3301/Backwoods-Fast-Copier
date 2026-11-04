@@ -11960,7 +11960,8 @@ private static float lerpAngle(float pct, float start, float end) {
 	private static final String[] INHERITED_ROT_FLAGS = "unlocked_armor_rip unlocked_block unlocked_counter unlocked_cryo_beam unlocked_die_rider_kick unlocked_dropkick_combo unlocked_explosion_boom unlocked_grapple unlocked_heavenly_repentance_plus unlocked_high_sky_slam_combo unlocked_judgment unlocked_knockback_dropkick_combo unlocked_knockback_rider_combo unlocked_minos_combo unlocked_overhead_combo unlocked_overhead_slam unlocked_parry unlocked_phase_shift unlocked_regen unlocked_sky_warp_slam unlocked_solar_beam unlocked_sonic_boom unlocked_sonic_scream unlocked_telekinesis unlocked_teleportation unlocked_triple_threat_combo unlocked_water_evaporation unlocked_wither_skulls adapted_forcefield_repulsion adapted_gravitational_mass fought_cold_entity fought_nether_entity fought_warden_entity rot_mobile_scream_learned sentinel_totem_learned sentinel_adapted_cbc".split(" ");
 	private static final String[] INHERITED_ROT_NUMBERS = {
 		"sentinel_combat_ticks", "sentinel_teleport_learning_progress", "sentinel_flying_target_ticks",
-		"sentinel_total_damage_taken", "sentinel_total_damage_dealt", "adapted_punch_damage", "rot_phase_mastery"
+		"sentinel_total_damage_taken", "sentinel_total_damage_dealt", "adapted_punch_damage", "rot_phase_mastery",
+		"inherited_max_health"
 	};
 
 	private static UUID threatRotOwner(Entity rot) {
@@ -11980,11 +11981,79 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (!Double.isFinite(value)) return 0;
 		double cap = key.equals("rot_phase_mastery") ? 1.0
 			: key.equals("adapted_punch_damage") ? 60.0
+			: key.equals("inherited_max_health") ? 2048.0
 			: key.equals("sentinel_combat_ticks") ? 72000.0
 			: key.equals("sentinel_teleport_learning_progress") ? 160.0 : 1.0e9;
 		return Math.max(0, Math.min(cap, value));
 	}
 
+	public static double calculateIntelligentPlayerThreat(Player player) {
+		if (player == null) return 20.0;
+		double threatIndex = 0.0;
+
+		double maxHp = getSafeAttributeValue(player, Attributes.MAX_HEALTH, 20.0);
+		double armor = getSafeAttributeValue(player, Attributes.ARMOR, 0.0);
+		double armorToughness = getSafeAttributeValue(player, Attributes.ARMOR_TOUGHNESS, 0.0);
+		double knockbackRes = getSafeAttributeValue(player, Attributes.KNOCKBACK_RESISTANCE, 0.0);
+		double attackDmg = getSafeAttributeValue(player, Attributes.ATTACK_DAMAGE, 1.0);
+		double attackSpeed = getSafeAttributeValue(player, Attributes.ATTACK_SPEED, 4.0);
+
+		threatIndex += (maxHp - 20.0) * 1.5;
+		threatIndex += armor * 2.5;
+		threatIndex += armorToughness * 3.5;
+		threatIndex += knockbackRes * 40.0;
+
+		double dps = attackDmg * attackSpeed;
+		threatIndex += dps * 2.0;
+
+		for (ItemStack stack : player.getArmorSlots()) {
+			if (stack == null || stack.isEmpty()) continue;
+			threatIndex += 10.0;
+			CompoundTag tag = stack.getPersistentData();
+			if (tag != null && !tag.isEmpty()) {
+				if (tag.contains("affix_data") || tag.contains("apotheosis") || tag.contains("affixes")) threatIndex += 25.0;
+				if (tag.contains("irons_spellbooks") || tag.contains("SpellData")) threatIndex += 20.0;
+			}
+			if (stack.isEnchanted()) threatIndex += stack.getEnchantments().size() * 4.0;
+		}
+
+		ItemStack mainHand = player.getMainHandItem();
+		if (!mainHand.isEmpty()) {
+			String itemId = BuiltInRegistries.ITEM.getKey(mainHand.getItem()).toString().toLowerCase(java.util.Locale.ROOT);
+			if (itemId.contains("sword") || itemId.contains("axe") || itemId.contains("bow") || itemId.contains("gun") || itemId.contains("scythe") || itemId.contains("hammer") || itemId.contains("katana") || itemId.contains("staff") || itemId.contains("wand")) {
+				threatIndex += 20.0;
+			}
+			CompoundTag tag = mainHand.getPersistentData();
+			if (tag != null && !tag.isEmpty()) {
+				if (tag.contains("affix_data") || tag.contains("apotheosis") || tag.contains("affixes")) threatIndex += 40.0;
+				if (tag.contains("irons_spellbooks") || tag.contains("SpellData")) threatIndex += 30.0;
+				if (tag.contains("GunId") || tag.contains("TACZ")) threatIndex += 35.0;
+			}
+			if (mainHand.isEnchanted()) threatIndex += mainHand.getEnchantments().size() * 5.0;
+		}
+
+		ItemStack offHand = player.getOffhandItem();
+		if (!offHand.isEmpty()) {
+			if (offHand.is(net.minecraft.world.item.Items.TOTEM_OF_UNDYING) || mainHand.is(net.minecraft.world.item.Items.TOTEM_OF_UNDYING)) {
+				threatIndex += 60.0;
+			}
+			if (offHand.is(net.minecraft.world.item.Items.SHIELD)) {
+				threatIndex += 15.0;
+			}
+		}
+
+		for (MobEffectInstance effect : player.getActiveEffects()) {
+			if (effect.getEffect().value() == MobEffects.DAMAGE_BOOST) threatIndex += (effect.getAmplifier() + 1) * 15.0;
+			if (effect.getEffect().value() == MobEffects.DAMAGE_RESISTANCE) threatIndex += (effect.getAmplifier() + 1) * 20.0;
+			if (effect.getEffect().value() == MobEffects.REGENERATION) threatIndex += (effect.getAmplifier() + 1) * 12.0;
+			if (effect.getEffect().value() == MobEffects.ABSORPTION) threatIndex += (effect.getAmplifier() + 1) * 15.0;
+		}
+
+		threatIndex += player.getAbsorptionAmount() * 2.5;
+
+		double calculatedHp = 20.0 + Math.max(0.0, threatIndex * 1.5);
+		return Mth.clamp(calculatedHp, 20.0, 2048.0);
+	}
 
 	/** Server-time decay, sampled by the threat system even while no Rot is alive. */
 	public static void tickThreatRotInheritance(Player player) {
@@ -12031,6 +12100,10 @@ private static float lerpAngle(float pct, float start, float end) {
 		CompoundTag memory = hive.getMemory(owner);
 		CompoundTag previous = memory.getCompound("ThreatRotAdaptation");
 		CompoundTag inherited = new CompoundTag();
+		if (rot instanceof LivingEntity living) {
+			double currentMax = living.getMaxHealth();
+			setRotPersistentDouble(rot, "inherited_max_health", currentMax);
+		}
 		// Union/max merging prevents overlapping encounters from erasing previous learning.
 		for (String key : INHERITED_ROT_FLAGS)
 			inherited.putBoolean(key, getRotPersistentBoolean(rot, key, false) || previous.getBoolean(key));
@@ -12053,6 +12126,22 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (!inherited.contains(key)) continue;
 			setRotPersistentDouble(rot, key, Math.max(boundedInheritedRotNumber(key, getRotPersistentDouble(rot, key, 0)),
 				boundedInheritedRotNumber(key, inherited.getDouble(key))));
+		}
+		if (rot instanceof LivingEntity living && rot.level() instanceof ServerLevel serverLevel) {
+			Player ownerPlayer = serverLevel.getPlayerByUUID(owner);
+			double inheritedMaxHp = getRotPersistentDouble(rot, "inherited_max_health", 20.0);
+			double threatMaxHp = ownerPlayer != null ? calculateIntelligentPlayerThreat(ownerPlayer) : 20.0;
+			double finalMaxHp = Math.min(2048.0, Math.max(20.0, Math.max(inheritedMaxHp, threatMaxHp)));
+
+			var attrInstance = living.getAttribute(Attributes.MAX_HEALTH);
+			if (attrInstance != null) {
+				attrInstance.setBaseValue(finalMaxHp);
+			}
+			living.setHealth((float) finalMaxHp);
+
+			rot.getPersistentData().putDouble("sentinel_validated_max_health", finalMaxHp);
+			rot.getPersistentData().putDouble("sentinel_validated_health", finalMaxHp);
+			setRotPersistentDouble(rot, "inherited_max_health", finalMaxHp);
 		}
 	}
 	public static class RotHivemindSavedData extends SavedData {
