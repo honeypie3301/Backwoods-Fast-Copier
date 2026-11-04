@@ -1,3 +1,4 @@
+================================================
 package net.mcreator.thebackwoods.procedures;
 
 import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
@@ -91,6 +92,10 @@ public class RotEntityIsHurtProcedure {
 			} else if (event instanceof LivingIncomingDamageEvent _incEv) {
 				damagesource = _incEv.getSource();
 				incomingAmount = _incEv.getAmount();
+			}
+
+			if (net.mcreator.thebackwoods.RotDataGuardian.isTheBackwoodsAttack(damagesource)) {
+				return;
 			}
 
 			boolean isPlayerAttack = damagesource != null && (

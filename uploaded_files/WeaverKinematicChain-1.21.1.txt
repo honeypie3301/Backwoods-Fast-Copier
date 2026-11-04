@@ -1,3 +1,4 @@
+================================================
 package net.mcreator.thebackwoods;
 
 import net.minecraft.client.model.geom.ModelPart;
@@ -96,6 +97,12 @@ public class WeaverKinematicChain {
         }
     }
 
+    private static double surfaceMotionSquared(LivingEntity entity) {
+        Vec3 displacement = entity.position().subtract(new Vec3(entity.xo, entity.yo, entity.zo));
+        Vec3 up = WoodweaverSurfaceNavigation.up(entity, 1);
+        return displacement.subtract(up.scale(displacement.dot(up))).lengthSqr();
+    }
+
     private static boolean segmentHitsBox(Vec3 from, Vec3 to, AABB box, double radius) {
         AABB expanded = box.inflate(radius);
         return expanded.contains(from) || expanded.contains(to) || expanded.clip(from, to).isPresent();
@@ -164,7 +171,7 @@ public class WeaverKinematicChain {
             Vec3 root = new Vec3(hip.x / 16.0, hip.y / 16.0, hip.z / 16.0);
             Vec3 baseKnee = jointPosition(hip, knee, foot, false);
             Vec3 baseAnkle = jointPosition(hip, knee, foot, true);
-            boolean moving = entity.getDeltaMovement().horizontalDistanceSqr() >= 0.004;
+            boolean moving = surfaceMotionSquared(entity) >= 0.004;
             if (!leg.grounded || (moving && leg.isStepping)) {
                 leg.recoveryRequested |= baseAnkle.subtract(root).distanceToSqr(new Vec3(target.x, target.y, target.z)) > 1.2 * 1.2;
             }
@@ -239,6 +246,7 @@ public class WeaverKinematicChain {
             // Rotating the bend plane about the solved ankle axis preserves both link lengths and the ankle.
             float swivel = Mth.lerp((float)Mth.clamp(time - entity.tickCount, 0, 1), leg.previousKneeSwivel, leg.kneeSwivel);
             clearanceHip.rotationAxis(swivel, (float)axis.x, (float)axis.y, (float)axis.z).mul(base);
+            setEuler(hip, clearanceHip.x, clearanceHip.y, clearanceHip.z, clearanceHip.w);
         }
 
         public void bind(ModelPart all, ModelPart[] hips, ModelPart[] knees, ModelPart[] feet) {
@@ -295,10 +303,12 @@ public class WeaverKinematicChain {
             double bodyZ = Mth.lerp(partial, entity.zOld, entity.getZ());
             double supportHeight = Mth.lerp(partial, gait.previousBodyHeight, gait.bodyHeight);
             float bodyYaw = entity.yBodyRotO + Mth.wrapDegrees(entity.yBodyRot - entity.yBodyRotO) * partial;
-            boolean floorPose = (entity.onGround() || gait.landingApproach > 0.2f || WoodweaverSurfaceNavigation.up(entity, partial).y > 0.35)
-                && WoodweaverSurfaceNavigation.up(entity, partial).y > 0.35;
+            boolean floorPose = (entity.onGround() || gait.landingApproach > 0.2f || WoodweaverSurfaceNavigation.up(entity, partial).y > 0)
+                && WoodweaverSurfaceNavigation.up(entity, partial).y > 0;
             // Terrain support is an offset on top of authored jump/landing compression.
-            gait.rootY = floorPose ? all.y + (float) Mth.clamp(32.016 - 16 * (supportHeight - bodyY), -48, 4) - bindRootY : all.y;
+            float floorWeight = (float)Mth.clamp(WoodweaverSurfaceNavigation.up(entity, partial).y, 0, 1);
+            floorWeight = floorWeight * floorWeight * (3 - 2 * floorWeight);
+            gait.rootY = floorPose ? all.y + floorWeight * ((float)Mth.clamp(32.016 - 16 * (supportHeight - bodyY), -48, 4) - bindRootY) : all.y;
             boolean terrainTilt = !WoodweaverSurfaceNavigation.attached(entity);
             gait.rootPitch = all.xRot + (terrainTilt ? Mth.lerp(partial, gait.previousPitch, gait.pitch) : 0);
             gait.rootRoll = all.zRot + (terrainTilt ? Mth.lerp(partial, gait.previousRoll, gait.roll) : 0);
@@ -340,7 +350,7 @@ public class WeaverKinematicChain {
                 authored[3] = knee.xRot; authored[4] = knee.yRot; authored[5] = knee.zRot;
                 authored[6] = foot.xRot; authored[7] = foot.yRot; authored[8] = foot.zRot;
                 Vec3 contact = gait.legs[i].sample(time);
-                Vec3 soleNormal = gait.legs[i].contactNormal;
+                Vec3 soleNormal = gait.legs[i].sampleNormal(time);
                 Vec3 ankle = contact.add(soleNormal.scale(0.1875));
                 if (preserveRoot && !entity.onGround() && entity.getDeltaMovement().y < 0)
                     ankle = ankle.add(0, Math.min(2.0, Math.max(0, entity.getY() - contact.y)) * (1 - approach), 0);
@@ -422,7 +432,7 @@ public class WeaverKinematicChain {
                 leg.maxYaw = Mth.lerp(response, leg.maxYaw, maxYaw);
                 minYaw = Math.max(-1.30f, leg.minYaw);
                 maxYaw = Math.min(1.30f, leg.maxYaw);
-                boolean moving = entity.getDeltaMovement().horizontalDistanceSqr() >= 0.004;
+                boolean moving = surfaceMotionSquared(entity) >= 0.004;
                 if (moving || !gait.legs[i].grounded) {
                     gait.legs[i].recoveryRequested = target.x * side < (narrow ? -0.5 : 0.45) || target.y < -4.2
                         || target.lengthSquared() > 46.0f || desiredYaw < minYaw - 0.55 || desiredYaw > maxYaw + 0.55;
@@ -436,7 +446,7 @@ public class WeaverKinematicChain {
                     minYaw, maxYaw, time, proceduralLegWeight * leg.contactWeight);
                 // The sole follows the actual collision face, including bridge sides and ceilings.
                 soleX.set(1, 0, 0);
-                soleWorld.set(bodyRotation).rotateY((float)Mth.clamp(desiredYaw, minYaw, maxYaw)).transform(soleX);
+                soleWorld.set(bodyRotation).rotateZYX(hip.zRot, hip.yRot, hip.xRot).rotateZYX(knee.zRot, knee.yRot, knee.xRot).transform(soleX);
                 soleY.set((float)-soleNormal.x, (float)-soleNormal.y, (float)-soleNormal.z).normalize();
                 float projection = soleX.dot(soleY);
                 soleX.fma(-projection, soleY);
@@ -452,17 +462,13 @@ public class WeaverKinematicChain {
                 float naturalZ = foot.zRot;
                 levelFoot(foot, footRotation);
                 float zDiff = Mth.wrapDegrees((float)Math.toDegrees(foot.zRot - naturalZ));
-                if (Math.abs(zDiff) > 60.0f) {
-                    foot.zRot = naturalZ;
-                } else {
-                    foot.zRot = Mth.clamp(foot.zRot, naturalZ - 0.75f, naturalZ + 0.75f);
-                }
+                foot.zRot = naturalZ + Mth.clamp((float)Math.toRadians(zDiff), -0.75f, 0.75f);
                 foot.xRot = Mth.clamp(foot.xRot, -0.25f, 0.25f);
                 foot.yRot = 0;
                 cache(gait.jointPose, i * 9, hip);
                 cache(gait.jointPose, i * 9 + 3, knee);
                 cache(gait.jointPose, i * 9 + 6, foot);
-                float legWeight = (preserveRoot && !entity.onGround()) ? proceduralLegWeight * leg.contactWeight : Math.max(0.95f, proceduralLegWeight * leg.contactWeight);
+                float legWeight = (preserveRoot && !entity.onGround()) ? proceduralLegWeight * leg.contactWeight : proceduralLegWeight * leg.contactWeight;
                 blend(hip, 0, legWeight); blend(knee, 3, legWeight); blend(foot, 6, legWeight);
                 Vec3 origin = new Vec3(bodyX, bodyY, bodyZ);
                 leg.clearanceHip = worldJoint(new Vec3(hip.x / 16.0, hip.y / 16.0, hip.z / 16.0), origin);

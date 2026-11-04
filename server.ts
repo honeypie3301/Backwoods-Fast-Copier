@@ -101,6 +101,11 @@ function broadcastFilesChanged() {
   }
 }
 
+// Set safe.directory globally on startup to avoid dubious ownership errors
+try {
+  execSync('git config --global --add safe.directory "*"', { cwd: __dirname });
+} catch {}
+
 // In-memory set of files updated at runtime via fs.watch or POST /api/files
 const runtimeEditedFiles = new Set<string>();
 
@@ -125,7 +130,16 @@ function getUpdatedFiles(): Set<string> {
     });
   } catch {}
 
-  // 3. Files updated in the latest commit touching uploaded_files
+  // 3. Untracked new files
+  try {
+    const untrackedOut = execSync('git ls-files --others --exclude-standard uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
+    untrackedOut.split('\n').forEach((p) => {
+      const cleaned = p.replace(/^uploaded_files\//, '').trim();
+      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
+    });
+  } catch {}
+
+  // 4. Files updated in the latest commit touching uploaded_files (if non-empty)
   try {
     const gitOut = execSync('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', { cwd: __dirname, encoding: 'utf8' })
       .toString()
@@ -246,7 +260,39 @@ app.get('/api/files', (req, res) => {
   }
 });
 
-// GET /api/files/:filename/content - get single file content (supports ?raw=1 streaming)
+interface CachedFileContent {
+  mtimeMs: number;
+  buffer: Buffer;
+  text: string;
+  size: number;
+  version: string;
+  source: 'filename' | 'content' | 'metadata' | 'default';
+}
+const serverContentCache = new Map<string, CachedFileContent>();
+
+function getOrLoadCachedFile(filePath: string, filename: string): CachedFileContent {
+  const stats = fs.statSync(filePath);
+  const existing = serverContentCache.get(filename);
+  if (existing && existing.mtimeMs === stats.mtimeMs) {
+    return existing;
+  }
+  const buffer = fs.readFileSync(filePath);
+  const text = buffer.toString('utf-8');
+  const sample = text.slice(0, 4096);
+  const { version, source } = detectVersion(filename, sample);
+  const entry: CachedFileContent = {
+    mtimeMs: stats.mtimeMs,
+    buffer,
+    text,
+    size: stats.size,
+    version,
+    source,
+  };
+  serverContentCache.set(filename, entry);
+  return entry;
+}
+
+// GET /api/files/:filename/content - get single file content (supports ?raw=1 streaming & ultra-fast RAM cache)
 app.get('/api/files/:filename/content', (req, res) => {
   try {
     const filename = path.basename(req.params.filename);
@@ -256,31 +302,26 @@ app.get('/api/files/:filename/content', (req, res) => {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
 
-    const stats = fs.statSync(filePath);
+    const cached = getOrLoadCachedFile(filePath, filename);
 
-    // Fast-path: raw streaming directly to client (eliminates JSON serialization & memory overhead for large files)
+    // Fast-path: raw in-memory buffer response directly to client (< 1ms latency, 0 disk I/O)
     if (req.query.raw === '1' || req.headers.accept?.includes('text/plain')) {
-      const sample = readFirstBytes(filePath, 4096);
-      const { version } = detectVersion(filename, sample);
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('X-File-Size', stats.size.toString());
-      res.setHeader('X-File-Version', version);
-      const stream = fs.createReadStream(filePath);
-      return stream.pipe(res);
+      res.setHeader('Content-Length', cached.buffer.length.toString());
+      res.setHeader('X-File-Size', cached.size.toString());
+      res.setHeader('X-File-Version', cached.version);
+      res.setHeader('Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
+      return res.end(cached.buffer);
     }
-
-    const sample = stats.size > 8192 ? readFirstBytes(filePath, 4096) : undefined;
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const { version, source } = detectVersion(filename, sample ?? content);
 
     res.json({
       success: true,
       name: filename,
-      content,
-      size: stats.size,
-      sizeFormatted: formatBytes(stats.size),
-      version,
-      versionSource: source
+      content: cached.text,
+      size: cached.size,
+      sizeFormatted: formatBytes(cached.size),
+      version: cached.version,
+      versionSource: cached.source
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

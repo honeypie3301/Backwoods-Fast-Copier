@@ -1,3 +1,4 @@
+================================================
 package net.mcreator.thebackwoods.procedures;
 
 import net.neoforged.neoforge.event.ServerChatEvent;
@@ -4881,7 +4882,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			// Melee attack animation state synchronization (Strict Mutual Exclusivity)
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingLeft, isAttacking && attackType == 1);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingRight, isAttacking && attackType == 2);
-			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isAttackingBoth, isAttacking && attackType == 3);
+			setEntityDataIfPresent(woodweaver, "DATA_isAttackingboth", isAttacking && attackType == 3);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingLeft, isAttacking && attackType == 4);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isHookingRight, isAttacking && attackType == 5);
 			setEntityDataIfChanged(woodweaver, WoodweaverEntity.DATA_isSweepingLeft, isAttacking && attackType == 6);

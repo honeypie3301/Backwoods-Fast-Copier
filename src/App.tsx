@@ -438,6 +438,27 @@ export default function App() {
     // The updated indicator ONLY disappears through the "Mark as Read" button or when copied.
   }, []);
 
+  // Content loaded notification from viewer to ensure instant future switching
+  const handleContentLoaded = useCallback((filename: string, content: string) => {
+    setContentCache((prev) => (prev[filename] === content ? prev : { ...prev, [filename]: content }));
+  }, []);
+
+  // Speculative hover prefetching for perceived 0ms click latency
+  const handlePrefetchFile = useCallback((filename: string) => {
+    if (contentCache[filename] !== undefined) return;
+    fetch(`/api/files/${encodeURIComponent(filename)}/content?raw=1`, {
+      cache: 'default',
+      headers: { Accept: 'text/plain' },
+    })
+      .then((res) => (res.ok ? res.text() : null))
+      .then((text) => {
+        if (text !== null) {
+          setContentCache((prev) => (prev[filename] ? prev : { ...prev, [filename]: text }));
+        }
+      })
+      .catch(() => {});
+  }, [contentCache]);
+
   // Copy file content directly
   const handleCopyContent = useCallback(async (filename: string): Promise<boolean> => {
     try {
@@ -663,6 +684,7 @@ export default function App() {
                 onSelectFile={handleSelectFile}
                 onCopyContent={handleCopyContent}
                 onMarkAsRead={handleMarkAsRead}
+                onPrefetchFile={handlePrefetchFile}
               />
             )}
           </div>
@@ -678,6 +700,7 @@ export default function App() {
             onDeleteFile={handleDeleteFile}
             onCopyContent={handleCopyContent}
             onMarkAsRead={handleMarkAsRead}
+            onContentLoaded={handleContentLoaded}
           />
         </main>
       </div>

@@ -23,6 +23,7 @@ interface SidebarFileListProps {
   onSelectFile: (file: FileItem) => void;
   onCopyContent: (filename: string) => Promise<boolean>;
   onMarkAsRead?: (filename: string) => void;
+  onPrefetchFile?: (filename: string) => void;
 }
 
 export const SidebarFileList: React.FC<SidebarFileListProps> = ({
@@ -35,6 +36,7 @@ export const SidebarFileList: React.FC<SidebarFileListProps> = ({
   onSelectFile,
   onCopyContent,
   onMarkAsRead,
+  onPrefetchFile,
 }) => {
   const [copyingFile, setCopyingFile] = useState<string | null>(null);
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
@@ -75,6 +77,7 @@ export const SidebarFileList: React.FC<SidebarFileListProps> = ({
           <div
             key={file.name}
             onClick={() => onSelectFile(file)}
+            onMouseEnter={() => onPrefetchFile?.(file.name)}
             className={`group flex items-center justify-between gap-1.5 px-2 py-1.5 rounded cursor-pointer transition-all ${
               isSelected && file.isEdited
                 ? 'bg-[#181105] border border-amber-400 text-amber-200 font-bold shadow-[0_0_14px_rgba(245,158,11,0.5)]'

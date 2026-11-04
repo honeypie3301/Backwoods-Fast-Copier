@@ -1,3 +1,4 @@
+================================================
 package net.mcreator.thebackwoods;
 
 import java.util.*;
@@ -497,7 +498,7 @@ public final class WoodweaverSurfaceNavigation {
         // Slow turns moderately rather than halting rotation at each surface transition.
         float alignment = Math.abs(state.rotation.dot(new Quaternionf().rotationTo(0, 1, 0,
             next.key.face.getStepX(), next.key.face.getStepY(), next.key.face.getStepZ())));
-        speed *= 0.75 + 0.25 * alignment;
+        speed *= 0.35 + 0.65 * alignment * alignment;
         Vec3 delta = distance > speed ? movement.scale(speed / distance) : movement;
         delta = applyPassageThreadingAndSteering(mob, state, next, delta, speed);
         mob.move(MoverType.SELF, delta);
@@ -513,8 +514,9 @@ public final class WoodweaverSurfaceNavigation {
         Iterator<Node> upcoming = state.route.iterator();
         if (upcoming.hasNext()) upcoming.next();
         boolean continuesOnSurface = upcoming.hasNext() && upcoming.next().key.face == next.key.face;
-        double horizontalDist = new Vec3(movement.x, 0, movement.z).length();
-        boolean arrived = (distance < 0.75 || (horizontalDist < 0.55 && Math.abs(movement.y) < 1.45))
+        Vec3 arrivalNormal = normal(next.key.face);
+        double horizontalDist = movement.subtract(arrivalNormal.scale(movement.dot(arrivalNormal))).length();
+        boolean arrived = (distance < 0.75 || (horizontalDist < 0.55 && Math.abs(movement.dot(arrivalNormal)) < 1.45))
             && (angularError < 0.25 || continuesOnSurface || distance < 0.35);
         if (arrived) {
             if (state.current.key.face != next.key.face) {
@@ -581,15 +583,19 @@ public final class WoodweaverSurfaceNavigation {
 
         // 2. Continuous Local Steering (adapted from Arachnomod planChaseMove & probeLine)
         // If forward path is obstructed by a corner or barrier, sweep angular rays
-        Vec3 horiz = new Vec3(delta.x, 0, delta.z);
+        Vec3 surfaceUp = up(mob, 1);
+        Vec3 tangent = Math.abs(surfaceUp.y) < 0.9 ? new Vec3(0, 1, 0) : new Vec3(1, 0, 0);
+        tangent = tangent.subtract(surfaceUp.scale(tangent.dot(surfaceUp))).normalize();
+        Vec3 across = surfaceUp.cross(tangent).normalize();
+        Vec3 horiz = delta.subtract(surfaceUp.scale(delta.dot(surfaceUp)));
         double horizLen = horiz.length();
         if (horizLen > 0.01) {
-            Vec3 testFrom = currentPos.add(0, 0.4, 0);
+            Vec3 testFrom = currentPos.add(surfaceUp.scale(0.4));
             Vec3 testTo = testFrom.add(horiz.scale(1.2));
             BlockHitResult hit = clipLoaded(level, mob, testFrom, testTo);
             if (hit != null) {
                 // Forward is blocked by an edge or wall: probe alternate angles
-                double baseAngle = Math.atan2(horiz.z, horiz.x);
+                double baseAngle = Math.atan2(horiz.dot(across), horiz.dot(tangent));
                 int sign = state.steerSign;
                 Vec3 bestSteer = null;
 
@@ -598,14 +604,15 @@ public final class WoodweaverSurfaceNavigation {
                         double candidateAngle = baseAngle + angle * s;
                         double probeX = Math.cos(candidateAngle) * horizLen;
                         double probeZ = Math.sin(candidateAngle) * horizLen;
-                        Vec3 probeEnd = testFrom.add(probeX * 1.5, 0, probeZ * 1.5);
+                        Vec3 candidate = tangent.scale(probeX).add(across.scale(probeZ));
+                        Vec3 probeEnd = testFrom.add(candidate.scale(1.5));
                         
                         if (clipLoaded(level, mob, testFrom, probeEnd) == null) {
                             // Check that ground/support exists under probed position
-                            Vec3 groundCheck = testFrom.add(probeX, 0, probeZ);
-                            if (clipLoaded(level, mob, groundCheck, groundCheck.add(0, -1.8, 0)) != null) {
+                            Vec3 groundCheck = testFrom.add(candidate);
+                            if (clipLoaded(level, mob, groundCheck, groundCheck.subtract(surfaceUp.scale(1.8))) != null) {
                                 state.steerSign = s;
-                                bestSteer = new Vec3(probeX, delta.y, probeZ);
+                                bestSteer = candidate.add(surfaceUp.scale(delta.dot(surfaceUp)));
                                 break;
                             }
                         }
@@ -702,7 +709,7 @@ public final class WoodweaverSurfaceNavigation {
         double angle = 2 * Math.acos(dot);
         if (angle < 0.00001) from.set(to);
         else {
-            float stepDegrees = Math.max(degrees, (float) Math.toDegrees(angle) * 0.35f);
+            float stepDegrees = Math.min(degrees, (float) Math.toDegrees(angle) * 0.35f);
             from.slerp(to, (float) Math.min(1, Math.toRadians(stepDegrees) / angle)).normalize();
         }
     }
@@ -1010,7 +1017,7 @@ public final class WoodweaverSurfaceNavigation {
         private static final Map<Integer, Pose> POSES = new HashMap<>();
         private static Object levelIdentity;
         private record Pose(UUID uuid, String dimension, Quaternionf from, Quaternionf to,
-                            double at, boolean active, float separation) {}
+                            double at, boolean active, float fromSeparation, float separation) {}
         private static void receive(SurfacePacket packet) {
             var level = net.minecraft.client.Minecraft.getInstance().level;
             if (level == null || !packet.dimension.equals(level.dimension().identifier().toString())) return;
@@ -1024,7 +1031,7 @@ public final class WoodweaverSurfaceNavigation {
             Quaternionf from = old != null && old.uuid.equals(packet.uuid) ? sample(old, now) : new Quaternionf();
             if (POSES.size() >= 512 && !POSES.containsKey(packet.id)) POSES.remove(POSES.keySet().iterator().next());
             POSES.put(packet.id, new Pose(packet.uuid, packet.dimension, from,
-                packet.active ? q : new Quaternionf(), now, packet.active, Mth.clamp(packet.stand, 2.0f, 4.0f)));
+                packet.active ? q : new Quaternionf(), now, packet.active, old != null && old.uuid.equals(packet.uuid) ? sampleSeparation(old, now) : (float)ROOT_HEIGHT, packet.active ? Mth.clamp(packet.stand, 2.0f, 4.0f) : (float)ROOT_HEIGHT));
         }
         private static Pose pose(Entity entity) {
             if (levelIdentity != entity.level()) { POSES.clear(); levelIdentity = entity.level(); return null; }
@@ -1042,10 +1049,13 @@ public final class WoodweaverSurfaceNavigation {
             Pose p = pose(entity);
             return p != null && (p.active || entity.level().getGameTime() - p.at < 4);
         }
+        private static float sampleSeparation(Pose p, double now) {
+            return Mth.lerp((float)Mth.clamp((now - p.at) / 4.0, 0, 1), p.fromSeparation, p.separation);
+        }
         private static double separation(Entity entity) {
             Pose p = pose(entity);
             if (p == null) return ROOT_HEIGHT;
-            return p.active ? p.separation : Mth.lerp(Mth.clamp((entity.level().getGameTime() - p.at) / 4.0, 0, 1), p.separation, ROOT_HEIGHT);
+            return sampleSeparation(p, entity.level().getGameTime());
         }
         @SubscribeEvent public static void unload(net.neoforged.neoforge.event.level.LevelEvent.Unload event) {
             if (event.getLevel() == levelIdentity) { POSES.clear(); levelIdentity = null; }
@@ -1054,4 +1064,3 @@ public final class WoodweaverSurfaceNavigation {
     }
 }
 // 26.1.2
-

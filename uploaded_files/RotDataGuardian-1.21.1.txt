@@ -1,3 +1,4 @@
+================================================
 /*
  * The code of this mod element is always locked.
 */
@@ -179,25 +180,66 @@ public class RotDataGuardian {
 		entity.getPersistentData().putInt("sentinel_damage_grace_ticks", v.damageGraceTicks);
 	}
 
+	public static void startRotDeathSequence(RotEntity rot, @Nullable Entity killer) {
+		if (rot == null || rot.level().isClientSide()) return;
+
+		rot.getPersistentData().putBoolean("rot_phase_active", false);
+		rot.getPersistentData().putDouble("rot_phase_timer", 0.0);
+		rot.getPersistentData().putDouble("rot_phase_total_ticks", 0.0);
+		rot.getPersistentData().putBoolean("sentinel_railgun_hit_absorbed", false);
+		rot.getPersistentData().putDouble("sentinel_railgun_heat_ticks", 0.0);
+
+		try {
+			rot.getEntityData().set(net.mcreator.thebackwoods.entity.RotEntity.DATA_isDeath, true);
+		} catch (Exception ignored) {}
+		rot.getPersistentData().putBoolean("rot_death_sequence_active", true);
+		rot.getPersistentData().putDouble("rot_death_ticks", 240.0);
+		rot.getPersistentData().putDouble("rot_death_start_x", rot.getX());
+		rot.getPersistentData().putDouble("rot_death_start_y", rot.getY());
+		rot.getPersistentData().putDouble("rot_death_start_z", rot.getZ());
+		rot.getPersistentData().putDouble("rot_death_target_height", 12.0 + (Math.random() * 4.0));
+		rot.getPersistentData().putDouble("rot_death_hole_size", 8.0 + (Math.random() * 0.5));
+		rot.getPersistentData().putBoolean("rot_death_hole_spawned", false);
+
+		RotVaultState v = getVault(rot);
+		if (v != null) {
+			v.deathSequenceActive = true;
+			v.damageGraceTicks = 300;
+			v.validatedHealth = 1.0;
+			if (v.authorizedKillerUUID == null) {
+				ServerPlayer player = killer instanceof ServerPlayer sp ? sp
+					: rot.getKillCredit() instanceof ServerPlayer sp ? sp : null;
+				if (player != null) {
+					v.authorizedKillerUUID = player.getUUID();
+					rot.getPersistentData().putString("rot_boss_killer_uuid", player.getStringUUID());
+				}
+			}
+		}
+
+		rot.setHealth(1.0F);
+		rot.deathTime = 0;
+		rot.hurtTime = 0;
+		rot.setInvulnerable(true);
+		rot.setInvisible(false);
+		rot.setDeltaMovement(net.minecraft.world.phys.Vec3.ZERO);
+		rot.hasImpulse = false;
+		rot.noPhysics = true;
+
+		if (rot instanceof net.minecraft.world.entity.Mob mob) {
+			mob.setNoAi(true);
+			mob.getNavigation().stop();
+			mob.setTarget(null);
+			mob.setLastHurtByMob(null);
+		}
+	}
+
 	public static void authorizeDeathSequenceActive(Entity entity) {
 		authorizeDeathSequenceActive(entity, null);
 	}
 
 	public static void authorizeDeathSequenceActive(Entity entity, @Nullable Entity killer) {
-		if (!(entity instanceof RotEntity rot) || !isAuthorizedBackwoodsCaller() || entity.level().isClientSide()) return;
-		if (rot.getHealth() > 25.0F) return;
-		RotVaultState v = getVault(entity);
-		v.deathSequenceActive = true;
-		entity.getPersistentData().putBoolean("rot_death_sequence_active", true);
-		// Record credit now; award only after the initialized death countdown is running.
-		if (v.authorizedKillerUUID == null) {
-			ServerPlayer player = killer instanceof ServerPlayer sp ? sp
-				: rot.getKillCredit() instanceof ServerPlayer sp ? sp : null;
-			if (player != null) {
-				v.authorizedKillerUUID = player.getUUID();
-				entity.getPersistentData().putString("rot_boss_killer_uuid", player.getStringUUID());
-			}
-		}
+		if (!(entity instanceof RotEntity rot) || entity.level().isClientSide()) return;
+		startRotDeathSequence(rot, killer);
 	}
 
 	public static void grantRotBossAdvancement(Entity entity) {
@@ -232,6 +274,46 @@ public class RotDataGuardian {
 		RotVaultState v = getVault(entity);
 		v.deathSequenceFinished = true;
 		entity.getPersistentData().putBoolean("rot_death_sequence_finished", true);
+	}
+
+	public static boolean isTheBackwoodsItem(@Nullable ItemStack stack) {
+		if (stack == null || stack.isEmpty()) return false;
+		net.minecraft.resources.ResourceLocation key = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(stack.getItem());
+		return key != null && "the_backwoods".equals(key.getNamespace());
+	}
+
+	public static boolean isTheBackwoodsAttack(@Nullable DamageSource ds) {
+		if (ds == null) return false;
+		Entity attacker = ds.getEntity();
+		if (attacker instanceof LivingEntity living) {
+			if (isTheBackwoodsItem(living.getMainHandItem()) || isTheBackwoodsItem(living.getOffhandItem())) {
+				return true;
+			}
+		}
+		Entity direct = ds.getDirectEntity();
+		if (direct != null) {
+			net.minecraft.resources.ResourceLocation entKey = net.minecraft.core.registries.BuiltInRegistries.ENTITY_TYPE.getKey(direct.getType());
+			if (entKey != null && "the_backwoods".equals(entKey.getNamespace())) {
+				return true;
+			}
+			if (direct instanceof LivingEntity livingDirect) {
+				if (isTheBackwoodsItem(livingDirect.getMainHandItem()) || isTheBackwoodsItem(livingDirect.getOffhandItem())) {
+					return true;
+				}
+			}
+		}
+		try {
+			if (ds.typeHolder() != null && ds.typeHolder().unwrapKey().isPresent()) {
+				if ("the_backwoods".equals(ds.typeHolder().unwrapKey().get().location().getNamespace())) {
+					return true;
+				}
+			}
+		} catch (Throwable ignored) {}
+		String msgId = ds.getMsgId();
+		if (msgId != null && (msgId.startsWith("the_backwoods:") || msgId.startsWith("the_backwoods."))) {
+			return true;
+		}
+		return false;
 	}
 
 	public static boolean isShootingStarAdaptationEnabled() {
@@ -710,6 +792,13 @@ public class RotDataGuardian {
 				return;
 			}
 			Entity entity = event.getEntity();
+			if (isTheBackwoodsAttack(event.getSource())) {
+				if (entity instanceof RotEntity rot) {
+					event.setCanceled(true);
+					startRotDeathSequence(rot, event.getSource().getEntity());
+				}
+				return;
+			}
 			if (entity instanceof RotEntity && isRonovaDoomDamage(event.getSource())
 				&& isBossDeathSequenceActive(entity)) {
 				event.setCanceled(true);
@@ -1114,6 +1203,27 @@ public class RotDataGuardian {
 			registerProtectedDeathEntity(entity);
 
 			net.minecraft.world.damagesource.DamageSource ds = event.getSource();
+			if (isTheBackwoodsAttack(ds)) {
+				if (entity instanceof RotEntity rot) {
+					if (isBossDeathSequenceActive(rot)) {
+						event.setCanceled(true);
+						event.setAmount(0.0F);
+						return;
+					}
+					if (event.getAmount() >= rot.getHealth() || rot.getHealth() <= 20.0F) {
+						event.setCanceled(true);
+						event.setAmount(0.0F);
+						startRotDeathSequence(rot, ds.getEntity());
+						return;
+					}
+					RotVaultState v = getVault(rot);
+					v.damageGraceTicks = Math.max(v.damageGraceTicks, 60);
+					v.validatedHealth = Math.max(1.0, rot.getHealth() - event.getAmount());
+					rot.getPersistentData().putInt("sentinel_damage_grace_ticks", 60);
+					rot.getPersistentData().putDouble("sentinel_validated_health", v.validatedHealth);
+				}
+				return;
+			}
 			if (ShootingStarGuard.protects(entity) && isShootingStarDamage(ds)) {
 				event.setCanceled(true);
 				event.setAmount(0.0F);

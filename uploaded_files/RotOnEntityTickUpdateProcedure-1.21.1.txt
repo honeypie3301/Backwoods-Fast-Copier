@@ -1,3 +1,4 @@
+================================================
 package net.mcreator.thebackwoods.procedures;
 // 1.21.1 - Sentinel Adaptive Overhaul
 import net.mcreator.thebackwoods.BlackHole;
@@ -12009,7 +12010,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		for (ItemStack stack : player.getArmorSlots()) {
 			if (stack == null || stack.isEmpty()) continue;
 			threatIndex += 10.0;
-			CompoundTag tag = stack.getPersistentData();
+			CompoundTag tag = stack.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
 			if (tag != null && !tag.isEmpty()) {
 				if (tag.contains("affix_data") || tag.contains("apotheosis") || tag.contains("affixes")) threatIndex += 25.0;
 				if (tag.contains("irons_spellbooks") || tag.contains("SpellData")) threatIndex += 20.0;
@@ -12023,7 +12024,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			if (itemId.contains("sword") || itemId.contains("axe") || itemId.contains("bow") || itemId.contains("gun") || itemId.contains("scythe") || itemId.contains("hammer") || itemId.contains("katana") || itemId.contains("staff") || itemId.contains("wand")) {
 				threatIndex += 20.0;
 			}
-			CompoundTag tag = mainHand.getPersistentData();
+			CompoundTag tag = mainHand.getOrDefault(net.minecraft.core.component.DataComponents.CUSTOM_DATA, net.minecraft.world.item.component.CustomData.EMPTY).copyTag();
 			if (tag != null && !tag.isEmpty()) {
 				if (tag.contains("affix_data") || tag.contains("apotheosis") || tag.contains("affixes")) threatIndex += 40.0;
 				if (tag.contains("irons_spellbooks") || tag.contains("SpellData")) threatIndex += 30.0;
