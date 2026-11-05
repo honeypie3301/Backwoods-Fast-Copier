@@ -18,7 +18,11 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
     public static int BOTTOM_PLATE_OFFSET = 5; // Vanilla bedrock occupies offsets 0..4; never overwritten.
     public static int TOP_PLATE_THICKNESS = 2;
     public static boolean ENABLE_CEILING_PLATE = false;
-    public static int ROOF_OFFSET_FROM_TOP = 110; // Configurable clearance below max build height; increase to lower Ward roof and prevent lattice collision.
+    public static int GAP_BELOW_LATTICE = 1; // ULTIMATE SETTING: Adjust the gap between top of Ward and bottom of Lattice in ONE place!
+
+    public static int getWardRoofY(int max) {
+        return CrossworksLatticeFeature.getLatticeBaseY(max) - GAP_BELOW_LATTICE;
+    }
     private static final String ID = "the_backwoods:suspended_ward";
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
     private static final byte AIR=0, PLANK=1, LOG=2, GLASS=3, FENCE=4, LADDER=5, SPAWNER=6, FALSE_PLANK=7,
@@ -51,7 +55,7 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
         for(double chance:new double[]{FALSE_ROOM_FLOOR_CHANCE,FALSE_BRIDGE_CHANCE,ROOM_PORTAL_CHANCE,GRAIN_PORTAL_CHANCE})
             if(!Double.isFinite(chance)||chance<0||chance>100)
                 throw new IllegalStateException("SuspendedWardFeature floor/portal chances must be percentages from 0 to 100");
-        int effectiveMax=max-ROOF_OFFSET_FROM_TOP;
+        int effectiveMax=getWardRoofY(max);
         int floor=min+BOTTOM_PLATE_OFFSET, roof=ENABLE_CEILING_PLATE?effectiveMax-TOP_PLATE_THICKNESS:effectiveMax;
         if (roof-floor<24) return false;
         int baseX=context.origin().getX()&~15, baseZ=context.origin().getZ()&~15;
@@ -115,7 +119,7 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
     }
 
     public static int getTopRoomFloorY(int minY,int maxYExclusive) {
-        int effectiveMax=maxYExclusive-ROOF_OFFSET_FROM_TOP;
+        int effectiveMax=getWardRoofY(maxYExclusive);
         int bottom=minY+BOTTOM_PLATE_OFFSET,roof=ENABLE_CEILING_PLATE?effectiveMax-TOP_PLATE_THICKNESS:effectiveMax;
         if(FLOOR_SPACING<4||roof-bottom<3) throw new IllegalArgumentException("No room with two blocks of headroom");
         return bottom+Math.floorDiv(roof-bottom-3,FLOOR_SPACING)*FLOOR_SPACING;

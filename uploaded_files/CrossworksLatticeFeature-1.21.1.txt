@@ -116,6 +116,14 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
         return ((hash(seed, x, z) >>> 11) * 0x1.0p-53) * 100.0;
     }
 
+    public static int TOP_MARGIN = 3; // Air padding below max build height for Roof Plate 2
+
+    public static int getLatticeBaseY(int max) {
+        int totalRoofOffset = (ENABLE_ROOF_PLATE_2 ? ROOF_PLATE_2_HEIGHT_OFFSET : 0) + CEILING_PLATE_GAP + CEILING_PLATE_THICKNESS + 1;
+        int gridTopY = max - TOP_MARGIN - totalRoofOffset;
+        return gridTopY - VERTICAL_THICKNESS;
+    }
+
     @Override
     public boolean place(net.minecraft.world.level.levelgen.feature.FeaturePlaceContext<net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration> context) {
         var level = context.level();
@@ -128,10 +136,8 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
         int min = level.getMinBuildHeight();
         int max = level.getMaxBuildHeight();
 
-        // Strict bottom-to-up calculation: top rests ELEVATION_OFFSET_FROM_TOP below roof, guaranteeing plate 2 fits under max height
-        int totalRoofHeightNeeded = (ENABLE_ROOF_PLATE_2 ? ROOF_PLATE_2_HEIGHT_OFFSET : 0) + CEILING_PLATE_GAP + CEILING_PLATE_THICKNESS + 2;
-        int gridTopY = max - Math.max(ELEVATION_OFFSET_FROM_TOP, totalRoofHeightNeeded);
-        int gridBaseY = gridTopY - VERTICAL_THICKNESS;
+        int gridBaseY = getLatticeBaseY(max);
+        int gridTopY = gridBaseY + VERTICAL_THICKNESS;
         if (gridBaseY < min || gridTopY > max) {
             return false;
         }
