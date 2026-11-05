@@ -89,6 +89,15 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 	@SubscribeEvent
 	public static void onNavigationTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event) {
 		if (!(event.getEntity() instanceof WoodweaverEntity mob) || mob.level().isClientSide()) return;
+		if (persistentBoolean(mob.getPersistentData(), "is_dashing", false)) {
+			// Ram owns the heading and speed. Do not apply a stale pursuit turn or corner braking.
+			NAVIGATION_TURNS.remove(mob);
+			float yaw = persistentFloat(mob.getPersistentData(), "dash_lock_yaw", mob.getYRot());
+			mob.setYRot(yaw); mob.yRotO = yaw;
+			mob.setYBodyRot(yaw); mob.yBodyRotO = yaw;
+			mob.setYHeadRot(yaw); mob.yHeadRotO = yaw;
+			return;
+		}
 		if (persistentBoolean(mob.getPersistentData(), "is_dying", false)) {
 			NAVIGATION_TURNS.remove(mob);
 			float dYaw = persistentFloat(mob.getPersistentData(), "death_locked_yaw", mob.getYRot());
@@ -166,9 +175,17 @@ public class WoodweaverOnEntityTickUpdateProcedure {
         }
         boolean hypno = persistentInt(data, "hypno_phase", 0) > 0;
         boolean flash = persistentInt(data, "weapon_flash_phase", 0) > 0;
+        if (persistentBoolean(data, "is_dashing", false)) {
+            float lockedYaw = persistentFloat(data, "dash_lock_yaw", mob.getYRot());
+            mob.setYRot(lockedYaw); mob.yRotO = lockedYaw;
+            mob.setYBodyRot(lockedYaw); mob.yBodyRotO = lockedYaw;
+            mob.setYHeadRot(lockedYaw); mob.yHeadRotO = lockedYaw;
+            mob.setXRot(0.0F); mob.xRotO = 0.0F;
+            return;
+        }
         boolean active = hypno || flash || persistentBoolean(data, "is_attacking", false)
             || persistentBoolean(data, "is_preparing_leap", false) || persistentBoolean(data, "is_leaping", false)
-            || persistentBoolean(data, "is_landing_anim", false) || persistentBoolean(data, "is_dashing", false);
+            || persistentBoolean(data, "is_landing_anim", false);
         if (!mob.isAlive()) { COMBAT_LOOK.remove(mob); return; }
         LivingEntity target = mob.getTarget();
         int targetId = hypno ? persistentInt(data, "hypno_target_id", 0)
@@ -5401,6 +5418,67 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			if (name.equals("honeypie_3301") || name.equals("Dev") || player.permissions().hasPermission(net.minecraft.server.permissions.Permissions.COMMANDS_GAMEMASTER) || player.isCreative()) {
 				if (msg.equals("weaver debug")) {
 					player.sendOverlayMessage(Component.literal("§e[Weaver] Debug mode (final): " + (WEAVER_DEBUG ? "§a§lON" : "§c§lOFF")));
+					event.setCanceled(true);
+				} else if (msg.equals("ram") || msg.equals("weaver ram")) {
+					if (!WEAVER_DEBUG) {
+						player.sendOverlayMessage(Component.literal("§c[Weaver Debug] 'ram' command is disabled because WEAVER_DEBUG is OFF. Set WEAVER_DEBUG = true to enable."));
+					} else {
+						ServerLevel level = (ServerLevel) player.level();
+						AABB box = player.getBoundingBox().inflate(64.0);
+						List<WoodweaverEntity> weavers = level.getEntitiesOfClass(WoodweaverEntity.class, box);
+						if (!weavers.isEmpty()) {
+							weavers.sort(java.util.Comparator.comparingDouble(w -> player.distanceToSqr(w)));
+							WoodweaverEntity weaver = weavers.get(0);
+
+							// Choose valid direction: find the longest unobstructed ground/air path over 45 blocks
+							double bestDist = 0;
+							float chosenYaw = weaver.getYRot();
+							Vec3 start = weaver.position().add(0, 1.5, 0);
+
+							for (float testYaw = 0; testYaw < 360; testYaw += 45) {
+								double rad = Math.toRadians(testYaw + 90.0F);
+								double dx = Math.cos(rad);
+								double dz = Math.sin(rad);
+								Vec3 end = start.add(dx * 45.0, 0, dz * 45.0);
+								BlockHitResult hit = level.clip(new net.minecraft.world.level.ClipContext(start, end,
+									net.minecraft.world.level.ClipContext.Block.COLLIDER,
+									net.minecraft.world.level.ClipContext.Fluid.NONE, weaver));
+								double dist = hit.getType() == net.minecraft.world.phys.HitResult.Type.MISS ? 45.0 : start.distanceTo(hit.getLocation());
+								if (dist > bestDist) {
+									bestDist = dist;
+									chosenYaw = testYaw;
+								}
+							}
+
+							CompoundTag tag = weaver.getPersistentData();
+							clearOtherStates(tag, "DASHING");
+							updateStateAndLog(weaver, tag, "DASHING_DEBUG_RAM");
+							tag.putBoolean("is_dashing", true);
+							tag.putInt("dash_ticks", 0);
+							tag.putFloat("dash_lock_yaw", chosenYaw);
+							tag.putDouble("dash_start_x", weaver.getX());
+							tag.putDouble("dash_start_y", weaver.getY());
+							tag.putDouble("dash_start_z", weaver.getZ());
+							tag.putDouble("dash_total_dist", Math.max(30.0, bestDist));
+							tag.putBoolean("dash_is_override", false);
+							tag.putBoolean("dash_target_underground", false);
+							tag.putDouble("dash_locked_y", weaver.getY());
+
+							weaver.setYRot(chosenYaw);
+							weaver.yRotO = chosenYaw;
+							weaver.setYBodyRot(chosenYaw);
+							weaver.yBodyRotO = chosenYaw;
+							weaver.setYHeadRot(chosenYaw);
+							weaver.yHeadRotO = chosenYaw;
+
+							weaver.level().playSound(null, weaver.getX(), weaver.getY(), weaver.getZ(), SoundEvents.RAVAGER_ROAR, SoundSource.HOSTILE, 2.5F, 0.60F);
+							weaver.level().playSound(null, weaver.getX(), weaver.getY(), weaver.getZ(), SoundEvents.WARDEN_ROAR, SoundSource.HOSTILE, 2.0F, 0.65F);
+							level.sendParticles(ParticleTypes.EXPLOSION, weaver.getX(), weaver.getY() + 1.0, weaver.getZ(), 10, 1.0, 1.0, 1.0, 0.0);
+							player.sendOverlayMessage(Component.literal("§a[Weaver Debug] Ramming Dash ordered! Direction Yaw: §e" + (int)chosenYaw + "°§a, Clear Path: §e" + (int)bestDist + "m"));
+						} else {
+							player.sendOverlayMessage(Component.literal("§c[Weaver Debug] No Woodweaver found within 64 blocks!"));
+						}
+					}
 					event.setCanceled(true);
 				} else if (msg.equals("weaver dash") || msg.equals("weaver config dash")) {
 					player.sendOverlayMessage(Component.literal("§e[Weaver] Ramming Dash (final): " + (ENABLE_DASH ? "§a§lON" : "§c§lOFF")));

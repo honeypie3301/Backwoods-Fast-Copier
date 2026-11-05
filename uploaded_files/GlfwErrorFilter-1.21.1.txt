@@ -1,0 +1,38 @@
+package net.mcreator.thebackwoods;
+
+import net.neoforged.api.distmarker.Dist;
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.fml.event.lifecycle.FMLClientSetupEvent;
+import org.lwjgl.glfw.GLFW;
+import org.lwjgl.glfw.GLFWErrorCallback;
+
+/**
+ * Custom Element: GlfwErrorFilter (Minecraft NeoForge 1.21.1)
+ *
+ * Suppresses benign "65539: Invalid key -1" polling errors emitted by GLFW during "@ Pre render"
+ * when unbound keybindings (-1) are checked before input device polling.
+ * Uses a static method reference to prevent FML inner-class scanner NullPointerExceptions.
+ */
+@EventBusSubscriber(modid = "the_backwoods", value = Dist.CLIENT)
+public class GlfwErrorFilter {
+
+	private static GLFWErrorCallback previousCallback = null;
+
+	@SubscribeEvent
+	public static void onClientSetup(FMLClientSetupEvent event) {
+		event.enqueueWork(() -> {
+			previousCallback = GLFW.glfwSetErrorCallback(GlfwErrorFilter::handleGlfwError);
+		});
+	}
+
+	private static void handleGlfwError(int error, long description) {
+		String desc = GLFWErrorCallback.getDescription(description);
+		if (error == 65539 && desc != null && desc.contains("Invalid key")) {
+			return; // Silently drop from log/console
+		}
+		if (previousCallback != null) {
+			previousCallback.invoke(error, description);
+		}
+	}
+}

@@ -385,10 +385,20 @@ public class WeaverGait {
         Vec3 motion = new Vec3(entity.getX() - entity.xo, entity.getY() - entity.yo, entity.getZ() - entity.zo);
         motion = motion.subtract(surfaceUp.scale(motion.dot(surfaceUp)));
         double speed = motion.length();
-        if (speed > 1.0) motion = motion.scale(1.0 / speed);
+        boolean isDashing = false;
+        if (entity instanceof LivingEntity living) {
+            try {
+                isDashing = living.getPersistentData().getBooleanOr("is_dashing", false);
+            } catch (Throwable ignored) {}
+        }
+        double maxSpeedCap = isDashing ? 2.5 : 1.5;
+        if ((isDashing || speed > 0.40) && speed > 0.05) {
+            yaw = (float) Math.toDegrees(Math.atan2(motion.z, motion.x)) - 90.0F;
+        }
         float yawDelta = entity instanceof LivingEntity living ? Mth.wrapDegrees(living.yBodyRot - living.yBodyRotO) : 0;
         double yawDeltaRad = Math.toRadians(yawDelta);
-        Vec3 linearPredict = motion.scale(Math.min(3.2, 2.0 + speed * 3.5));
+        double maxPredict = isDashing || speed > 0.45 ? Math.min(8.0, 3.2 + speed * 4.8) : 3.2;
+        Vec3 linearPredict = motion.scale(Math.min(maxPredict, 2.0 + speed * 3.8));
         double time = tick;
         Quaternionf surfaceRotation = WoodweaverSurfaceNavigation.rotation(entity, 1);
         boolean airborneApproach = !entity.onGround() && entity.getDeltaMovement().y < 0 && state.nearLanding;
@@ -400,7 +410,7 @@ public class WeaverGait {
             double z = i < 2 ? -2.4 : i < 4 ? 0.0 : 2.5;
             Vec3 turnOffset = WoodweaverSurfaceNavigation.WeaverFrame.offset(surfaceRotation, yaw, -z * yawDeltaRad * 2.5, 0, x * yawDeltaRad * 2.5);
             Vec3 predict = linearPredict.add(turnOffset);
-            if (predict.length() > 3.2) predict = predict.scale(3.2 / predict.length());
+            if (predict.length() > maxPredict) predict = predict.scale(maxPredict / predict.length());
             Vec3 offset = new Vec3(x, hipY[i], z);
             Contact contact = reachableGround(level, entity, offset, yaw, predict, i);
             if (contact == null && predict.lengthSqr() > 0.001)
@@ -565,7 +575,8 @@ public class WeaverGait {
                         }
                     }
                     if (neighborStepping && leg.grounded && !isComfortBreached) continue;
-                    if (leg.grounded && (supports <= 3 || !stableSupport(state, i, surfaceUp))) continue;
+                    int minSupports = (isDashing || speed > 0.45) && isComfortBreached ? 2 : 3;
+                    if (leg.grounded && (supports <= minSupports || (!isComfortBreached && !stableSupport(state, i, surfaceUp)))) continue;
 
                     if (leg.grounded) supports--;
                     leg.lastPlantedPos = leg.currentPlantedPos;
@@ -575,8 +586,11 @@ public class WeaverGait {
                     leg.narrow = leg.targetNarrow;
                     leg.stepStart = time;
                     double stepDist = leg.lastPlantedPos.distanceTo(leg.landingPos);
-                    leg.stepDuration = Mth.clamp(2.5 + stepDist * 0.35 - speed * 1.5, 2.4, 4.0);
-                    leg.lift = Math.max(STEP_HEIGHT, Math.min(1.25,
+                    double minStepDuration = isDashing || speed > 0.45 ? 1.25 : 2.4;
+                    double maxStepDuration = isDashing || speed > 0.45 ? 2.2 : 4.0;
+                    leg.stepDuration = Mth.clamp(2.2 + stepDist * 0.25 - speed * 1.6, minStepDuration, maxStepDuration);
+                    double maxLift = isDashing || speed > 0.45 ? 0.85 : 1.25;
+                    leg.lift = Math.max(STEP_HEIGHT, Math.min(maxLift,
                         Math.abs(leg.landingPos.subtract(leg.lastPlantedPos).dot(surfaceUp)) * 0.5 + 0.3));
                     BlockHitResult obstacle = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
                         leg.lastPlantedPos.add(surfaceUp.scale(0.2)), leg.landingPos.add(surfaceUp.scale(0.2)));
@@ -622,6 +636,9 @@ public class WeaverGait {
 
         float yaw = entity instanceof LivingEntity living ? living.yBodyRot : entity.getYRot();
         double speed = Math.hypot(entity.getX() - entity.xo, entity.getZ() - entity.zo);
+        if (speed > 0.40) {
+            yaw = (float) Math.toDegrees(Math.atan2(entity.getZ() - entity.zo, entity.getX() - entity.xo)) - 90.0F;
+        }
 
         // Direct foot differential adaptation (ArachnoMod):
         // Front feet (0, 1) vs Rear feet (4, 5) give immediate pitch response to slopes.

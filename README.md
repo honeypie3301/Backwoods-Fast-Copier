@@ -22,3 +22,8 @@ Companion workspace and fast file copier for Backwoods mod development and wiki 
 4. **GitDigest Delimiter Cleanliness**:
    - Never copy or export delimiter lines (`================================================` or `File: ...`) at the top of Java procedures or classes.
    - All copied content is automatically sanitized to prevent `illegal start of type` syntax errors in MCreator.
+
+5. **Zero-Error Code Verification via `build.gradle` & Digest Files**:
+   - Before writing or editing Minecraft mod/procedure code, ALWAYS analyze `build.gradle` and the digest files in `uploaded_files/` (`backwoods-1.21.1_digest.txt`, `backwoods-26.1.2_digest.txt`, `procedures_digest-*.txt`).
+   - Use `build.gradle` to establish compiler ground truth: exact Minecraft version, NeoForge build (`21.1.232` vs `26.1.2.95`), Java toolchain version (`JavaLanguageVersion.of(21)` vs `of(25)`), and mapping channels.
+   - Cross-reference existing procedure digests to verify real method signatures, Blaze3D vertex rendering calls, and event hooks to eliminate hallucinations and signature drift.

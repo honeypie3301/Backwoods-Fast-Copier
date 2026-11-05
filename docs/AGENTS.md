@@ -29,9 +29,11 @@ Do not expand scope merely because another improvement is noticed.
 - Do not inspect the entire repository unless the task genuinely requires repository-wide knowledge.
 - Do not run unrelated builds/tests or repeated unchanged commands “just to be safe.”
 
-### Version Gating
-- Identify whether the task targets NeoForge/Minecraft **1.21.1** or **1.21.8** before editing.
+### Version Gating & Compiler Ground Truth
+- Identify whether the task targets NeoForge/Minecraft **1.21.1**, **1.21.8**, or **26.1.2** before editing.
+- **Mandatory Digest & Gradle Check**: Always check `build.gradle` and the digest dumps (`backwoods-*_digest.txt`, `procedures_digest-*.txt`) in `uploaded_files/` to extract exact NeoForge version strings (e.g. `21.1.232` vs `26.1.2.95`), Java toolchain targets, and actual working method signatures.
 - Never apply a version-specific API/pattern to the other version without verifying it.
+- Cross-reference Blaze3D, VertexConsumer, and NBT methods against existing working procedures in the digests to ensure zero compiler errors.
 - Use the appropriate version document in `docs/`.
 
 ### Verification

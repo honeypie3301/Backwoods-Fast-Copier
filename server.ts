@@ -15,6 +15,10 @@
  *    - Updated files display an amber border, glow, and UPDATED badge.
  *    - Clicking, selecting, or viewing a file must NEVER clear the indicator.
  *    - The indicator clears ONLY when clicking "Mark as Read" or copying the file content.
+ * 5. MOD CODE VERIFICATION VIA BUILD.GRADLE & DIGESTS:
+ *    - Before writing or editing MCreator mod Java code, ALWAYS inspect `build.gradle` and digest files in uploaded_files/.
+ *    - Extract the exact NeoForge version (e.g. 21.1.232 vs 26.1.2.95) and Java version to guarantee zero compile errors.
+ *    - Cross-reference method signatures against existing procedures_digest-*.txt files to prevent API drifts.
  */
 
 import express from 'express';

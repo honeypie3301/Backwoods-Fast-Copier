@@ -68,7 +68,18 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 	public static float COLOR_GREEN = 0.88F;      // Green channel (0.0 to 1.0)
 	public static float COLOR_BLUE = 0.30F;       // Blue channel (0.0 to 1.0)
 
-	// 5. TIMING & FADE TRANSITION (In ticks, 20 ticks = 1 second)
+	// 5. BEAM DISTANCE GRADIENT & END-FADE SETTINGS
+	// Ratio of beam distance where gradient fading begins:
+	// 0.00F = continuous smooth gradient from orb to tip.
+	// 0.55F = holds peak opacity for first 55%, then smoothly dissolves over the remaining 45%.
+	public static float BEAM_FADE_START_RATIO = 0.35F;
+
+	// Opacity multiplier at the furthest tip of the beam:
+	// 0.00F = fully dissolved to transparent (soft gradient fade into thin air).
+	// 1.00F = uniform opacity throughout (no distance fade).
+	public static float BEAM_END_OPACITY_RATIO = 0.0F;
+
+	// 6. TIMING & FADE TRANSITION (In ticks, 20 ticks = 1 second)
 	// Opening phase is 60 ticks (3.0s). Hold phase is 160 ticks (8.0s). Total cycle = 220 ticks.
 	public static int FADE_IN_START_TICK = 35;    // Beam stays hidden until tick 35, then fades in
 	public static int FADE_IN_FULL_TICK = 55;     // Reaches full BEAM_MAX_OPACITY at tick 55
@@ -341,62 +352,71 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 	}
 
 	/**
-	 * Renders a clean 4-sided square frustum/pyramid beam (Top, Bottom, Left, Right faces),
-	 * double-sided so it is visible both from outside and when pulled inside the beam.
+	 * Renders a clean 4-sided square frustum/pyramid beam (Top, Bottom, Left, Right faces)
+	 * with smooth configurable distance gradient fading towards the tip.
 	 */
 	private static void renderSquarePyramidBeam(PoseStack poseStack, VertexConsumer builder,
 												float s, float e, float length,
 												float r, float g, float b, float a) {
 
 		Matrix4f matrix = poseStack.last().pose();
+		float fadeStartRatio = Mth.clamp(BEAM_FADE_START_RATIO, 0.0F, 1.0F);
+		float endAlpha = a * Mth.clamp(BEAM_END_OPACITY_RATIO, 0.0F, 1.0F);
 
-		// Coordinates in Model Space (-Z is forward, -Y is up, +Y is down, +X is right, -X is left):
-		// Start Square (Z = 0)
-		float sTop = -s;
-		float sBottom = s;
-		float sLeft = -s;
-		float sRight = s;
+		if (fadeStartRatio <= 0.01F) {
+			// Continuous smooth gradient from start to end
+			renderFrustumSection(matrix, poseStack, builder, s, e, 0.0F, -length, r, g, b, a, endAlpha);
+		} else if (fadeStartRatio >= 0.99F) {
+			// Solid beam throughout (legacy uniform opacity)
+			renderFrustumSection(matrix, poseStack, builder, s, e, 0.0F, -length, r, g, b, a, a);
+		} else {
+			// Two-segment gradient: solid main body, followed by a smooth dissolving fade tail
+			float midZ = -length * fadeStartRatio;
+			float midSize = s + (e - s) * fadeStartRatio;
 
-		// End Square (Z = -length)
-		float eTop = -e;
-		float eBottom = e;
-		float eLeft = -e;
-		float eRight = e;
+			// Segment 1: Main core beam (uniform full opacity)
+			renderFrustumSection(matrix, poseStack, builder, s, midSize, 0.0F, midZ, r, g, b, a, a);
 
-		float z0 = 0.0F;
-		float z1 = -length;
+			// Segment 2: Distance fade tail (gradients from peak opacity down to endAlpha)
+			renderFrustumSection(matrix, poseStack, builder, midSize, e, midZ, -length, r, g, b, a, endAlpha);
+		}
+	}
+
+	private static void renderFrustumSection(Matrix4f matrix, PoseStack poseStack, VertexConsumer builder,
+											 float sHalf, float eHalf, float zStart, float zEnd,
+											 float r, float g, float b, float a0, float a1) {
 
 		// 1. TOP FACE (Facing -Y up)
 		addDoubleSidedQuad(matrix, poseStack, builder,
-				sLeft, sTop, z0,
-				sRight, sTop, z0,
-				eRight, eTop, z1,
-				eLeft, eTop, z1,
-				0.0F, -1.0F, 0.0F, r, g, b, a);
+				-sHalf, -sHalf, zStart,
+				sHalf, -sHalf, zStart,
+				eHalf, -eHalf, zEnd,
+				-eHalf, -eHalf, zEnd,
+				0.0F, -1.0F, 0.0F, r, g, b, a0, a1);
 
 		// 2. BOTTOM FACE (Facing +Y down)
 		addDoubleSidedQuad(matrix, poseStack, builder,
-				sRight, sBottom, z0,
-				sLeft, sBottom, z0,
-				eLeft, eBottom, z1,
-				eRight, eBottom, z1,
-				0.0F, 1.0F, 0.0F, r, g, b, a);
+				sHalf, sHalf, zStart,
+				-sHalf, sHalf, zStart,
+				-eHalf, eHalf, zEnd,
+				eHalf, eHalf, zEnd,
+				0.0F, 1.0F, 0.0F, r, g, b, a0, a1);
 
 		// 3. LEFT FACE (Facing -X left)
 		addDoubleSidedQuad(matrix, poseStack, builder,
-				sLeft, sBottom, z0,
-				sLeft, sTop, z0,
-				eLeft, eTop, z1,
-				eLeft, eBottom, z1,
-				-1.0F, 0.0F, 0.0F, r, g, b, a);
+				-sHalf, sHalf, zStart,
+				-sHalf, -sHalf, zStart,
+				-eHalf, -eHalf, zEnd,
+				-eHalf, eHalf, zEnd,
+				-1.0F, 0.0F, 0.0F, r, g, b, a0, a1);
 
 		// 4. RIGHT FACE (Facing +X right)
 		addDoubleSidedQuad(matrix, poseStack, builder,
-				sRight, sTop, z0,
-				sRight, sBottom, z0,
-				eRight, eBottom, z1,
-				eRight, eTop, z1,
-				1.0F, 0.0F, 0.0F, r, g, b, a);
+				sHalf, -sHalf, zStart,
+				sHalf, sHalf, zStart,
+				eHalf, eHalf, zEnd,
+				eHalf, -eHalf, zEnd,
+				1.0F, 0.0F, 0.0F, r, g, b, a0, a1);
 	}
 
 	private static void addDoubleSidedQuad(Matrix4f matrix, PoseStack poseStack, VertexConsumer builder,
@@ -405,19 +425,19 @@ public class WoodweaverTractorBeamLayer<T extends LivingEntity, M extends Entity
 										   float x2, float y2, float z2,
 										   float x3, float y3, float z3,
 										   float nx, float ny, float nz,
-										   float r, float g, float b, float a) {
+										   float r, float g, float b, float a0, float a1) {
 
 		// Front Face
-		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
-		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
-		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
-		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
+		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a0).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
+		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a0).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
+		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a1).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
+		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a1).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), nx, ny, nz);
 
 		// Back Face (Inside view)
-		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
-		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
-		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
-		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
+		builder.addVertex(matrix, x3, y3, z3).setColor(r, g, b, a1).setUv(0.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
+		builder.addVertex(matrix, x2, y2, z2).setColor(r, g, b, a1).setUv(1.0F, 1.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
+		builder.addVertex(matrix, x1, y1, z1).setColor(r, g, b, a0).setUv(1.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
+		builder.addVertex(matrix, x0, y0, z0).setColor(r, g, b, a0).setUv(0.0F, 0.0F).setOverlay(OverlayTexture.NO_OVERLAY).setLight(0xF000F0).setNormal(poseStack.last(), -nx, -ny, -nz);
 	} // 1.21.1
 }
 // 1.21.1
