@@ -58,8 +58,8 @@ When the requested behavior is implemented and proportionally verified, stop. Do
 - Keep design clean and professional.
 - Never use mock data, fabricated parameters, placeholder statistics, or invented project facts.
 - Respect the project's MCreator, Minecraft, Java, and NeoForge constraints.
-- Treat each external-reference subdirectory as a separate project; do not assume it is one unified codebase.
 - For wiki work, analyze the provided repository commit/diff and update the wiki from actual source information.
+- **GitDigest Delimiter Cleanliness**: NEVER copy, extract, or emit GitDigest delimiter lines (`================================================` or `File: ...`) at the top of Java procedures or classes. They are invalid Java syntax and cause `illegal start of type` compile failures in MCreator. Always strip delimiters before writing or outputting code.
 
 ### Web Workspace & UI Troubleshooting (Blank White Screen Prevention)
 If the web application ever renders as an empty/blank white screen, check these 3 requirements:

@@ -1,4 +1,3 @@
-================================================
 package net.mcreator.thebackwoods;
 
 import java.util.*;

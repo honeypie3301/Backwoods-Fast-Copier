@@ -1,4 +1,3 @@
-================================================
 package net.mcreator.thebackwoods.procedures;
 // 26.1.2 - Sentinel Adaptive Overhaul
 import net.neoforged.neoforge.event.tick.EntityTickEvent;

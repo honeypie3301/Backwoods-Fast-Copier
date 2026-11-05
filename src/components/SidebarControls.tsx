@@ -16,9 +16,6 @@ interface SidebarControlsProps {
   availableVersions: string[];
   selectedVersion: string | null;
   onVersionSelect: (v: string | null) => void;
-  availableEntities: { id: string; label: string; count: number }[];
-  selectedEntity: string | null;
-  onEntitySelect: (e: string | null) => void;
   maxLength: number;
   onMaxLengthChange: (len: number) => void;
   activePreset: ShortenPreset;
@@ -43,9 +40,6 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
   availableVersions,
   selectedVersion,
   onVersionSelect,
-  availableEntities,
-  selectedEntity,
-  onEntitySelect,
   maxLength,
   onMaxLengthChange,
   activePreset,
@@ -73,7 +67,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
           type="text"
           value={searchQuery}
           onChange={(e) => onSearchChange(e.target.value)}
-          placeholder="Filter files, entities, versions..."
+          placeholder="Filter files, versions..."
           className="w-full pl-7 pr-6 py-1 bg-[#070c09] border border-[#142016] rounded text-xs text-[#d0e0d3] placeholder-[#3f5244] focus:outline-none focus:border-emerald-600/80 font-mono"
         />
         {searchQuery && (
@@ -84,46 +78,6 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
             <X className="w-3 h-3" />
           </button>
         )}
-      </div>
-
-      {/* Entity Filter Badges */}
-      <div
-        className="flex items-center gap-1 overflow-x-auto pb-1 filter-scrollbar scroll-smooth"
-        onWheel={(e) => {
-          if (e.deltaY !== 0) {
-            e.currentTarget.scrollLeft += e.deltaY;
-          }
-        }}
-      >
-        <span className="text-[#3f5244] text-[10px] uppercase font-bold shrink-0 mr-0.5">
-          Entity:
-        </span>
-
-        <button
-          onClick={() => onEntitySelect(null)}
-          className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 ${
-            selectedEntity === null
-              ? 'bg-emerald-500 text-black'
-              : 'bg-[#070c09] text-[#718776] border border-[#132015] hover:text-[#c2d4c5]'
-          }`}
-        >
-          All Entities
-        </button>
-
-        {availableEntities.map((ent) => (
-          <button
-            key={ent.id}
-            onClick={() => onEntitySelect(selectedEntity === ent.id ? null : ent.id)}
-            className={`px-2 py-0.5 text-[10px] font-bold rounded shrink-0 flex items-center gap-0.5 ${
-              selectedEntity === ent.id
-                ? 'bg-emerald-500 text-black'
-                : 'bg-[#070c09] text-[#718776] border border-[#132015] hover:text-[#c2d4c5]'
-            }`}
-          >
-            <span>{ent.label} ({ent.count})</span>
-            {selectedEntity === ent.id && <X className="w-2.5 h-2.5 text-black" />}
-          </button>
-        ))}
       </div>
 
       {/* Version Filter Badges */}
@@ -227,12 +181,11 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
             Mark All Read {unreadCount > 0 ? `(${unreadCount})` : '✓'}
           </button>
 
-          {(searchQuery || selectedVersion || selectedEntity || showEditedOnly) && (
+          {(searchQuery || selectedVersion || showEditedOnly) && (
             <button
               onClick={() => {
                 onSearchChange('');
                 onVersionSelect(null);
-                onEntitySelect(null);
                 if (showEditedOnly) onToggleEditedOnly();
               }}
               className="text-[#5b7161] hover:text-emerald-400 underline"

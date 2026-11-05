@@ -374,7 +374,11 @@ app.post('/api/files', (req, res) => {
     const safeName = path.basename(name).replace(/[^a-zA-Z0-9_.-]/g, '_');
     const filePath = path.join(UPLOAD_DIR, safeName);
 
-    const fileContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    let fileContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    // Automatically sanitize leading GitDigest delimiter lines from procedure files
+    if (!safeName.includes('digest')) {
+      fileContent = fileContent.replace(/^(?:File:\s*[^\r\n]+[\r\n]+)?={10,}[\r\n]+/, '');
+    }
     fs.writeFileSync(filePath, fileContent, 'utf-8');
     runtimeEditedFiles.add(safeName);
 

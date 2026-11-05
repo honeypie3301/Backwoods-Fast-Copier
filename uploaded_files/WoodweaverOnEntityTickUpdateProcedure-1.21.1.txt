@@ -1,4 +1,3 @@
-================================================
 package net.mcreator.thebackwoods.procedures;
 
 import net.neoforged.neoforge.event.ServerChatEvent;

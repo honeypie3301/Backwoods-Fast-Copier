@@ -29,7 +29,9 @@ export const Header: React.FC<HeaderProps> = ({
       
       {/* Minimal Title & Stats */}
       <div className="flex items-center gap-2.5">
-        <span className="font-bold text-[#d0e0d3] text-xs">uploaded_files/</span>
+        <span className="font-bold text-[#d0e0d3] text-xs tracking-tight">Backwoods Fast Copier</span>
+        <span className="text-[10px] text-[#2c3d31]">/</span>
+        <span className="text-[#869f8c] text-[11px]">uploaded_files/</span>
         <span className="text-[11px] text-[#5b7362]">
           · {fileCount} {fileCount === 1 ? 'file' : 'files'} ({totalSizeFormatted})
         </span>

@@ -1,4 +1,3 @@
-================================================
 /*
  * The code of this mod element is always locked.
 */

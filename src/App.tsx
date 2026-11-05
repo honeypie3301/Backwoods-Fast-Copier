@@ -20,7 +20,6 @@ import { SidebarFileList } from './components/SidebarFileList';
 import { RightPanelViewer } from './components/RightPanelViewer';
 import { Toast } from './components/Toast';
 import { SHORTEN_PRESETS } from './utils/shortenFileName';
-import { detectEntityForFile, getEntityLabel, KNOWN_ENTITIES } from './utils/entityDetection';
 import { copyToClipboard } from './utils/copyToClipboard';
 
 export default function App() {
@@ -32,7 +31,6 @@ export default function App() {
   // Filters & Controls
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
   const [activePreset, setActivePreset] = useState<ShortenPreset>('full');
   const [maxLength, setMaxLength] = useState<number>(SHORTEN_PRESETS.full);
   const [showEditedOnly, setShowEditedOnly] = useState<boolean>(false);
@@ -277,23 +275,6 @@ export default function App() {
     return Array.from(verSet).sort();
   }, [files]);
 
-  // Available entities with counts
-  const availableEntities = useMemo(() => {
-    const counts: Record<string, number> = {};
-    files.forEach((f) => {
-      const entId = detectEntityForFile(f.name);
-      counts[entId] = (counts[entId] || 0) + 1;
-    });
-
-    return KNOWN_ENTITIES
-      .filter((ent) => counts[ent.id] > 0)
-      .map((ent) => ({
-        id: ent.id,
-        label: ent.label,
-        count: counts[ent.id] || 0,
-      }));
-  }, [files]);
-
   /**
    * ============================================================================
    * STRICT RULE / CONSTANT REMINDER:
@@ -370,25 +351,18 @@ export default function App() {
         return false;
       }
 
-      if (selectedEntity) {
-        const entId = detectEntityForFile(file.name);
-        if (entId !== selectedEntity) return false;
-      }
-
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchesName = file.name.toLowerCase().includes(q);
         const matchesVersion = file.version.toLowerCase().includes(q);
-        const entityLabel = getEntityLabel(detectEntityForFile(file.name)).toLowerCase();
-        const matchesEntity = entityLabel.includes(q);
-        if (!matchesName && !matchesVersion && !matchesEntity) {
+        if (!matchesName && !matchesVersion) {
           return false;
         }
       }
 
       return true;
     });
-  }, [enrichedFiles, showEditedOnly, selectedVersion, selectedEntity, searchQuery]);
+  }, [enrichedFiles, showEditedOnly, selectedVersion, searchQuery]);
 
   // Statistics
   const totalSizeFormatted = useMemo(() => {
@@ -645,9 +619,6 @@ export default function App() {
             availableVersions={availableVersions}
             selectedVersion={selectedVersion}
             onVersionSelect={setSelectedVersion}
-            availableEntities={availableEntities}
-            selectedEntity={selectedEntity}
-            onEntitySelect={setSelectedEntity}
             maxLength={maxLength}
             onMaxLengthChange={setMaxLength}
             activePreset={activePreset}

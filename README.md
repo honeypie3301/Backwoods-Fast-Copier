@@ -18,3 +18,7 @@ Companion workspace and fast file copier for Backwoods mod development and wiki 
 3. **Performance & Virtualization**:
    - Large dump files (10MB+) are streamed directly via `/api/files/:filename/content?raw=1`.
    - Previews in `RightPanelViewer.tsx` use virtualized row rendering to prevent browser freeze.
+
+4. **GitDigest Delimiter Cleanliness**:
+   - Never copy or export delimiter lines (`================================================` or `File: ...`) at the top of Java procedures or classes.
+   - All copied content is automatically sanitized to prevent `illegal start of type` syntax errors in MCreator.
