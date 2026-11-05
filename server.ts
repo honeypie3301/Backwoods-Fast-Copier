@@ -114,45 +114,44 @@ try {
 const runtimeEditedFiles = new Set<string>();
 
 function getUpdatedFiles(): Set<string> {
-  const updated = new Set<string>(runtimeEditedFiles);
+  const updated = new Set<string>();
+  if (!fs.existsSync(UPLOAD_DIR)) return updated;
+
+  const physicallyExisting = new Set(
+    fs.readdirSync(UPLOAD_DIR).filter((f) => {
+      try {
+        return !f.startsWith('.') && fs.statSync(path.join(UPLOAD_DIR, f)).isFile();
+      } catch {
+        return false;
+      }
+    })
+  );
+
+  // Filter in-memory edited files to existing only
+  runtimeEditedFiles.forEach((f) => {
+    if (physicallyExisting.has(f)) updated.add(f);
+    else runtimeEditedFiles.delete(f);
+  });
+
+  const checkGit = (cmd: string, sliceHeader = false) => {
+    try {
+      const out = execSync(cmd, { cwd: __dirname, encoding: 'utf8' }).trim().split('\n');
+      const lines = sliceHeader ? out.slice(1) : out;
+      lines.forEach((p) => {
+        const cleaned = p.replace(/^uploaded_files\//, '').trim();
+        if (cleaned && physicallyExisting.has(cleaned)) updated.add(cleaned);
+      });
+    } catch {}
+  };
 
   // 1. Uncommitted working-tree modifications against HEAD
-  try {
-    const diffOut = execSync('git diff --name-only HEAD uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
-    diffOut.split('\n').forEach((p) => {
-      const cleaned = p.replace(/^uploaded_files\//, '').trim();
-      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
-    });
-  } catch {}
-
+  checkGit('git diff --name-only HEAD uploaded_files/');
   // 2. Staged modifications
-  try {
-    const cachedOut = execSync('git diff --cached --name-only uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
-    cachedOut.split('\n').forEach((p) => {
-      const cleaned = p.replace(/^uploaded_files\//, '').trim();
-      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
-    });
-  } catch {}
-
+  checkGit('git diff --cached --name-only uploaded_files/');
   // 3. Untracked new files
-  try {
-    const untrackedOut = execSync('git ls-files --others --exclude-standard uploaded_files/', { cwd: __dirname, encoding: 'utf8' });
-    untrackedOut.split('\n').forEach((p) => {
-      const cleaned = p.replace(/^uploaded_files\//, '').trim();
-      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
-    });
-  } catch {}
-
-  // 4. Files updated in the latest commit touching uploaded_files (if non-empty)
-  try {
-    const gitOut = execSync('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', { cwd: __dirname, encoding: 'utf8' })
-      .toString()
-      .split('\n');
-    gitOut.slice(1).forEach((p) => {
-      const cleaned = p.replace(/^uploaded_files\//, '').trim();
-      if (cleaned && !cleaned.startsWith('.')) updated.add(cleaned);
-    });
-  } catch {}
+  checkGit('git ls-files --others --exclude-standard uploaded_files/');
+  // 4. Files updated in the latest commit touching uploaded_files
+  checkGit('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', true);
 
   return updated;
 }
@@ -227,9 +226,17 @@ app.get('/api/files', (req, res) => {
     }
 
     const updatedFiles = getUpdatedFiles();
-    const files = fs.readdirSync(UPLOAD_DIR);
+    const files = fs.readdirSync(UPLOAD_DIR).filter((filename) => {
+      if (filename.startsWith('.') || filename.endsWith('~') || filename.endsWith('.tmp')) return false;
+      try {
+        const filePath = path.join(UPLOAD_DIR, filename);
+        return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+      } catch {
+        return false;
+      }
+    });
+
     const result = files
-      .filter(f => !f.startsWith('.'))
       .map(filename => {
         const filePath = path.join(UPLOAD_DIR, filename);
         const stats = fs.statSync(filePath);
@@ -430,6 +437,8 @@ app.delete('/api/files/:filename', (req, res) => {
     }
 
     fs.unlinkSync(filePath);
+    serverContentCache.delete(filename);
+    runtimeEditedFiles.delete(filename);
     broadcastFilesChanged();
     res.json({ success: true, message: `File ${filename} deleted successfully.` });
   } catch (error: any) {

@@ -100,25 +100,38 @@ export default function App() {
         }
         fileSignaturesRef.current = nextSigs;
 
-        if (changedNames.length > 0 || isManualRefresh) {
-          setContentCache((prev) => {
-            if (isManualRefresh && changedNames.length === 0) {
-              return {};
+        const incomingNameSet = new Set(incomingFiles.map((f) => f.name));
+
+        setContentCache((prev) => {
+          const next: Record<string, string> = {};
+          for (const [name, content] of Object.entries(prev)) {
+            if (incomingNameSet.has(name) && !changedNames.includes(name)) {
+              next[name] = content;
             }
-            const next = { ...prev };
-            for (const name of changedNames) {
-              delete next[name];
-            }
-            return next;
+          }
+          return next;
+        });
+
+        setSelectedFileNames((prev) => {
+          const next = new Set<string>();
+          prev.forEach((n) => {
+            if (incomingNameSet.has(n)) next.add(n);
           });
-        }
+          return next;
+        });
+
+        setEditedFileNames((prev) => {
+          const next = new Set<string>();
+          prev.forEach((n) => {
+            if (incomingNameSet.has(n)) next.add(n);
+          });
+          changedNames.forEach((n) => {
+            if (incomingNameSet.has(n)) next.add(n);
+          });
+          return next;
+        });
 
         if (changedNames.length > 0) {
-          setEditedFileNames((prev) => {
-            const next = new Set(prev);
-            changedNames.forEach((n) => next.add(n));
-            return next;
-          });
           setReadFiles((prev) => {
             const next = new Set(prev);
             changedNames.forEach((n) => next.delete(n));
@@ -131,22 +144,38 @@ export default function App() {
           });
         }
 
-        setFiles((current) => {
-          if (
-            current.length === incomingFiles.length &&
-            changedNames.length === 0 &&
-            current.every((f, i) => f.name === incomingFiles[i].name && f.updatedAt === incomingFiles[i].updatedAt)
-          ) {
-            return current;
-          }
-          return incomingFiles;
-        });
+        setFiles(incomingFiles);
         setSelectedFileName((prevSelected) => {
-          if (prevSelected && incomingFiles.some((f) => f.name === prevSelected)) {
+          if (prevSelected && incomingNameSet.has(prevSelected)) {
             return prevSelected;
           }
           return null;
         });
+
+        // Non-blocking background batch prefetch for instant, 0ms click-to-copy
+        const smallFileNames = incomingFiles
+          .filter((f) => f.size < 1024 * 1024)
+          .map((f) => f.name);
+        if (smallFileNames.length > 0) {
+          fetch('/api/files/batch-contents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames: smallFileNames }),
+          })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((resData) => {
+              if (resData?.contents) {
+                setContentCache((prev) => {
+                  const merged = { ...prev };
+                  for (const [fn, item] of Object.entries(resData.contents as Record<string, { content: string }>)) {
+                    if (merged[fn] === undefined) merged[fn] = item.content;
+                  }
+                  return merged;
+                });
+              }
+            })
+            .catch(() => {});
+        }
       } else if (!isSilent) {
         addToast('Failed to load files', data.error || 'Server returned an error', 'error');
       }
@@ -459,6 +488,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ filename }),
         }).catch(() => {});
+        addToast('Copied to Clipboard', `${filename} content copied successfully.`, 'success');
         return true;
       }
       addToast('Copy Failed', 'Unable to access clipboard.', 'error');
