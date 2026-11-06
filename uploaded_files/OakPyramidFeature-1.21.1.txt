@@ -1,0 +1,187 @@
+package net.mcreator.thebackwoods.world.feature;
+
+import com.mojang.serialization.Codec;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.resources.ResourceLocation;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.entity.EntityType;
+import net.minecraft.world.entity.boss.enderdragon.EndCrystal;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.StairBlock;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.StairsShape;
+import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
+import net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration;
+
+public class OakPyramidFeature extends Feature<NoneFeatureConfiguration> {
+    public static int PYRAMID_SPLINTER_MIN_SPAWN = 10;
+    public static int PYRAMID_SPLINTER_MAX_SPAWN = 21;
+    public static double PYRAMID_ORBIT_RADIUS = 4.5D;
+
+    public OakPyramidFeature(Codec<NoneFeatureConfiguration> codec) {
+        super(codec);
+    }
+
+    @Override
+    public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+        WorldGenLevel level = context.level();
+        // Anchor at the center of the generating chunk (offset 8, 8)
+        BlockPos origin = context.origin();
+        BlockPos center = new BlockPos((origin.getX() & ~15) + 8, origin.getY(), (origin.getZ() & ~15) + 8);
+        RandomSource random = context.random();
+
+        // Single deterministic chunk seed
+        long chunkSeed = (long) center.getX() * 341873128712L + (long) center.getZ() * 132897987541L;
+        random.setSeed(chunkSeed);
+
+        // Pre-cached BlockStates
+        BlockState PLANKS = Blocks.OAK_PLANKS.defaultBlockState();
+        BlockState AIR = Blocks.AIR.defaultBlockState();
+
+        // 4 Straight Stairs (Outward facing steps)
+        BlockState STAIR_N = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.SOUTH)
+                .setValue(StairBlock.SHAPE, StairsShape.STRAIGHT);
+        BlockState STAIR_S = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.NORTH)
+                .setValue(StairBlock.SHAPE, StairsShape.STRAIGHT);
+        BlockState STAIR_E = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.WEST)
+                .setValue(StairBlock.SHAPE, StairsShape.STRAIGHT);
+        BlockState STAIR_W = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.EAST)
+                .setValue(StairBlock.SHAPE, StairsShape.STRAIGHT);
+
+        // 4 Mitered Outer Corner Stairs
+        BlockState CORNER_NW = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.SOUTH)
+                .setValue(StairBlock.SHAPE, StairsShape.OUTER_LEFT);
+        BlockState CORNER_NE = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.SOUTH)
+                .setValue(StairBlock.SHAPE, StairsShape.OUTER_RIGHT);
+        BlockState CORNER_SW = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.NORTH)
+                .setValue(StairBlock.SHAPE, StairsShape.OUTER_RIGHT);
+        BlockState CORNER_SE = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(StairBlock.FACING, Direction.NORTH)
+                .setValue(StairBlock.SHAPE, StairsShape.OUTER_LEFT);
+
+        // Base size between 24 and 30 blocks (halfSize 12 to 15 blocks)
+        // Fits entirely within the generating chunk + 1 chunk buffer with zero chunk boundary clipping
+        int halfSize = 12 + random.nextInt(4); // 12, 13, 14, 15 (24x24 to 30x30 base)
+        int height = halfSize;
+        int startY = center.getY();
+
+        // 1. Solid Oak Planks Foundation Floor & Deep Ground Seal
+        for (int x = -halfSize; x <= halfSize; x++) {
+            for (int z = -halfSize; z <= halfSize; z++) {
+                BlockPos floorPos = center.offset(x, 0, z);
+                level.setBlock(floorPos, PLANKS, 2);
+
+                // Extrude solid support downwards into the ground so it never floats on slopes
+                for (int down = 1; down <= 32; down++) {
+                    BlockPos under = floorPos.below(down);
+                    BlockState underState = level.getBlockState(under);
+                    if (underState.isAir() || underState.canBeReplaced()) {
+                        level.setBlock(under, PLANKS, 2);
+                    } else {
+                        break; // Solid ground reached
+                    }
+                }
+            }
+        }
+
+        // 2. Build Stepped Pyramid Shell Layer by Layer (Unified Single-Pass)
+        for (int levelY = 0; levelY < height; levelY++) {
+            int currentExtent = halfSize - levelY;
+            if (currentExtent < 0) break;
+
+            int currentY = startY + 1 + levelY;
+
+            for (int x = -currentExtent; x <= currentExtent; x++) {
+                for (int z = -currentExtent; z <= currentExtent; z++) {
+                    BlockPos targetPos = new BlockPos(center.getX() + x, currentY, center.getZ() + z);
+
+                    boolean isNorth = (z == -currentExtent);
+                    boolean isSouth = (z == currentExtent);
+                    boolean isWest  = (x == -currentExtent);
+                    boolean isEast  = (x == currentExtent);
+
+                    boolean isOuterShell = isNorth || isSouth || isWest || isEast;
+                    boolean isInnerWall = (Math.abs(x) == currentExtent - 1 && Math.abs(z) <= currentExtent - 1)
+                                       || (Math.abs(z) == currentExtent - 1 && Math.abs(x) <= currentExtent - 1);
+
+                    if (isOuterShell) {
+                        // Place seamless connected outer stairs
+                        if (isNorth && isWest) {
+                            level.setBlock(targetPos, CORNER_NW, 2);
+                        } else if (isNorth && isEast) {
+                            level.setBlock(targetPos, CORNER_NE, 2);
+                        } else if (isSouth && isWest) {
+                            level.setBlock(targetPos, CORNER_SW, 2);
+                        } else if (isSouth && isEast) {
+                            level.setBlock(targetPos, CORNER_SE, 2);
+                        } else if (isNorth) {
+                            level.setBlock(targetPos, STAIR_N, 2);
+                        } else if (isSouth) {
+                            level.setBlock(targetPos, STAIR_S, 2);
+                        } else if (isWest) {
+                            level.setBlock(targetPos, STAIR_W, 2);
+                        } else if (isEast) {
+                            level.setBlock(targetPos, STAIR_E, 2);
+                        }
+                    } else if (isInnerWall) {
+                        // Oak planks backing inside the shell
+                        level.setBlock(targetPos, PLANKS, 2);
+                    } else {
+                        // Clear hollow interior chamber
+                        level.setBlock(targetPos, AIR, 2);
+                    }
+                }
+            }
+        }
+
+        // 3. Clear center column & spawn End Crystal 2 blocks above floor
+        BlockPos centerFloor = center.above();
+        level.setBlock(centerFloor, AIR, 2);
+        level.setBlock(centerFloor.above(), AIR, 2);
+        level.setBlock(centerFloor.above(2), AIR, 2);
+
+        EndCrystal crystal = EntityType.END_CRYSTAL.create(level.getLevel());
+        if (crystal != null) {
+            crystal.setPos(center.getX() + 0.5, startY + 2.0, center.getZ() + 0.5);
+            crystal.setShowBottom(false);
+            level.addFreshEntity(crystal);
+        }
+
+        // 4. Spawn configurable ring band of Splinters randomly scattered around the End Crystal
+        int spawnCount = PYRAMID_SPLINTER_MIN_SPAWN + random.nextInt(Math.max(1, PYRAMID_SPLINTER_MAX_SPAWN - PYRAMID_SPLINTER_MIN_SPAWN + 1));
+        double cx = center.getX() + 0.5;
+        double cy = startY + 1.0;
+        double cz = center.getZ() + 0.5;
+        for (int i = 0; i < spawnCount; i++) {
+            double angle = random.nextDouble() * 2.0 * Math.PI;
+            double radius = PYRAMID_ORBIT_RADIUS + (random.nextDouble() * 2.4 - 1.2); // Scattered ring band 3.3 to 5.7 blocks
+            double sx = cx + radius * Math.cos(angle);
+            double sz = cz + radius * Math.sin(angle);
+
+            net.mcreator.thebackwoods.entity.SplinterEntity splinter = new net.mcreator.thebackwoods.entity.SplinterEntity(
+                net.mcreator.thebackwoods.init.TheBackwoodsModEntities.SPLINTER.get(), level.getLevel());
+            splinter.setPos(sx, cy, sz);
+            splinter.getPersistentData().putBoolean("bw_pyramid_orbit", true);
+            splinter.getPersistentData().putDouble("bw_pyramid_cx", cx);
+            splinter.getPersistentData().putDouble("bw_pyramid_cy", cy);
+            splinter.getPersistentData().putDouble("bw_pyramid_cz", cz);
+            splinter.getPersistentData().putDouble("bw_pyramid_angle", angle);
+            splinter.getPersistentData().putDouble("bw_pyramid_radius", radius);
+            splinter.getPersistentData().putDouble("bw_pyramid_speed", 0.02D + random.nextDouble() * 0.02D);
+            level.addFreshEntity(splinter);
+        }
+
+        return true;
+    }
+}
+// 1.21.1

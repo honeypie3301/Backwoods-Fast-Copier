@@ -1,0 +1,55 @@
+package net.mcreator.thebackwoods.procedures;
+
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.phys.AABB;
+import net.mcreator.thebackwoods.entity.SplinterEntity;
+
+import java.util.List;
+
+public class SplinterEntityIsHurtProcedure {
+	public static void execute(LevelAccessor world, double x, double y, double z, DamageSource damagesource, Entity entity, Entity immediatesourceentity, Entity sourceentity, double amount) {
+		if (entity == null) return;
+
+		if (entity instanceof SplinterEntity splinter) {
+			if (splinter.getPersistentData().getBooleanOr("bw_pyramid_orbit", false)) {
+				splinter.getPersistentData().remove("bw_pyramid_orbit");
+				splinter.getEntityData().set(SplinterEntity.DATA_watchTimer, 40);
+				splinter.getPersistentData().putInt("stalk_watch_ticks", 40);
+
+				LivingEntity attacker = (sourceentity instanceof LivingEntity living) ? living :
+					((immediatesourceentity instanceof LivingEntity immLiving) ? immLiving : null);
+
+				if (attacker != null) {
+					splinter.setTarget(attacker);
+					splinter.getLookControl().setLookAt(attacker, 30.0F, 30.0F);
+				}
+
+				// Swarm Alert: Notify all nearby Splinters in the same pyramid
+				double cx = splinter.getPersistentData().getDoubleOr("bw_pyramid_cx", 0.0D);
+				double cy = splinter.getPersistentData().getDoubleOr("bw_pyramid_cy", 0.0D);
+				double cz = splinter.getPersistentData().getDoubleOr("bw_pyramid_cz", 0.0D);
+
+				if (world instanceof Level level) {
+					AABB searchBox = new AABB(cx - 10.0D, cy - 5.0D, cz - 10.0D, cx + 10.0D, cy + 5.0D, cz + 10.0D);
+					List<SplinterEntity> nearbySplinters = level.getEntitiesOfClass(SplinterEntity.class, searchBox);
+					for (SplinterEntity sibling : nearbySplinters) {
+						if (sibling.getPersistentData().getBooleanOr("bw_pyramid_orbit", false)) {
+							sibling.getPersistentData().remove("bw_pyramid_orbit");
+							sibling.getEntityData().set(SplinterEntity.DATA_watchTimer, 40);
+							sibling.getPersistentData().putInt("stalk_watch_ticks", 40);
+							if (attacker != null) {
+								sibling.setTarget(attacker);
+								sibling.getLookControl().setLookAt(attacker, 30.0F, 30.0F);
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+// 26.1.2

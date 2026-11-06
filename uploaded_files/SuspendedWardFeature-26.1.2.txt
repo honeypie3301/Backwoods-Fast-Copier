@@ -2,23 +2,23 @@ package net.mcreator.thebackwoods.world.feature;
 
 /** Chunk-local, world-seeded suspended ward; every solid part joins a tower or plate. */
 public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.feature.Feature<net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration> {
-    public static boolean ENABLE_AUTO_DATAPACK_GEN = true;
-    public static boolean ENABLE_FAST_TERRAIN_GEN = true; // Single-biome Ward only; avoids generating caves just to erase them.
-    public static String DIMENSION_ID = "the_backwoods:the_crossworks";
-    public static String BIOME_ID = "the_backwoods:dustbound_galleries";
-    public static int CELL_SIZE = 48;
-    public static int TIER_SPACING = 18;
-    public static int FLOOR_SPACING = 6;
-    public static double SPAWNER_BUILDING_CHANCE = 40.0; // Percent of buildings eligible for floor rolls.
-    public static double SPAWNER_FLOOR_CHANCE = 20.0; // Percent per floor; one centered block per successful roll.
-    public static double FALSE_ROOM_FLOOR_CHANCE = 10.0; // Percent per upper room; bottom safety plate stays solid.
-    public static double FALSE_BRIDGE_CHANCE = 1.0; // Percent per complete bridge at each tier; false wins at crossings.
-    public static double ROOM_PORTAL_CHANCE = 0.001; // Percent per room: 1 in 100,000 before room-fit checks.
-    public static double GRAIN_PORTAL_CHANCE = 50.0; // Percent of portals leading to the Grain; remainder to Backwoods.
-    public static int BOTTOM_PLATE_OFFSET = 5; // Vanilla bedrock occupies offsets 0..4; never overwritten.
-    public static int TOP_PLATE_THICKNESS = 2;
-    public static boolean ENABLE_CEILING_PLATE = false;
-    public static int GAP_BELOW_LATTICE = 1; // ULTIMATE SETTING: Adjust the gap between top of Ward and bottom of Lattice in ONE place!
+    public static final boolean ENABLE_AUTO_DATAPACK_GEN = true;
+    public static final boolean ENABLE_FAST_TERRAIN_GEN = true; // Single-biome Ward only; avoids generating caves just to erase them.
+    public static final String DIMENSION_ID = "the_backwoods:the_crossworks";
+    public static final String BIOME_ID = "the_backwoods:dustbound_galleries";
+    public static final int CELL_SIZE = 48;
+    public static final int TIER_SPACING = 18;
+    public static final int FLOOR_SPACING = 6;
+    public static final double SPAWNER_BUILDING_CHANCE = 40.0; // Percent of buildings eligible for floor rolls.
+    public static final double SPAWNER_FLOOR_CHANCE = 20.0; // Percent per floor; one centered block per successful roll.
+    public static final double FALSE_ROOM_FLOOR_CHANCE = 10.0; // Percent per upper room; bottom safety plate stays solid.
+    public static final double FALSE_BRIDGE_CHANCE = 1.0; // Percent per complete bridge at each tier; false wins at crossings.
+    public static final double ROOM_PORTAL_CHANCE = 0.001; // Percent per room: 1 in 100,000 before room-fit checks.
+    public static final double GRAIN_PORTAL_CHANCE = 50.0; // Percent of portals leading to the Grain; remainder to Backwoods.
+    public static final int BOTTOM_PLATE_OFFSET = 5; // Vanilla bedrock occupies offsets 0..4; never overwritten.
+    public static final int TOP_PLATE_THICKNESS = 2;
+    public static final boolean ENABLE_CEILING_PLATE = false;
+    public static final int GAP_BELOW_LATTICE = 1; // ULTIMATE SETTING: Adjust the gap between top of Ward and bottom of Lattice in ONE place!
 
     public static int getWardRoofY(int max) {
         return CrossworksLatticeFeature.getLatticeBaseY(max) - GAP_BELOW_LATTICE;

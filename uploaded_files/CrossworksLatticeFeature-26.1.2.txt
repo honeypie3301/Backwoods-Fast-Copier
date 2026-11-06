@@ -8,46 +8,46 @@ package net.mcreator.thebackwoods.world.feature;
  * generating strictly bottom-to-up with a configurable ceiling plate.
  */
 public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen.feature.Feature<net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration> {
-    public static boolean ENABLE_AUTO_DATAPACK_GEN = true;
-    public static String DIMENSION_ID = "the_backwoods:the_crossworks";
-    public static String BIOME_ID = "the_backwoods:dustbound_galleries";
+    public static final boolean ENABLE_AUTO_DATAPACK_GEN = true;
+    public static final String DIMENSION_ID = "the_backwoods:the_crossworks";
+    public static final String BIOME_ID = "the_backwoods:dustbound_galleries";
     public static final String ID = "the_backwoods:crossworks_lattice";
 
     // 9 Larger Cells (3x3 Super-Grid) & Gap Configuration
-    public static int SECTOR_DIVISIONS = 3; // 3x3 = 9 larger cells
-    public static int GAP_SIZE = 24; // Width of the chasm/gap separating the 9 larger cells
-    public static int BRIDGE_WIDTH = 5; // Walkway width of connecting bridges across gaps
-    public static int BRIDGE_THICKNESS = 1; // Vertical thickness of bridge decks
-    public static int BRIDGE_INTERVAL = 32; // Spacing between parallel bridge spans
-    public static int BRIDGE_EXTENSION = 5; // Blocks bridge extends into adjacent sectors to eliminate gaps
-    public static double BRIDGE_FENCE_CHANCE = 80.0; // 80% chance of having fence guards on both sides
+    public static final int SECTOR_DIVISIONS = 3; // 3x3 = 9 larger cells
+    public static final int GAP_SIZE = 24; // Width of the chasm/gap separating the 9 larger cells
+    public static final int BRIDGE_WIDTH = 5; // Walkway width of connecting bridges across gaps
+    public static final int BRIDGE_THICKNESS = 1; // Vertical thickness of bridge decks
+    public static final int BRIDGE_INTERVAL = 32; // Spacing between parallel bridge spans
+    public static final int BRIDGE_EXTENSION = 5; // Blocks bridge extends into adjacent sectors to eliminate gaps
+    public static final double BRIDGE_FENCE_CHANCE = 80.0; // 80% chance of having fence guards on both sides
 
     // Fine Lattice Cell Dimensions & Vertical Sizing
-    public static int CELL_SIZE = 5; // Spacing between beam centers in blocks
-    public static int BEAM_WIDTH = 1; // Width of oak plank beams in blocks
-    public static int VERTICAL_THICKNESS = 30; // 30 blocks tall, generating strictly bottom-to-up
-    public static int ELEVATION_OFFSET_FROM_TOP = 20; // Distance from roof Y to lattice top
+    public static final int CELL_SIZE = 5; // Spacing between beam centers in blocks
+    public static final int BEAM_WIDTH = 1; // Width of oak plank beams in blocks
+    public static final int VERTICAL_THICKNESS = 30; // 30 blocks tall, generating strictly bottom-to-up
+    public static final int ELEVATION_OFFSET_FROM_TOP = 20; // Distance from roof Y to lattice top
 
     // Probabilistic Cell Variations
-    public static double SOLID_CELL_CHANCE = 2.0; // 2.0% chance for cell to be solid oak planks
-    public static double HOLLOW_COVERED_CHANCE = 1.5; // 1.5% chance for cell to be covered but hollow oak
-    public static double FALSE_SOLID_CHANCE = 1.0; // 1.0% chance for cell to be solid false oak planks
-    public static double FALSE_HOLLOW_CHANCE = 0.6; // 0.6% chance for cell to be hollow false oak planks
+    public static final double SOLID_CELL_CHANCE = 2.0; // 2.0% chance for cell to be solid oak planks
+    public static final double HOLLOW_COVERED_CHANCE = 1.5; // 1.5% chance for cell to be covered but hollow oak
+    public static final double FALSE_SOLID_CHANCE = 1.0; // 1.0% chance for cell to be solid false oak planks
+    public static final double FALSE_HOLLOW_CHANCE = 0.6; // 0.6% chance for cell to be hollow false oak planks
 
     // Ceiling Plate Configuration
-    public static boolean ENABLE_CEILING_PLATE = true; // Toggle for oak ceiling plate above lattice
-    public static int CEILING_PLATE_GAP = 2; // Air gap between top of lattice and ceiling plate
-    public static int CEILING_PLATE_THICKNESS = 2; // Thickness of the ceiling plate
+    public static final boolean ENABLE_CEILING_PLATE = true; // Toggle for oak ceiling plate above lattice
+    public static final int CEILING_PLATE_GAP = 2; // Air gap between top of lattice and ceiling plate
+    public static final int CEILING_PLATE_THICKNESS = 2; // Thickness of the ceiling plate
 
     // Outer Roof Plate 2 & Adaptive Rubber-Band Stairs Configuration
-    public static boolean ENABLE_ROOF_PLATE_2 = true; // Toggle for outer second roof plate
-    public static int ROOF_PLATE_2_HEIGHT_OFFSET = 35; // Configurable height rise above lower plate (rubber band stair rise)
-    public static int ROOF_PLATE_2_THICKNESS = 1; // Thickness of the outer roof plate
-    public static int ROOF_PLATE_2_BOUNDARY = 20000; // 20km x 20km outer boundary (-10000 to +10000)
+    public static final boolean ENABLE_ROOF_PLATE_2 = true; // Toggle for outer second roof plate
+    public static final int ROOF_PLATE_2_HEIGHT_OFFSET = 35; // Configurable height rise above lower plate (rubber band stair rise)
+    public static final int ROOF_PLATE_2_THICKNESS = 1; // Thickness of the outer roof plate
+    public static final int ROOF_PLATE_2_BOUNDARY = 20000; // 20km x 20km outer boundary (-10000 to +10000)
 
     // Configurable Boundary Clamping
-    public static int BOUNDARY_CLAMP_SIZE = 1000; // Total boundary width in blocks (-500 to +500)
-    public static boolean ENABLE_BOUNDARY_CLAMPING = true; // Enforces the boundary clamp
+    public static final int BOUNDARY_CLAMP_SIZE = 2500; // Total boundary width in blocks (-1250 to +1250)
+    public static final boolean ENABLE_BOUNDARY_CLAMPING = true; // Enforces the boundary clamp
 
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
 
