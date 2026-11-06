@@ -1,6 +1,6 @@
 /**
  * ARCHITECTURAL NOTICE FOR FUTURE AI ASSISTANTS:
- * If this application ever loads as a blank white screen, check the following requirements:
+ * If this application ever loads as a blank white screen, check the following 3 requirements:
  * 1. FULL-STACK ENTRYPOINT: package.json scripts must run server.ts, NOT standalone vite:
  *    - "dev": "tsx server.ts" (NOT "vite --port=3000")
  *    - "start": "node server.ts"
@@ -24,7 +24,6 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -91,133 +90,6 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-// Active Server-Sent Events client connections
-const sseClients = new Set<express.Response>();
-
-function broadcastFilesChanged() {
-  const payload = JSON.stringify({ type: 'files_changed', timestamp: Date.now() });
-  for (const client of sseClients) {
-    try {
-      client.write(`data: ${payload}\n\n`);
-    } catch {
-      sseClients.delete(client);
-    }
-  }
-}
-
-// Set safe.directory globally on startup to avoid dubious ownership errors
-try {
-  execSync('git config --global --add safe.directory "*"', { cwd: __dirname });
-} catch {}
-
-// In-memory set of files updated at runtime via fs.watch or POST /api/files
-const runtimeEditedFiles = new Set<string>();
-
-function getUpdatedFiles(): Set<string> {
-  const updated = new Set<string>();
-  if (!fs.existsSync(UPLOAD_DIR)) return updated;
-
-  const physicallyExisting = new Set(
-    fs.readdirSync(UPLOAD_DIR).filter((f) => {
-      try {
-        return !f.startsWith('.') && fs.statSync(path.join(UPLOAD_DIR, f)).isFile();
-      } catch {
-        return false;
-      }
-    })
-  );
-
-  // Filter in-memory edited files to existing only
-  runtimeEditedFiles.forEach((f) => {
-    if (physicallyExisting.has(f)) updated.add(f);
-    else runtimeEditedFiles.delete(f);
-  });
-
-  const checkGit = (cmd: string, sliceHeader = false) => {
-    try {
-      const out = execSync(cmd, { cwd: __dirname, encoding: 'utf8' }).trim().split('\n');
-      const lines = sliceHeader ? out.slice(1) : out;
-      lines.forEach((p) => {
-        const cleaned = p.replace(/^uploaded_files\//, '').trim();
-        if (cleaned && physicallyExisting.has(cleaned)) updated.add(cleaned);
-      });
-    } catch {}
-  };
-
-  // 1. Uncommitted working-tree modifications against HEAD
-  checkGit('git diff --name-only HEAD uploaded_files/');
-  // 2. Staged modifications
-  checkGit('git diff --cached --name-only uploaded_files/');
-  // 3. Untracked new files
-  checkGit('git ls-files --others --exclude-standard uploaded_files/');
-  // 4. Files updated in the latest commit touching uploaded_files
-  checkGit('git log -n 1 --name-only --format=%ct HEAD uploaded_files/', true);
-
-  return updated;
-}
-
-// Debounced filesystem watcher on uploaded_files
-let watchDebounceTimer: NodeJS.Timeout | null = null;
-try {
-  fs.watch(UPLOAD_DIR, (_eventType, filename) => {
-    // Ignore dotfiles, temp files, or lock files
-    if (filename && (filename.startsWith('.') || filename.endsWith('~') || filename.endsWith('.tmp'))) {
-      return;
-    }
-    if (filename) {
-      runtimeEditedFiles.add(path.basename(filename));
-    }
-    if (watchDebounceTimer) {
-      clearTimeout(watchDebounceTimer);
-    }
-    watchDebounceTimer = setTimeout(() => {
-      broadcastFilesChanged();
-    }, 200);
-  });
-} catch (err) {
-  console.error('Failed to initialize fs.watch on UPLOAD_DIR:', err);
-}
-
-// GET /api/files/stream - Server-Sent Events stream for real-time filesystem updates
-app.get('/api/files/stream', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders?.();
-
-  // Send initial connected confirmation
-  res.write(`data: ${JSON.stringify({ type: 'connected', timestamp: Date.now() })}\n\n`);
-  sseClients.add(res);
-
-  // Send keep-alive comments every 20 seconds
-  const heartbeat = setInterval(() => {
-    try {
-      res.write(': keepalive\n\n');
-    } catch {
-      clearInterval(heartbeat);
-      sseClients.delete(res);
-    }
-  }, 20000);
-
-  req.on('close', () => {
-    clearInterval(heartbeat);
-    sseClients.delete(res);
-  });
-});
-
-function readFirstBytes(filePath: string, maxBytes = 4096): string {
-  try {
-    const fd = fs.openSync(filePath, 'r');
-    const buf = Buffer.alloc(maxBytes);
-    const bytesRead = fs.readSync(fd, buf, 0, maxBytes, 0);
-    fs.closeSync(fd);
-    return buf.toString('utf-8', 0, bytesRead);
-  } catch {
-    return '';
-  }
-}
-
 // GET /api/files - list all files in uploaded_files
 app.get('/api/files', (req, res) => {
   try {
@@ -225,27 +97,24 @@ app.get('/api/files', (req, res) => {
       fs.mkdirSync(UPLOAD_DIR, { recursive: true });
     }
 
-    const updatedFiles = getUpdatedFiles();
-    const files = fs.readdirSync(UPLOAD_DIR).filter((filename) => {
-      if (filename.startsWith('.') || filename.endsWith('~') || filename.endsWith('.tmp')) return false;
-      try {
-        const filePath = path.join(UPLOAD_DIR, filename);
-        return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
-      } catch {
-        return false;
-      }
-    });
-
+    const files = fs.readdirSync(UPLOAD_DIR);
     const result = files
+      .filter(f => !f.startsWith('.'))
       .map(filename => {
         const filePath = path.join(UPLOAD_DIR, filename);
         const stats = fs.statSync(filePath);
         
-        // Fast 4KB sample read instead of loading entire large file into memory
-        const contentSample = stats.isFile() ? readFirstBytes(filePath, 4096) : '';
+        let contentSample = '';
+        if (stats.isFile() && stats.size < 100 * 1024) {
+          try {
+            contentSample = fs.readFileSync(filePath, 'utf-8');
+          } catch (e) {
+            // unreadable
+          }
+        }
+
         const { version, source } = detectVersion(filename, contentSample);
         const ext = path.extname(filename).toLowerCase().replace('.', '') || 'file';
-        const isEdited = updatedFiles.has(filename);
 
         return {
           name: filename,
@@ -255,15 +124,10 @@ app.get('/api/files', (req, res) => {
           version,
           versionSource: source,
           extension: ext,
-          isText: true,
-          isEdited
+          isText: true
         };
       })
-      .sort((a, b) => {
-        if (a.isEdited && !b.isEdited) return -1;
-        if (!a.isEdited && b.isEdited) return 1;
-        return b.updatedAt.localeCompare(a.updatedAt);
-      });
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 
     res.json({ success: true, count: result.length, files: result });
   } catch (error: any) {
@@ -271,39 +135,7 @@ app.get('/api/files', (req, res) => {
   }
 });
 
-interface CachedFileContent {
-  mtimeMs: number;
-  buffer: Buffer;
-  text: string;
-  size: number;
-  version: string;
-  source: 'filename' | 'content' | 'metadata' | 'default';
-}
-const serverContentCache = new Map<string, CachedFileContent>();
-
-function getOrLoadCachedFile(filePath: string, filename: string): CachedFileContent {
-  const stats = fs.statSync(filePath);
-  const existing = serverContentCache.get(filename);
-  if (existing && existing.mtimeMs === stats.mtimeMs) {
-    return existing;
-  }
-  const buffer = fs.readFileSync(filePath);
-  const text = buffer.toString('utf-8');
-  const sample = text.slice(0, 4096);
-  const { version, source } = detectVersion(filename, sample);
-  const entry: CachedFileContent = {
-    mtimeMs: stats.mtimeMs,
-    buffer,
-    text,
-    size: stats.size,
-    version,
-    source,
-  };
-  serverContentCache.set(filename, entry);
-  return entry;
-}
-
-// GET /api/files/:filename/content - get single file content (supports ?raw=1 streaming & ultra-fast RAM cache)
+// GET /api/files/:filename/content - get single file content
 app.get('/api/files/:filename/content', (req, res) => {
   try {
     const filename = path.basename(req.params.filename);
@@ -313,26 +145,18 @@ app.get('/api/files/:filename/content', (req, res) => {
       return res.status(404).json({ success: false, error: 'File not found' });
     }
 
-    const cached = getOrLoadCachedFile(filePath, filename);
-
-    // Fast-path: raw in-memory buffer response directly to client (< 1ms latency, 0 disk I/O)
-    if (req.query.raw === '1' || req.headers.accept?.includes('text/plain')) {
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.setHeader('Content-Length', cached.buffer.length.toString());
-      res.setHeader('X-File-Size', cached.size.toString());
-      res.setHeader('X-File-Version', cached.version);
-      res.setHeader('Cache-Control', 'public, max-age=120, stale-while-revalidate=600');
-      return res.end(cached.buffer);
-    }
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const stats = fs.statSync(filePath);
+    const { version, source } = detectVersion(filename, content);
 
     res.json({
       success: true,
       name: filename,
-      content: cached.text,
-      size: cached.size,
-      sizeFormatted: formatBytes(cached.size),
-      version: cached.version,
-      versionSource: cached.source
+      content,
+      size: stats.size,
+      sizeFormatted: formatBytes(stats.size),
+      version,
+      versionSource: source
     });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });
@@ -385,18 +209,11 @@ app.post('/api/files', (req, res) => {
     const safeName = path.basename(name).replace(/[^a-zA-Z0-9_.-]/g, '_');
     const filePath = path.join(UPLOAD_DIR, safeName);
 
-    let fileContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-    // Automatically sanitize leading GitDigest delimiter lines from procedure files
-    if (!safeName.includes('digest')) {
-      fileContent = fileContent.replace(/^(?:File:\s*[^\r\n]+[\r\n]+)?={10,}[\r\n]+/, '');
-    }
+    const fileContent = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
     fs.writeFileSync(filePath, fileContent, 'utf-8');
-    runtimeEditedFiles.add(safeName);
 
     const stats = fs.statSync(filePath);
     const { version, source } = detectVersion(safeName, fileContent);
-
-    broadcastFilesChanged();
 
     res.json({
       success: true,
@@ -415,17 +232,6 @@ app.post('/api/files', (req, res) => {
   }
 });
 
-// POST /api/files/mark-read - clear edited status on server
-app.post('/api/files/mark-read', (req, res) => {
-  const { filename } = req.body || {};
-  if (filename) {
-    runtimeEditedFiles.delete(path.basename(filename));
-  } else {
-    runtimeEditedFiles.clear();
-  }
-  res.json({ success: true });
-});
-
 // DELETE /api/files/:filename - delete file
 app.delete('/api/files/:filename', (req, res) => {
   try {
@@ -437,9 +243,6 @@ app.delete('/api/files/:filename', (req, res) => {
     }
 
     fs.unlinkSync(filePath);
-    serverContentCache.delete(filename);
-    runtimeEditedFiles.delete(filename);
-    broadcastFilesChanged();
     res.json({ success: true, message: `File ${filename} deleted successfully.` });
   } catch (error: any) {
     res.status(500).json({ success: false, error: error.message });

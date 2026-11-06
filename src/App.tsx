@@ -20,6 +20,7 @@ import { SidebarFileList } from './components/SidebarFileList';
 import { RightPanelViewer } from './components/RightPanelViewer';
 import { Toast } from './components/Toast';
 import { SHORTEN_PRESETS } from './utils/shortenFileName';
+import { detectEntityForFile, getEntityLabel, KNOWN_ENTITIES } from './utils/entityDetection';
 import { copyToClipboard } from './utils/copyToClipboard';
 
 export default function App() {
@@ -31,8 +32,9 @@ export default function App() {
   // Filters & Controls
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [selectedVersion, setSelectedVersion] = useState<string | null>(null);
-  const [activePreset, setActivePreset] = useState<ShortenPreset>('full');
-  const [maxLength, setMaxLength] = useState<number>(SHORTEN_PRESETS.full);
+  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
+  const [activePreset, setActivePreset] = useState<ShortenPreset>('medium');
+  const [maxLength, setMaxLength] = useState<number>(SHORTEN_PRESETS.medium);
   const [showEditedOnly, setShowEditedOnly] = useState<boolean>(false);
 
   // Tracking state
@@ -60,7 +62,6 @@ export default function App() {
 
   // Notifications
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
-  const [liveSyncStatus, setLiveSyncStatus] = useState<'connected' | 'connecting' | 'disconnected'>('connecting');
 
   const addToast = useCallback((title: string, description: string, type: 'success' | 'info' | 'error' = 'info') => {
     const id = Date.now().toString() + Math.random().toString(36).substring(2, 6);
@@ -100,38 +101,25 @@ export default function App() {
         }
         fileSignaturesRef.current = nextSigs;
 
-        const incomingNameSet = new Set(incomingFiles.map((f) => f.name));
-
-        setContentCache((prev) => {
-          const next: Record<string, string> = {};
-          for (const [name, content] of Object.entries(prev)) {
-            if (incomingNameSet.has(name) && !changedNames.includes(name)) {
-              next[name] = content;
+        if (changedNames.length > 0 || isManualRefresh) {
+          setContentCache((prev) => {
+            if (isManualRefresh && changedNames.length === 0) {
+              return {};
             }
-          }
-          return next;
-        });
-
-        setSelectedFileNames((prev) => {
-          const next = new Set<string>();
-          prev.forEach((n) => {
-            if (incomingNameSet.has(n)) next.add(n);
+            const next = { ...prev };
+            for (const name of changedNames) {
+              delete next[name];
+            }
+            return next;
           });
-          return next;
-        });
-
-        setEditedFileNames((prev) => {
-          const next = new Set<string>();
-          prev.forEach((n) => {
-            if (incomingNameSet.has(n)) next.add(n);
-          });
-          changedNames.forEach((n) => {
-            if (incomingNameSet.has(n)) next.add(n);
-          });
-          return next;
-        });
+        }
 
         if (changedNames.length > 0) {
+          setEditedFileNames((prev) => {
+            const next = new Set(prev);
+            changedNames.forEach((n) => next.add(n));
+            return next;
+          });
           setReadFiles((prev) => {
             const next = new Set(prev);
             changedNames.forEach((n) => next.delete(n));
@@ -144,38 +132,22 @@ export default function App() {
           });
         }
 
-        setFiles(incomingFiles);
+        setFiles((current) => {
+          if (
+            current.length === incomingFiles.length &&
+            changedNames.length === 0 &&
+            current.every((f, i) => f.name === incomingFiles[i].name && f.updatedAt === incomingFiles[i].updatedAt)
+          ) {
+            return current;
+          }
+          return incomingFiles;
+        });
         setSelectedFileName((prevSelected) => {
-          if (prevSelected && incomingNameSet.has(prevSelected)) {
+          if (prevSelected && incomingFiles.some((f) => f.name === prevSelected)) {
             return prevSelected;
           }
           return null;
         });
-
-        // Non-blocking background batch prefetch for instant, 0ms click-to-copy
-        const smallFileNames = incomingFiles
-          .filter((f) => f.size < 1024 * 1024)
-          .map((f) => f.name);
-        if (smallFileNames.length > 0) {
-          fetch('/api/files/batch-contents', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filenames: smallFileNames }),
-          })
-            .then((r) => (r.ok ? r.json() : null))
-            .then((resData) => {
-              if (resData?.contents) {
-                setContentCache((prev) => {
-                  const merged = { ...prev };
-                  for (const [fn, item] of Object.entries(resData.contents as Record<string, { content: string }>)) {
-                    if (merged[fn] === undefined) merged[fn] = item.content;
-                  }
-                  return merged;
-                });
-              }
-            })
-            .catch(() => {});
-        }
       } else if (!isSilent) {
         addToast('Failed to load files', data.error || 'Server returned an error', 'error');
       }
@@ -191,60 +163,12 @@ export default function App() {
     }
   }, [addToast]);
 
-  // Initial load, window focus sync, and SSE real-time stream
   useEffect(() => {
     fetchFiles(false, false);
     const handleFocus = () => fetchFiles(false, true);
     window.addEventListener('focus', handleFocus);
-
-    let es: EventSource | null = null;
-    let reconnectTimer: NodeJS.Timeout | null = null;
-
-    const connectSSE = () => {
-      setLiveSyncStatus('connecting');
-      try {
-        es = new EventSource('/api/files/stream');
-
-        es.onopen = () => {
-          setLiveSyncStatus('connected');
-        };
-
-        es.onmessage = (event) => {
-          try {
-            const data = JSON.parse(event.data);
-            if (data.type === 'files_changed') {
-              // Silent immediate refresh on disk change
-              fetchFiles(false, true);
-            }
-          } catch {
-            // keepalive or non-json message
-          }
-        };
-
-        es.onerror = () => {
-          setLiveSyncStatus('disconnected');
-          if (es) {
-            es.close();
-            es = null;
-          }
-          if (!reconnectTimer) {
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              connectSSE();
-            }, 3000);
-          }
-        };
-      } catch {
-        setLiveSyncStatus('disconnected');
-      }
-    };
-
-    connectSSE();
-
     return () => {
       window.removeEventListener('focus', handleFocus);
-      if (es) es.close();
-      if (reconnectTimer) clearTimeout(reconnectTimer);
     };
   }, [fetchFiles]);
 
@@ -287,11 +211,6 @@ export default function App() {
     } catch {
       // ignore
     }
-    fetch('/api/files/mark-read', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    }).catch(() => {});
     addToast('Marked All as Read', 'All files and updated indicators have been cleared.', 'info');
   }, [files, addToast]);
 
@@ -304,16 +223,24 @@ export default function App() {
     return Array.from(verSet).sort();
   }, [files]);
 
-  /**
-   * ============================================================================
-   * STRICT RULE / CONSTANT REMINDER:
-   * The updated indicator will ONLY appear if the file is updated, and will ONLY
-   * disappear through the "Mark as Read" button or when the file content is copied.
-   * Selecting or viewing a file MUST NOT clear the updated indicator.
-   * ============================================================================
-   */
+  // Available entities with counts
+  const availableEntities = useMemo(() => {
+    const counts: Record<string, number> = {};
+    files.forEach((f) => {
+      const entId = detectEntityForFile(f.name);
+      counts[entId] = (counts[entId] || 0) + 1;
+    });
 
-  // Enriched files with isEdited (strictly preserved until copied or marked as read)
+    return KNOWN_ENTITIES
+      .filter((ent) => counts[ent.id] > 0)
+      .map((ent) => ({
+        id: ent.id,
+        label: ent.label,
+        count: counts[ent.id] || 0,
+      }));
+  }, [files]);
+
+  // Enriched files with isEdited (clears when current version has been copied)
   const enrichedFiles = useMemo(() => {
     return files.map((f) => {
       const sig = `${f.updatedAt}:${f.size}`;
@@ -325,7 +252,6 @@ export default function App() {
     });
   }, [files, editedFileNames, copiedSignatures]);
 
-  // Clears the updated indicator strictly when marked as read or copied
   const clearUpdatedIndicator = useCallback((filename: string) => {
     setEditedFileNames((prev) => {
       if (!prev.has(filename)) return prev;
@@ -346,18 +272,6 @@ export default function App() {
       return next;
     });
   }, [files]);
-
-  // Dedicated Mark as Read handler conforming to the strict rule
-  const handleMarkAsRead = useCallback((filename: string) => {
-    markAsRead(filename);
-    clearUpdatedIndicator(filename);
-    fetch('/api/files/mark-read', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename }),
-    }).catch(() => {});
-    addToast('Marked as Read', `Cleared updated indicator for ${filename}`, 'info');
-  }, [markAsRead, clearUpdatedIndicator, addToast]);
 
   const editedCount = useMemo(() => {
     return enrichedFiles.filter((f) => f.isEdited).length;
@@ -380,18 +294,25 @@ export default function App() {
         return false;
       }
 
+      if (selectedEntity) {
+        const entId = detectEntityForFile(file.name);
+        if (entId !== selectedEntity) return false;
+      }
+
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchesName = file.name.toLowerCase().includes(q);
         const matchesVersion = file.version.toLowerCase().includes(q);
-        if (!matchesName && !matchesVersion) {
+        const entityLabel = getEntityLabel(detectEntityForFile(file.name)).toLowerCase();
+        const matchesEntity = entityLabel.includes(q);
+        if (!matchesName && !matchesVersion && !matchesEntity) {
           return false;
         }
       }
 
       return true;
     });
-  }, [enrichedFiles, showEditedOnly, selectedVersion, searchQuery]);
+  }, [enrichedFiles, showEditedOnly, selectedVersion, selectedEntity, searchQuery]);
 
   // Statistics
   const totalSizeFormatted = useMemo(() => {
@@ -437,45 +358,21 @@ export default function App() {
   // View file in right panel
   const handleSelectFile = useCallback((file: FileItem) => {
     setSelectedFileName(file.name);
-    // STRICT RULE REMINDER: Selecting or viewing a file MUST NOT clear the updated indicator.
-    // The updated indicator ONLY disappears through the "Mark as Read" button or when copied.
-  }, []);
-
-  // Content loaded notification from viewer to ensure instant future switching
-  const handleContentLoaded = useCallback((filename: string, content: string) => {
-    setContentCache((prev) => (prev[filename] === content ? prev : { ...prev, [filename]: content }));
-  }, []);
-
-  // Speculative hover prefetching for perceived 0ms click latency
-  const handlePrefetchFile = useCallback((filename: string) => {
-    if (contentCache[filename] !== undefined) return;
-    fetch(`/api/files/${encodeURIComponent(filename)}/content?raw=1`, {
-      cache: 'default',
-      headers: { Accept: 'text/plain' },
-    })
-      .then((res) => (res.ok ? res.text() : null))
-      .then((text) => {
-        if (text !== null) {
-          setContentCache((prev) => (prev[filename] ? prev : { ...prev, [filename]: text }));
-        }
-      })
-      .catch(() => {});
-  }, [contentCache]);
+    markAsRead(file.name);
+  }, [markAsRead]);
 
   // Copy file content directly
   const handleCopyContent = useCallback(async (filename: string): Promise<boolean> => {
     try {
       let text = contentCache[filename];
       if (text === undefined) {
-        const res = await fetch(`/api/files/${encodeURIComponent(filename)}/content?raw=1`, {
-          cache: 'no-store',
-          headers: { Accept: 'text/plain' },
-        });
-        if (!res.ok) {
-          addToast('Copy Failed', 'Failed to fetch file content', 'error');
+        const res = await fetch(`/api/files/${encodeURIComponent(filename)}/content`, { cache: 'no-store' });
+        const data = await res.json();
+        if (!data.success) {
+          addToast('Copy Failed', data.error || 'Failed to fetch content', 'error');
           return false;
         }
-        text = await res.text();
+        text = data.content;
         setContentCache((prev) => ({ ...prev, [filename]: text }));
       }
 
@@ -483,12 +380,6 @@ export default function App() {
       if (ok) {
         markAsRead(filename);
         clearUpdatedIndicator(filename);
-        fetch('/api/files/mark-read', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filename }),
-        }).catch(() => {});
-        addToast('Copied to Clipboard', `${filename} content copied successfully.`, 'success');
         return true;
       }
       addToast('Copy Failed', 'Unable to access clipboard.', 'error');
@@ -600,11 +491,9 @@ export default function App() {
       for (const f of filesToZip) {
         let text = batchCache[f.name];
         if (text === undefined) {
-          const res = await fetch(`/api/files/${encodeURIComponent(f.name)}/content?raw=1`, {
-            cache: 'no-store',
-            headers: { Accept: 'text/plain' },
-          });
-          text = res.ok ? await res.text() : '';
+          const res = await fetch(`/api/files/${encodeURIComponent(f.name)}/content`, { cache: 'no-store' });
+          const data = await res.json();
+          text = data.success ? data.content : '';
         }
         zip.file(f.name, text);
       }
@@ -635,7 +524,6 @@ export default function App() {
         totalSizeFormatted={totalSizeFormatted}
         isRefreshing={isRefreshing}
         editedCount={editedCount}
-        liveSyncStatus={liveSyncStatus}
         onRefresh={() => fetchFiles(true, false)}
       />
 
@@ -649,6 +537,9 @@ export default function App() {
             availableVersions={availableVersions}
             selectedVersion={selectedVersion}
             onVersionSelect={setSelectedVersion}
+            availableEntities={availableEntities}
+            selectedEntity={selectedEntity}
+            onEntitySelect={setSelectedEntity}
             maxLength={maxLength}
             onMaxLengthChange={setMaxLength}
             activePreset={activePreset}
@@ -684,8 +575,6 @@ export default function App() {
                 onToggleSelectFile={handleToggleSelectFile}
                 onSelectFile={handleSelectFile}
                 onCopyContent={handleCopyContent}
-                onMarkAsRead={handleMarkAsRead}
-                onPrefetchFile={handlePrefetchFile}
               />
             )}
           </div>
@@ -700,8 +589,6 @@ export default function App() {
             onSaveContent={handleSaveContent}
             onDeleteFile={handleDeleteFile}
             onCopyContent={handleCopyContent}
-            onMarkAsRead={handleMarkAsRead}
-            onContentLoaded={handleContentLoaded}
           />
         </main>
       </div>
