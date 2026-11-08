@@ -50,25 +50,31 @@ public class WeaverKinematicChain {
     private static void solvePlanar(ModelPart hip, ModelPart thigh, ModelPart shin,
                                     double x, double y, double z, double a, double b,
                                     boolean isLeft, float minYaw, float maxYaw) {
-        solvePlanar(hip, thigh, shin, x, y, z, a, b, isLeft, minYaw, maxYaw, false);
+        solvePlanar(hip, thigh, shin, x, y, z, a, b, isLeft, minYaw, maxYaw, false, false);
     }
 
     private static void solvePlanar(ModelPart hip, ModelPart thigh, ModelPart shin,
                                     double x, double y, double z, double a, double b,
-                                    boolean isLeft, float minYaw, float maxYaw, boolean narrow) {
+                                    boolean isLeft, float minYaw, float maxYaw, boolean narrow, boolean lockTarget) {
         double side = isLeft ? -1.0 : 1.0;
         // atan2 already wraps the mirrored angle; never clamp an equivalent angle near 2 PI.
         double yaw = Math.atan2(-side * z, side * x);
         hip.xRot = 0;
-        double constrainedYaw = Mth.clamp(yaw, minYaw, maxYaw);
+        // Preferred joint limits guide the next step; they must not drag a planted ankle.
+        double constrainedYaw = lockTarget ? yaw : Mth.clamp(yaw, minYaw, maxYaw);
         // Solve in the permitted yaw plane instead of using an unreachable radial distance.
-        double horizontal = Math.max(narrow ? 0.25 : (a + b) * 0.35, side * (x * Math.cos(constrainedYaw) - z * Math.sin(constrainedYaw)));
-        y = Math.max(-(a + b) * 0.40, y);
+        double horizontal = side * (x * Math.cos(constrainedYaw) - z * Math.sin(constrainedYaw));
+        if (!lockTarget) {
+            horizontal = Math.max(narrow ? 0.25 : (a + b) * 0.35, horizontal);
+            y = Math.max(-(a + b) * 0.40, y);
+        }
         double distance = Mth.clamp(Math.hypot(horizontal, y),
-            Math.max(Math.abs(a - b) + 0.1, (a + b) * 0.45), (a + b) * 0.975);
+            lockTarget ? Math.abs(a - b) + 1.0e-6 : Math.max(Math.abs(a - b) + 0.1, (a + b) * 0.45),
+            (a + b) * (lockTarget ? 0.999999 : 0.975));
         double shoulder = Math.acos(Mth.clamp((a * a + distance * distance - b * b) / (2 * a * distance), -1.0, 1.0));
         double knee = Math.acos(Mth.clamp((a * a + b * b - distance * distance) / (2 * a * b), -1.0, 1.0));
-        double hipRoll = -side * Mth.clamp(Math.atan2(-y, horizontal) + shoulder, -1.25, 1.25);
+        double bend = Math.atan2(-y, horizontal) + shoulder;
+        double hipRoll = -side * (lockTarget ? bend : Mth.clamp(bend, -1.25, 1.25));
         // The intended yaw-then-bend quaternion must be encoded in ModelPart's Z-Y-X order.
         double sy = Math.sin(constrainedYaw * 0.5), cy = Math.cos(constrainedYaw * 0.5);
         double sz = Math.sin(hipRoll * 0.5), cz = Math.cos(hipRoll * 0.5);
@@ -80,15 +86,13 @@ public class WeaverKinematicChain {
     }
 
     private static void setEuler(ModelPart part, double x, double y, double z, double w) {
+        double inverseLength = 1.0 / Math.sqrt(x * x + y * y + z * z + w * w);
+        x *= inverseLength; y *= inverseLength; z *= inverseLength; w *= inverseLength;
         double sinPitch = 2 * (w * y - z * x);
-        if (sinPitch > 0.985) {
-            part.yRot = (float) (Math.PI / 2);
+        if (Math.abs(sinPitch) >= 1 - 1.0e-12) {
+            part.yRot = (float) Math.copySign(Math.PI / 2, sinPitch);
             part.xRot = 0;
-            part.zRot = (float) (2 * Math.atan2(z, w));
-        } else if (sinPitch < -0.985) {
-            part.yRot = (float) (-Math.PI / 2);
-            part.xRot = 0;
-            part.zRot = (float) (-2 * Math.atan2(z, w));
+            part.zRot = (float) Math.atan2(2 * (w * z - x * y), 1 - 2 * (x * x + z * z));
         } else {
             part.xRot = (float) Math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y));
             part.yRot = (float) Math.asin(Mth.clamp(sinPitch, -1.0, 1.0));
@@ -100,6 +104,17 @@ public class WeaverKinematicChain {
         Vec3 displacement = entity.position().subtract(new Vec3(entity.xo, entity.yo, entity.zo));
         Vec3 up = WoodweaverSurfaceNavigation.up(entity, 1);
         return displacement.subtract(up.scale(displacement.dot(up))).lengthSqr();
+    }
+
+    /** Replant before extension runs out, without shrinking the normal stance at speed. */
+    private static boolean needsReachRecovery(Vector3f target, Vector3f movement, double reach) {
+        double distance = target.lengthSquared();
+        double limit = reach * reach;
+        if (distance > limit) return true;
+        double x = target.x - movement.x * 1.5, y = target.y - movement.y * 1.5;
+        double z = target.z - movement.z * 1.5;
+        double futureDistance = x * x + y * y + z * z;
+        return futureDistance > limit && futureDistance > distance;
     }
 
     private static boolean segmentHitsBox(Vec3 from, Vec3 to, AABB box, double radius) {
@@ -134,6 +149,7 @@ public class WeaverKinematicChain {
         private final Quaternionf levelRotation = new Quaternionf();
         private final Quaternionf footRotation = new Quaternionf();
         private final Vector3f target = new Vector3f();
+        private final Vector3f bodyMovement = new Vector3f();
         private final Matrix4f authoredChain = new Matrix4f();
         private final Vector3f authoredOffset = new Vector3f();
         private final Vector3f[] bindAnkles = new Vector3f[6];
@@ -294,8 +310,9 @@ public class WeaverKinematicChain {
             // Actions change the foot targets, never disable the terrain solve.
             float weight = WeaverGait.transitionWeight(gait, time, true);
             float actionWeight = WeaverGait.transitionActionWeight(gait, time, preserveRoot);
-            float approach = entity.onGround() ? 1 : gait.landingApproach;
-            float legTarget = entity.onGround() || WoodweaverSurfaceNavigation.attached(entity) ? 1 : approach;
+            boolean supported = WeaverGait.hasTerrainSupport(entity);
+            float approach = supported ? 1 : gait.landingApproach;
+            float legTarget = supported ? 1 : approach;
             float proceduralLegWeight = WeaverGait.transitionLegWeight(gait, time, legTarget);
             double bodyX = Mth.lerp(partial, entity.xOld, entity.getX());
             double bodyY = Mth.lerp(partial, entity.yOld, entity.getY());
@@ -325,7 +342,10 @@ public class WeaverKinematicChain {
                 double elapsed = Math.max(0, time - gait.renderedRootAt);
                 float response = (float) (1 - Math.exp(-elapsed / 0.75));
                 gait.renderedRoot = gait.renderedRoot.lerp(rootTarget, response);
-                gait.renderedRootRotation.slerp(blendA, response).normalize();
+                // Terrain tilt is already tick-smoothed and interpolated. Filtering it
+                // again makes fast descents visibly lag behind the ground angle.
+                if (terrainTilt && !preserveRoot) gait.renderedRootRotation.set(blendA);
+                else gait.renderedRootRotation.slerp(blendA, response).normalize();
             }
             gait.renderedRootAt = Double.isNaN(gait.renderedRootAt) ? time : Math.max(time, gait.renderedRootAt);
             all.x = (float) gait.renderedRoot.x; all.y = (float) gait.renderedRoot.y; all.z = (float) gait.renderedRoot.z;
@@ -341,6 +361,9 @@ public class WeaverKinematicChain {
                 .translate(all.x / 16, all.y / 16, all.z / 16)
                 .rotateZYX(all.zRot, all.yRot, all.xRot).scale(all.xScale, all.yScale, all.zScale);
             toWorld.invert(toModel);
+            bodyMovement.set((float)(entity.getX() - entity.xo), (float)(entity.getY() - entity.yo),
+                (float)(entity.getZ() - entity.zo));
+            toModel.transformDirection(bodyMovement);
             levelRotation.rotationY(rotation).rotateZ((float) Math.PI);
             bodyRotation.set(levelRotation).rotateZYX(all.zRot, all.yRot, all.xRot);
             for (int i = 0; i < 6; i++) {
@@ -351,9 +374,11 @@ public class WeaverKinematicChain {
                 Vec3 contact = gait.legs[i].sample(time);
                 Vec3 soleNormal = gait.legs[i].sampleNormal(time);
                 Vec3 ankle = contact.add(soleNormal.scale(0.1875));
-                if (preserveRoot && !entity.onGround() && entity.getDeltaMovement().y < 0)
+                WeaverGait.LegState leg = gait.legs[i];
+                boolean planted = !leg.isStepping && leg.grounded;
+                if (preserveRoot && !supported && entity.getDeltaMovement().y < 0)
                     ankle = ankle.add(0, Math.min(2.0, Math.max(0, entity.getY() - contact.y)) * (1 - approach), 0);
-                if (bindAnkles[i] != null && actionWeight > 0) {
+                if (!planted && bindAnkles[i] != null && actionWeight > 0) {
                     // Carry the animation's ankle displacement into the IK target in world space.
                     int offset = i * 3;
                     if (preserveRoot) {
@@ -373,7 +398,6 @@ public class WeaverKinematicChain {
                     if (lift < 0) motion = motion.subtract(soleNormal.scale(lift));
                     ankle = ankle.add(motion);
                 }
-                WeaverGait.LegState leg = gait.legs[i];
                 double elapsed = Double.isNaN(leg.renderedAt) ? 0 : Math.max(0, time - leg.renderedAt);
                 leg.renderedAt = Double.isNaN(leg.renderedAt) ? time : Math.max(time, leg.renderedAt);
                 float response = (float) (1 - Math.exp(-elapsed / 0.15));
@@ -396,13 +420,13 @@ public class WeaverKinematicChain {
                     leg.renderedNormal = new Vec3(soleY.x, soleY.y, soleY.z);
                 }
                 float contactStep = (float) (elapsed / (landingPose ? 1.5 : 3.0));
-                leg.contactWeight += Mth.clamp((leg.contactAvailable ? 1f : 0f) - leg.contactWeight, -contactStep, contactStep);
+                leg.contactWeight += Mth.clamp((supported || leg.contactAvailable ? 1f : 0f) - leg.contactWeight, -contactStep, contactStep);
                 ankle = leg.renderedAnkle;
                 soleNormal = leg.renderedNormal;
 
                 // Active terrain surface collision resolution (ArachnoMod): push foot out of solid blocks
                 Vec3 upVector = WoodweaverSurfaceNavigation.up(entity, partial);
-                BlockHitResult floorHit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+                BlockHitResult floorHit = planted ? null : WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
                     ankle.add(upVector.scale(1.2)), ankle.subtract(upVector.scale(0.35)));
                 if (floorHit != null && floorHit.getType() == net.minecraft.world.phys.HitResult.Type.BLOCK) {
                     Vec3 surfNorm = WoodweaverSurfaceNavigation.normal(floorHit.getDirection());
@@ -432,20 +456,25 @@ public class WeaverKinematicChain {
                 minYaw = Math.max(-1.30f, leg.minYaw);
                 maxYaw = Math.min(1.30f, leg.maxYaw);
                 boolean moving = surfaceMotionSquared(entity) >= 0.004;
-                if (moving || !gait.legs[i].grounded) {
-                    gait.legs[i].recoveryRequested = target.x * side < (narrow ? -0.5 : 0.45) || target.y < -4.2
-                        || target.lengthSquared() > 46.0f || desiredYaw < minYaw - 0.55 || desiredYaw > maxYaw + 0.55;
-                } else {
-                    gait.legs[i].recoveryRequested = target.lengthSquared() > 46.0f || desiredYaw < minYaw - 0.65 || desiredYaw > maxYaw + 0.65;
-                }
                 double a = Math.sqrt(knee.x * knee.x + knee.y * knee.y + knee.z * knee.z) / 16.0;
                 double b = Math.sqrt(foot.x * foot.x + foot.y * foot.y + foot.z * foot.z) / 16.0;
-                solvePlanar(hip, knee, foot, target.x, target.y, target.z, a, b, i % 2 == 0, minYaw, maxYaw, narrow);
+                boolean reachRecovery = needsReachRecovery(target, bodyMovement, (a + b) * 0.975);
+                if (moving || !gait.legs[i].grounded) {
+                    gait.legs[i].recoveryRequested = target.x * side < (narrow ? -0.5 : 0.45) || target.y < -4.2
+                        || reachRecovery || desiredYaw < minYaw - 0.20 || desiredYaw > maxYaw + 0.20;
+                } else {
+                    gait.legs[i].recoveryRequested = reachRecovery || desiredYaw < minYaw - 0.65 || desiredYaw > maxYaw + 0.65;
+                }
+                solvePlanar(hip, knee, foot, target.x, target.y, target.z, a, b, i % 2 == 0, minYaw, maxYaw, narrow, true);
                 avoidLegCollisions(entity, gait, i, hip, knee, foot, new Vec3(bodyX, bodyY, bodyZ),
                     minYaw, maxYaw, time, proceduralLegWeight * leg.contactWeight);
                 // The sole follows the actual collision face, including bridge sides and ceilings.
                 soleX.set(1, 0, 0);
                 soleWorld.set(bodyRotation).rotateZYX(hip.zRot, hip.yRot, hip.xRot).rotateZYX(knee.zRot, knee.yRot, knee.xRot).transform(soleX);
+                // Lock the whole sole in stance, not just its ankle pivot while the body turns.
+                if (planted && leg.plantedTangent != null)
+                    soleX.set((float)leg.plantedTangent.x, (float)leg.plantedTangent.y, (float)leg.plantedTangent.z);
+                if (!planted) leg.plantedTangent = null;
                 soleY.set((float)-soleNormal.x, (float)-soleNormal.y, (float)-soleNormal.z).normalize();
                 float projection = soleX.dot(soleY);
                 soleX.fma(-projection, soleY);
@@ -453,21 +482,26 @@ public class WeaverKinematicChain {
                     soleX.set(0, 0, 1).cross(soleY);
                     if (soleX.lengthSquared() < 0.0001f) soleX.set(1, 0, 0).cross(soleY);
                 }
-                soleX.normalize(); soleX.cross(soleY, soleZ).normalize();
+                soleX.normalize();
+                if (planted && leg.plantedTangent == null)
+                    leg.plantedTangent = new Vec3(soleX.x, soleX.y, soleX.z);
+                soleX.cross(soleY, soleZ).normalize();
                 soleBasis.setColumn(0, soleX).setColumn(1, soleY).setColumn(2, soleZ);
                 soleWorld.setFromNormalized(soleBasis).normalize();
                 footRotation.set(bodyRotation).rotateZYX(hip.zRot, hip.yRot, hip.xRot)
                     .rotateZYX(knee.zRot, knee.yRot, knee.xRot).invert().mul(soleWorld);
                 float naturalZ = foot.zRot;
                 levelFoot(foot, footRotation);
-                float zDiff = Mth.wrapDegrees((float)Math.toDegrees(foot.zRot - naturalZ));
-                foot.zRot = naturalZ + Mth.clamp((float)Math.toRadians(zDiff), -0.75f, 0.75f);
-                foot.xRot = Mth.clamp(foot.xRot, -0.25f, 0.25f);
-                foot.yRot = 0;
+                if (!planted) {
+                    float zDiff = Mth.wrapDegrees((float)Math.toDegrees(foot.zRot - naturalZ));
+                    foot.zRot = naturalZ + Mth.clamp((float)Math.toRadians(zDiff), -0.75f, 0.75f);
+                    foot.xRot = Mth.clamp(foot.xRot, -0.25f, 0.25f);
+                    foot.yRot = 0;
+                }
                 cache(gait.jointPose, i * 9, hip);
                 cache(gait.jointPose, i * 9 + 3, knee);
                 cache(gait.jointPose, i * 9 + 6, foot);
-                float legWeight = (preserveRoot && !entity.onGround()) ? proceduralLegWeight * leg.contactWeight : proceduralLegWeight * leg.contactWeight;
+                float legWeight = planted && supported ? 1 : proceduralLegWeight * leg.contactWeight;
                 blend(hip, 0, legWeight); blend(knee, 3, legWeight); blend(foot, 6, legWeight);
                 Vec3 origin = new Vec3(bodyX, bodyY, bodyZ);
                 leg.clearanceHip = worldJoint(new Vec3(hip.x / 16.0, hip.y / 16.0, hip.z / 16.0), origin);

@@ -1,0 +1,69 @@
+package net.mcreator.thebackwoods;
+
+import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
+import net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.block.state.BlockState;
+
+public class SubGrainAtriaFeature extends Feature<NoneFeatureConfiguration> {
+    public SubGrainAtriaFeature() {
+        super(NoneFeatureConfiguration.CODEC);
+    }
+
+    @Override
+    public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+        WorldGenLevel world = context.level();
+        BlockPos origin = context.origin();
+        
+        BlockState plank = Blocks.OAK_PLANKS.defaultBlockState();
+        BlockState air = Blocks.AIR.defaultBlockState();
+        
+        int startY = 8;        // Starting Y level
+        int floors = 3;        // Number of stacked floors
+        int floorHeight = 6;   // Distance from one floor to the next (5 blocks structure + 1 block gap)
+        
+        BlockPos.MutableBlockPos mpos = new BlockPos.MutableBlockPos();
+
+        for (int f = 0; f < floors; f++) {
+            int currentFloorY = startY + (f * floorHeight);
+
+            // Write the final structural state once instead of filling then carving.
+            for (int x = 0; x < 16; x++) {
+                int worldX = origin.getX() + x;
+                boolean isHallX = Math.abs(worldX % 10) < 3;
+                for (int z = 0; z < 16; z++) {
+                    int worldZ = origin.getZ() + z;
+
+                    boolean isHallZ = Math.abs(worldZ % 10) < 3;
+
+                    boolean isHall = isHallX || isHallZ;
+                    for (int y = 0; y < 5; y++) {
+                        mpos.set(worldX, currentFloorY + y, worldZ);
+                        world.setBlock(mpos, isHall && y >= 1 && y <= 3 ? air : plank, 2);
+                    }
+
+                }
+            }
+            // Preserve the existing two-block shaft footprint and uncarved next floor.
+            if (f < floors - 1) {
+                for (int x = 0; x < 16; x++) {
+                    int worldX = origin.getX() + x;
+                    if (worldX % 20 != 0) continue;
+                    for (int z = 0; z < 16; z++) {
+                        int worldZ = origin.getZ() + z;
+                        if (worldZ % 20 != 0) continue;
+                        mpos.set(worldX, currentFloorY + 4, worldZ); world.setBlock(mpos, air, 2);
+                        mpos.set(worldX + 1, currentFloorY + 4, worldZ); world.setBlock(mpos, air, 2);
+                        mpos.set(worldX, currentFloorY + 5, worldZ); world.setBlock(mpos, air, 2);
+                        mpos.set(worldX + 1, currentFloorY + 5, worldZ); world.setBlock(mpos, air, 2);
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+}

@@ -150,38 +150,46 @@ public class OakPyramidFeature extends Feature<NoneFeatureConfiguration> {
         level.setBlock(centerFloor.above(), AIR, 2);
         level.setBlock(centerFloor.above(2), AIR, 2);
 
-        EndCrystal crystal = EntityType.END_CRYSTAL.create(level.getLevel());
-        if (crystal != null) {
-            crystal.setPos(center.getX() + 0.5, startY + 2.0, center.getZ() + 0.5);
-            crystal.setShowBottom(false);
-            level.addFreshEntity(crystal);
+        EndCrystal crystal = new EndCrystal(EntityType.END_CRYSTAL, level.getLevel());
+        crystal.setPos(center.getX() + 0.5, startY + 2.0, center.getZ() + 0.5);
+        crystal.setShowBottom(false);
+        crystal.getPersistentData().putInt("bw_pyramid_ring_total", ringCount(PYRAMID_SPLINTER_MIN_SPAWN, PYRAMID_SPLINTER_MAX_SPAWN, random));
+        crystal.getPersistentData().putInt("bw_pyramid_ring_created", 0);
+        // The saved crystal owns this one-time spawn task. Defer until world generation has finished.
+        return level.addFreshEntity(crystal);
+    }
+
+    public static int ringCount(int minimum,int maximum,RandomSource random){
+        int min=Math.max(1,Math.min(256,minimum)),max=Math.max(min,Math.min(256,maximum));
+        return min+random.nextInt(max-min+1);
+    }
+
+    @net.neoforged.fml.common.EventBusSubscriber(modid = "the_backwoods")
+    public static final class PyramidRingEvents {
+        @net.neoforged.bus.api.SubscribeEvent
+        public static void onCrystalTick(net.neoforged.neoforge.event.tick.EntityTickEvent.Post event){
+            if(!(event.getEntity() instanceof EndCrystal crystal)||!(crystal.level() instanceof net.minecraft.server.level.ServerLevel level))return;
+            var data=crystal.getPersistentData();
+            int total=data.getInt("bw_pyramid_ring_total"),created=data.getInt("bw_pyramid_ring_created");
+            if(total<=0||created>=total||crystal.isRemoved())return;
+            long now=level.getGameTime();if(now<data.getLong("bw_pyramid_ring_retry"))return;
+            data.putLong("bw_pyramid_ring_retry",now+20);
+            double cx=crystal.getX(),cy=crystal.getY()-1.0,cz=crystal.getZ();
+            for(int work=0;work<4&&created<total;work++){
+                RandomSource random=RandomSource.create(crystal.getUUID().getMostSignificantBits()^(created*0x9E3779B97F4A7C15L));
+                double angle=random.nextDouble()*Math.PI*2,radius=Math.max(1.0,PYRAMID_ORBIT_RADIUS+(random.nextDouble()*2.4-1.2));
+                var splinter=new net.mcreator.thebackwoods.entity.SplinterEntity(net.mcreator.thebackwoods.init.TheBackwoodsModEntities.SPLINTER.get(),level);
+                splinter.setPos(cx+radius*Math.cos(angle),cy,cz+radius*Math.sin(angle));
+                splinter.setPersistenceRequired();
+                var orbit=splinter.getPersistentData();
+                orbit.putBoolean("bw_pyramid_orbit",true);
+                orbit.putDouble("bw_pyramid_cx",cx);orbit.putDouble("bw_pyramid_cy",cy);orbit.putDouble("bw_pyramid_cz",cz);
+                orbit.putDouble("bw_pyramid_angle",angle);orbit.putDouble("bw_pyramid_radius",radius);
+                orbit.putDouble("bw_pyramid_speed",0.02+random.nextDouble()*0.02);
+                if(!level.addFreshEntity(splinter))return; // Retry this slot; never mark a rejected addition as complete.
+                data.putInt("bw_pyramid_ring_created",++created);
+            }
         }
-
-        // 4. Spawn configurable ring band of Splinters randomly scattered around the End Crystal
-        int spawnCount = PYRAMID_SPLINTER_MIN_SPAWN + random.nextInt(Math.max(1, PYRAMID_SPLINTER_MAX_SPAWN - PYRAMID_SPLINTER_MIN_SPAWN + 1));
-        double cx = center.getX() + 0.5;
-        double cy = startY + 1.0;
-        double cz = center.getZ() + 0.5;
-        for (int i = 0; i < spawnCount; i++) {
-            double angle = random.nextDouble() * 2.0 * Math.PI;
-            double radius = PYRAMID_ORBIT_RADIUS + (random.nextDouble() * 2.4 - 1.2); // Scattered ring band 3.3 to 5.7 blocks
-            double sx = cx + radius * Math.cos(angle);
-            double sz = cz + radius * Math.sin(angle);
-
-            net.mcreator.thebackwoods.entity.SplinterEntity splinter = new net.mcreator.thebackwoods.entity.SplinterEntity(
-                net.mcreator.thebackwoods.init.TheBackwoodsModEntities.SPLINTER.get(), level.getLevel());
-            splinter.setPos(sx, cy, sz);
-            splinter.getPersistentData().putBoolean("bw_pyramid_orbit", true);
-            splinter.getPersistentData().putDouble("bw_pyramid_cx", cx);
-            splinter.getPersistentData().putDouble("bw_pyramid_cy", cy);
-            splinter.getPersistentData().putDouble("bw_pyramid_cz", cz);
-            splinter.getPersistentData().putDouble("bw_pyramid_angle", angle);
-            splinter.getPersistentData().putDouble("bw_pyramid_radius", radius);
-            splinter.getPersistentData().putDouble("bw_pyramid_speed", 0.02D + random.nextDouble() * 0.02D);
-            level.addFreshEntity(splinter);
-        }
-
-        return true;
     }
 }
 // 1.21.1

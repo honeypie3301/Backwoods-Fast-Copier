@@ -1,0 +1,64 @@
+package net.mcreator.thebackwoods.world.feature;
+
+import com.mojang.serialization.Codec;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.WorldGenLevel;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.levelgen.feature.Feature;
+import net.minecraft.world.level.levelgen.feature.FeaturePlaceContext;
+import net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration;
+
+public class SkyGridFeature extends Feature<NoneFeatureConfiguration> {
+
+    public SkyGridFeature(Codec<NoneFeatureConfiguration> codec) {
+        super(codec);
+    }
+
+    @Override
+    public boolean place(FeaturePlaceContext<NoneFeatureConfiguration> context) {
+
+        // --- EQUALIZED CONSTANTS FOR PERFECT CUBE CAVITIES ---
+        int gridBaseHeight   = 190;  // Lowest Y layer of the sky grid
+        int maxHeightLimit   = 319;  // Hard ceiling (overworld build limit)
+        int gridSpacing      = 12;   // Horizontal distance between beam centers (11 blocks air + 1 block beam)
+        int layerIntervalY   = 12;   // MATCHED: Vertical distance between floors (11 blocks air + 1 block beam)
+        // -----------------------------------------------------
+
+        WorldGenLevel level  = context.level();
+        BlockPos      origin = context.origin();
+
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+        BlockState plankState = Blocks.OAK_PLANKS.defaultBlockState();
+
+        // Iterate strictly within this chunk's local offsets (0-15)
+        for (int rx = 0; rx < 16; rx++) {
+            int blockX = origin.getX() + rx;
+            boolean onXLine = blockX % gridSpacing == 0;
+            for (int rz = 0; rz < 16; rz++) {
+
+                // Absolute world-space coordinates for this column
+                int blockZ = origin.getZ() + rz;
+
+                boolean onZLine = blockZ % gridSpacing == 0;
+                boolean onPillar = onXLine && onZLine; // Exact grid intersection
+
+                // Skip columns that are on neither beam axis
+                if (!onXLine && !onZLine) continue;
+
+                // Only pillars need every Y; beams occur at layer intervals.
+                int stepY = onPillar ? 1 : layerIntervalY;
+                for (int currentY = gridBaseHeight; currentY <= maxHeightLimit; currentY += stepY) {
+
+                    pos.set(blockX, currentY, blockZ);
+                    // Preserve the original air-only replacement rule.
+                    if (level.isEmptyBlock(pos)) {
+                        level.setBlock(pos, plankState, 2);
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+}

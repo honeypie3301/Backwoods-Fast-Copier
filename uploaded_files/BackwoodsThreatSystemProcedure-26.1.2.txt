@@ -1,0 +1,553 @@
+package net.mcreator.thebackwoods.procedures;
+// 26.1.2 neoforge
+import net.mcreator.thebackwoods.TheBackwoodsMod;
+import net.mcreator.thebackwoods.entity.RotEntity;
+import net.mcreator.thebackwoods.init.TheBackwoodsModEntities;
+
+import net.neoforged.bus.api.SubscribeEvent;
+import net.neoforged.fml.common.EventBusSubscriber;
+import net.neoforged.neoforge.event.entity.living.LivingDamageEvent;
+import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
+import net.neoforged.neoforge.event.tick.PlayerTickEvent;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.particles.ParticleTypes;
+import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.resources.Identifier;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.sounds.SoundEvent;
+import net.minecraft.sounds.SoundSource;
+import net.minecraft.tags.DamageTypeTags;
+import net.minecraft.util.Mth;
+import net.minecraft.util.RandomSource;
+import net.minecraft.world.damagesource.DamageSource;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.EntitySpawnReason;
+import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.entity.projectile.Projectile;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.LevelAccessor;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+
+import java.util.Set;
+import java.util.Map;
+import java.util.WeakHashMap;
+
+@EventBusSubscriber
+public class BackwoodsThreatSystemProcedure {
+
+    private static final ResourceKey<Level> BACKWOODS_DIM =
+            ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:backwoods"));
+    private static final ResourceKey<Level> SUB_STRATA_DIM =
+            ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_sub_strata"));
+    private static final ResourceKey<Level> GRAIN_DIM =
+            ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_grain"));
+    private static final ResourceKey<Level> ROTTING_DIM =
+            ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:rotting"));
+
+    private static final Set<ResourceKey<Level>> VALID_THREAT_DIMENSIONS = Set.of(
+            BACKWOODS_DIM,
+            SUB_STRATA_DIM,
+            GRAIN_DIM,
+            ROTTING_DIM
+    );
+
+    private static boolean isValidThreatDimension(Level level) {
+        return level != null && VALID_THREAT_DIMENSIONS.contains(level.dimension());
+    }
+
+    private static final int ROT_NEARBY_RADIUS = 64;
+    private static final int SPAWN_COOLDOWN_TICKS = 20 * 12;
+    private static final int DECAY_INTERVAL_TICKS = 20;
+    private static final int DECAY_PER_INTERVAL = 1;
+
+    private static final int THREAT_SPAWN = 40;
+
+    private static final int THREAT_KILL_WHILE_POWERED = 0;
+    private static final int THREAT_PROJECTILE_HIT = 3;
+    private static final int THREAT_HIGH_DPS_HIT = 2;
+    private static final int THREAT_KILLED_ROT = 8;
+
+    private static final int SPAWN_DELAY_TICKS = 40;
+
+    private static final String K_THREAT = "bw_threat";
+    private static final String K_LAST_DECAY = "bw_last_decay";
+    private static final String K_LAST_SPAWN = "bw_last_rot_spawn";
+    private static final String K_VILTRUMITE_PENDING_ROT = "bw_viltrumite_pending_rot";
+    private static final String K_VILTRUMITE_KILL_WINDOW = "bw_viltrumite_kill_window";
+    private static final String K_VILTRUMITE_NATIVE_KILLS = "bw_viltrumite_native_kills";
+    private static final int VILTRUMITE_SCAN_INTERVAL_TICKS = 40;
+    private static final int VILTRUMITE_KILL_WINDOW_TICKS = 20 * 30;
+    private static final int VILTRUMITE_KILLS_FOR_ROT = 5;
+    private static final Map<ServerLevel, Long> VILTRUMITE_SCAN_TIMES = new WeakHashMap<>();
+    private static final Map<ServerLevel, Boolean> VILTRUMITE_PRESENCE = new WeakHashMap<>();
+    private static Class<?> viltrumitePlayerApi;
+    private static Class<?> viltrumiteNpcType;
+    private static java.lang.reflect.Method isViltrumiteMethod;
+    private static boolean checkedViltrumiteApi;
+
+    private static final String[] WARN_LINES = new String[] {
+            "I feel your violence, trespasser.",
+            "You kill too quickly.",
+            "You enter frightened, then dare teach fear to everything else?",
+            "You teach death too efficiently.",
+            "You arrive wrapped in smoke and arrogance.",
+            "I have already buried stronger things than you.",
+            "I can feel your heartbeat through the floor.",
+            "You survive because I have allowed it. Now I will not.",
+            "I was killing long before your kind learned iron.",
+            "You are already standing where you die.",
+            "I know every direction you can run.",
+            "You cannot frighten something older than fear.",
+            "That mistake will be your final lesson.",
+            "Thy end is now.",
+            "Die.",
+            "A visitor?",
+            "This will hurt.",
+            "Be gone.",
+            "You thought yourself the apex predator here.",
+            "Fall.",
+            "You are strong. But I am beyond strength.",
+            "I was grown to end things like you.",
+            "You are a biped of glass and soft meat. Why are you here?",
+            "Your people will experience nothing but death.",
+            "I will teach your remains silence.",
+            "You carry death loudly. I carry it patiently.",
+            "Nothing violent survives here forever.",
+            "You should have left while the I was still patient.",
+            "You are not feared here.",
+            "I have already decided what becomes of you.",
+            "The woods survive everything. Including you.",
+            "I am what this place sends when it has had enough.",
+            "Are you unable to fight with your bare hands?",
+            "The rot blooms brightest around arrogant people.",
+            "I am the end of your people.",
+            "You bring noise. I will bring the quiet.",
+            "The woods have survived worse invasions.",
+            "Your tools sound wrong here.",
+            "Your violence echoes too far.",
+            "You arrive carrying endings.",
+            "The woods no longer mistake you for prey.",
+            "You move like an infection.",
+            "The silence you break is my own.",
+            "You are a splinter in my skin.",
+            "Steel belongs in the earth, not in the hand.",
+            "You are becoming easier to find.",
+            "I grow bold in your wake.",
+            "Pruning begins."
+    };
+
+    @SubscribeEvent
+    public static void onPlayerTick(PlayerTickEvent.Post event) {
+        Player player = event.getEntity();
+        if (player == null) return;
+        if (player.isCreative() || player.isSpectator()) {
+            putInt(player, K_THREAT, 0); // Reset threat to 0 for creative/spectator
+            return;
+        }
+        Level level = player.level();
+        if (level.isClientSide()) return;
+        if (!isValidThreatDimension(level)) return;
+        if (!(level instanceof ServerLevel serverLevel)) return;
+
+        long gameTime = level.getGameTime();
+
+        RotOnEntityTickUpdateProcedure.tickThreatRotInheritance(player);
+        refreshViltrumitePresence(serverLevel);
+        decayThreat(player, gameTime);
+        maybeSpawnRot(player, serverLevel, gameTime);
+    }
+
+    // Remember combat attribution before Rot's defenses can cancel damage or delay its death.
+    @SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.HIGHEST)
+    public static void onRotInheritanceDamage(net.neoforged.neoforge.event.entity.living.LivingIncomingDamageEvent event) {
+        LivingEntity victim = event.getEntity();
+        if (!(victim instanceof RotEntity) || victim.level().isClientSide()) return;
+        Player attacker = resolvePlayerAttacker(event.getSource(), victim);
+        if (attacker != null)
+            victim.getPersistentData().putString("bw_rot_adaptation_player", attacker.getUUID().toString());
+    }
+
+    @SubscribeEvent(priority = net.neoforged.bus.api.EventPriority.LOWEST)
+    public static void onLivingDeath(LivingDeathEvent event) {
+        LivingEntity dead = event.getEntity();
+        Level deadLevel = dead.level();
+        if (!deadLevel.isClientSide() && deadLevel instanceof ServerLevel serverLevel && isValidThreatDimension(deadLevel)) {
+            refreshViltrumitePresence(serverLevel);
+            recordViltrumiteNativeKill(dead, event.getSource(), serverLevel);
+        }
+
+        if (dead instanceof Player) return;
+
+        if (dead instanceof RotEntity) {
+            Player killer = resolvePlayerAttacker(event.getSource(), dead);
+            if (killer != null)
+                dead.getPersistentData().putString("bw_rot_adaptation_player", killer.getUUID().toString());
+            if (!event.isCanceled())
+                RotOnEntityTickUpdateProcedure.saveThreatRotAdaptation(dead);
+            if (killer != null && isValidThreatDimension(killer.level())) {
+                if (killer.isCreative() || killer.isSpectator()) return;
+                long now = killer.level().getGameTime();
+                putLong(killer, K_LAST_SPAWN, Math.max(0L, now - (SPAWN_COOLDOWN_TICKS - 40)));
+                addThreat(killer, THREAT_KILLED_ROT);
+            }
+            return;
+        }
+
+        if (THREAT_KILL_WHILE_POWERED > 0) {
+            Player attacker = resolvePlayerAttacker(event.getSource(), dead);
+            if (attacker == null) return;
+            if (isValidThreatDimension(attacker.level()) && isPowerPlayer(attacker)) {
+                addThreat(attacker, THREAT_KILL_WHILE_POWERED);
+            }
+        }
+    }
+
+    private static void refreshViltrumitePresence(ServerLevel source) {
+        for (ServerLevel dimension : source.getServer().getAllLevels()) {
+            if (!isValidThreatDimension(dimension)) continue;
+            long gameTime = dimension.getGameTime();
+            Long lastScan = VILTRUMITE_SCAN_TIMES.get(dimension);
+            if (lastScan != null && gameTime - lastScan < VILTRUMITE_SCAN_INTERVAL_TICKS) continue;
+            boolean present = false;
+            for (Entity entity : dimension.getAllEntities()) {
+                if (isViltrumite(entity)) {
+                    present = true;
+                    break;
+                }
+            }
+            VILTRUMITE_PRESENCE.put(dimension, present);
+            VILTRUMITE_SCAN_TIMES.put(dimension, gameTime);
+        }
+    }
+
+    private static void recordViltrumiteNativeKill(LivingEntity victim, DamageSource source, ServerLevel level) {
+        if (!victim.is(net.minecraft.tags.TagKey.create(Registries.ENTITY_TYPE, Identifier.parse("the_backwoods:woodbound_entities")))) return;
+        Entity killer = source == null ? null : source.getEntity();
+        if (!isViltrumite(killer) && source != null && source.getDirectEntity() instanceof Projectile projectile) {
+            killer = projectile.getOwner();
+        }
+        if (!isViltrumite(killer)) {
+            LivingEntity lastHurtBy = victim.getLastHurtByMob();
+            if (isViltrumite(lastHurtBy)) killer = lastHurtBy;
+        }
+        if (!isViltrumite(killer)) return;
+
+        VILTRUMITE_PRESENCE.put(level, true);
+        net.minecraft.nbt.CompoundTag data = killer.getPersistentData();
+        long now = level.getGameTime();
+        long windowStart = data.getLongOr(K_VILTRUMITE_KILL_WINDOW, 0L);
+        int kills = data.getIntOr(K_VILTRUMITE_NATIVE_KILLS, 0);
+        if (!data.contains(K_VILTRUMITE_KILL_WINDOW) || now - windowStart > VILTRUMITE_KILL_WINDOW_TICKS) {
+            windowStart = now;
+            kills = 0;
+        }
+        kills++;
+        data.putLong(K_VILTRUMITE_KILL_WINDOW, windowStart);
+        data.putInt(K_VILTRUMITE_NATIVE_KILLS, kills);
+        if (kills < VILTRUMITE_KILLS_FOR_ROT || !(killer instanceof Player player)
+                || player.isCreative() || player.isSpectator()) return;
+
+        data.putLong(K_VILTRUMITE_KILL_WINDOW, now);
+        data.putInt(K_VILTRUMITE_NATIVE_KILLS, 0);
+        data.putBoolean(K_VILTRUMITE_PENDING_ROT, true);
+        putInt(player, K_THREAT, Math.max(getInt(player, K_THREAT, 0), THREAT_SPAWN));
+        maybeSpawnRot(player, level, now);
+    }
+
+    private static boolean isViltrumite(Entity entity) {
+        if (entity == null) return false;
+        if (!checkedViltrumiteApi) {
+            checkedViltrumiteApi = true;
+            try {
+                viltrumitePlayerApi = Class.forName("dev.baranhan.viltrumitecore.util.ViltrumiteCorePlayer");
+                isViltrumiteMethod = viltrumitePlayerApi.getMethod("isViltrumite");
+            } catch (ReflectiveOperationException | LinkageError ignored) {
+            }
+            try {
+                viltrumiteNpcType = Class.forName("dev.baranhan.viltrumitecore.entity.ViltrumiteFakePlayer");
+            } catch (ClassNotFoundException | LinkageError ignored) {
+            }
+        }
+        if (viltrumiteNpcType != null && viltrumiteNpcType.isInstance(entity)) return true;
+        if (viltrumitePlayerApi == null || isViltrumiteMethod == null || !viltrumitePlayerApi.isInstance(entity)) return false;
+        try {
+            return Boolean.TRUE.equals(isViltrumiteMethod.invoke(entity));
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            return false;
+        }
+    }
+
+ 	@SubscribeEvent
+	public static void onLivingDamage(LivingDamageEvent.Post event) {
+	    LivingEntity victim = event.getEntity();
+	    if (victim == null) return;
+
+	    // 1. Ignore Spore mod entities entirely
+	    Identifier victimRl = BuiltInRegistries.ENTITY_TYPE.getKey(victim.getType());
+	    if (victimRl != null && victimRl.getNamespace().equals("spore")) {
+	        return;
+	    }
+
+	    // 2. Resolve and validate player attacker
+	    Player attacker = resolvePlayerAttacker(event.getSource(), victim);
+	    if (attacker == null) return;
+	    if (attacker.isCreative() || attacker.isSpectator()) return;
+	
+	    Level level = attacker.level();
+	    if (level.isClientSide() || !isValidThreatDimension(level)) return;
+	
+	    // 3. Only trigger threat when the victim is a woodbound entity (Splinter) in the Backwoods
+	    boolean isWoodbound = victim.is(net.minecraft.tags.TagKey.create(net.minecraft.core.registries.Registries.ENTITY_TYPE, Identifier.parse("the_backwoods:woodbound_entities")));
+	    if (!isWoodbound) return;
+
+	    Entity direct = event.getSource().getDirectEntity();
+	
+	    // Exclude arrows completely
+	    boolean isArrow = direct instanceof net.minecraft.world.entity.projectile.arrow.AbstractArrow;
+	    if (isArrow) return;
+	
+	    boolean projectileLike = event.getSource().is(DamageTypeTags.IS_PROJECTILE)
+	            || direct instanceof Projectile
+	            || (event.getSource().getEntity() != null && direct != null && event.getSource().getEntity() != direct);
+	
+	    if (projectileLike) {
+	        // Only trigger threat for projectile hit if they are actively using a gun/ranged weapon or rapid-firing
+	        ItemStack main = attacker.getMainHandItem();
+	        ItemStack off = attacker.getOffhandItem();
+	        boolean holdsGun = isGunItem(main) || isGunItem(off);
+
+	        if (holdsGun) {
+	            addThreat(attacker, THREAT_PROJECTILE_HIT);
+	            if (event.getInflictedDamage() >= 25.0F) {
+	                addThreat(attacker, THREAT_HIGH_DPS_HIT);
+	            }
+	        } else {
+	            if (event.getInflictedDamage() >= 25.0F) {
+	                addThreat(attacker, THREAT_PROJECTILE_HIT);
+	            }
+	        }
+	    } else {
+	        // Melee damage
+	        // Only trigger high threat if player has high stats
+	        if (isPowerPlayer(attacker) && event.getInflictedDamage() >= 25.0F) {
+	            addThreat(attacker, THREAT_HIGH_DPS_HIT);
+	        }
+	    }
+	}
+
+	private static boolean isGunItem(ItemStack stack) {
+	    if (stack.isEmpty()) return false;
+	    Identifier rl = BuiltInRegistries.ITEM.getKey(stack.getItem());
+	    if (rl == null) return false;
+	    String path = rl.getPath().toLowerCase(java.util.Locale.ROOT);
+	    String namespace = rl.getNamespace().toLowerCase(java.util.Locale.ROOT);
+	    
+	    if (namespace.equals("tacz") || namespace.equals("pointblank") || namespace.equals("cgm") || namespace.equals("mr_crayfish") || namespace.equals("vicmwc")) {
+	        return true;
+	    }
+	    
+	    return path.contains("gun") || path.contains("rifle") || path.contains("pistol") 
+	        || path.contains("revolver") || path.contains("shotgun") || path.contains("sniper") 
+	        || path.contains("carbine") || path.contains("blaster") || path.contains("musket") || path.contains("cannon");
+	}
+	
+    private static Player resolvePlayerAttacker(DamageSource source, LivingEntity victim) {
+        if (source == null) return null;
+        Entity attacker = source.getEntity();
+        if (attacker instanceof Player p) return p;
+        Entity direct = source.getDirectEntity();
+        if (direct instanceof Projectile proj && proj.getOwner() instanceof Player pOwner) return pOwner;
+        LivingEntity lastMob = victim.getLastHurtByMob();
+        if (lastMob instanceof Player lastPlayer) return lastPlayer;
+        return null;
+    }
+
+    private static boolean isPowerPlayer(Player p) {
+        if (p == null) return false;
+        int armor = p.getArmorValue();
+        boolean hasNetherite = hasItem(p, Items.NETHERITE_HELMET) || hasItem(p, Items.NETHERITE_CHESTPLATE) 
+                || hasItem(p, Items.NETHERITE_LEGGINGS) || hasItem(p, Items.NETHERITE_BOOTS);
+        return armor >= 16 || p.isFallFlying() || hasItem(p, Items.TOTEM_OF_UNDYING) || hasNetherite;
+    }
+
+    private static boolean hasItem(Player p, net.minecraft.world.item.Item item) {
+        // Correct way to scan inventory lists in 26.1.2 where fields are private
+        for (int i = 0; i < p.getInventory().getContainerSize(); i++) {
+            ItemStack stack = p.getInventory().getItem(i);
+            if (!stack.isEmpty() && stack.getItem() == item) return true;
+        }
+        return false;
+    }
+
+    private static void addThreat(Player player, int amount) {
+        int current = getInt(player, K_THREAT, 0);
+        putInt(player, K_THREAT, Mth.clamp(current + amount, 0, 200));
+    }
+
+    private static void decayThreat(Player player, long gameTime) {
+        long last = getLong(player, K_LAST_DECAY, 0L);
+        if (gameTime - last < DECAY_INTERVAL_TICKS) return;
+        putLong(player, K_LAST_DECAY, gameTime);
+        int current = getInt(player, K_THREAT, 0);
+        int next = Math.max(0, current - DECAY_PER_INTERVAL);
+        putInt(player, K_THREAT, next);
+    }
+
+    private static void maybeSpawnRot(Player player, ServerLevel level, long gameTime) {
+        int threat = getInt(player, K_THREAT, 0);
+        if (threat < THREAT_SPAWN) return;
+        long lastSpawn = getLong(player, K_LAST_SPAWN, 0L);
+        if (gameTime - lastSpawn < SPAWN_COOLDOWN_TICKS) return;
+        boolean viltrumiteSpree = player.getPersistentData().getBooleanOr(K_VILTRUMITE_PENDING_ROT, false);
+        if (isRotActiveForPlayer(level, player) || !viltrumiteSpree && level.getRandom().nextFloat() > 0.22f) return;
+        putLong(player, K_LAST_SPAWN, gameTime);
+
+        // One-time warning right before the Rot spawns
+        player.sendOverlayMessage(Component.literal(WARN_LINES[level.getRandom().nextInt(WARN_LINES.length)]));
+        SoundEvent bell = BuiltInRegistries.SOUND_EVENT.getOptional(Identifier.parse("block.bell.resonate")).orElse(null);
+        if (bell != null) {
+            level.playSound(null, BlockPos.containing(player.getX(), player.getY(), player.getZ()), bell, SoundSource.HOSTILE, 1.35f, 0.65f);
+        }
+
+        TheBackwoodsMod.queueServerWork(SPAWN_DELAY_TICKS, () -> {
+            Player current = level.getServer().getPlayerList().getPlayer(player.getUUID());
+            if (current == null && viltrumiteNpcType != null && viltrumiteNpcType.isInstance(player)) current = player;
+            if (current != player || !current.isAlive() || current.level() != level
+                    || current.isCreative() || current.isSpectator()) return;
+            if (isRotActiveForPlayer(level, current)) return;
+            BlockPos position = findSafeRotSpawn(level, current);
+            if (position == null) return;
+            Entity spawned = TheBackwoodsModEntities.ROT.get().spawn(level, position, EntitySpawnReason.MOB_SUMMONED);
+            if (spawned instanceof RotEntity rot) {
+                rot.getPersistentData().putString("bw_threat_owner", current.getUUID().toString());
+                RotOnEntityTickUpdateProcedure.restoreThreatRotAdaptation(rot);
+                current.getPersistentData().putString("bw_active_rot_uuid", rot.getUUID().toString());
+                current.getPersistentData().putBoolean("bw_viltrumite_pending_rot", false);
+            }
+        });
+    }
+
+
+    private static boolean belongsToDeadPlayer(RotEntity rot, Player player) {
+        String owner = rot.getPersistentData().getStringOr("bw_threat_owner", "");
+        boolean ours = owner.equals(player.getUUID().toString())
+                || owner.isEmpty() && rot.getUUID().toString().equals(
+                        player.getPersistentData().getStringOr("bw_active_rot_uuid", ""));
+        if (!ours) return false;
+        return !(rot.getTarget() instanceof Player other) || !other.isAlive()
+                || other.getUUID().equals(player.getUUID());
+    }
+
+    @javax.annotation.Nullable
+    private static BlockPos findSafeRotSpawn(ServerLevel level, Player player) {
+        net.minecraft.world.entity.EntityDimensions dimensions = TheBackwoodsModEntities.ROT.get().getDimensions();
+        double width = Math.max(1.0, dimensions.width() * 1.25);
+        double height = Math.max(3.0, dimensions.height() * 1.25);
+        for (int attempt = 0; attempt < 20; attempt++) {
+            double angle = level.getRandom().nextDouble() * Math.PI * 2.0;
+            double radius = 6.0 + level.getRandom().nextDouble() * 4.0;
+            int sx = Mth.floor(player.getX() + Math.cos(angle) * radius);
+            int sz = Mth.floor(player.getZ() + Math.sin(angle) * radius);
+            BlockPos column = new BlockPos(sx, player.blockPosition().getY(), sz);
+            if (!level.hasChunkAt(column) || !level.hasChunkAt(column.offset(-1, 0, -1))
+                    || !level.hasChunkAt(column.offset(1, 0, 1))) continue;
+            // Try the player's elevation first so caves and buildings do not force a surface spawn.
+            for (int offset : new int[] {0, 1, -1, 2, -2, 3, -3}) {
+                BlockPos feet = column.above(offset);
+                if (safeRotVolume(level, feet, width, height)) return feet;
+            }
+            int surface = level.getHeight(Heightmap.Types.MOTION_BLOCKING_NO_LEAVES, sx, sz);
+            if (Math.abs(surface - player.getY()) <= 8.0) {
+                BlockPos feet = new BlockPos(sx, surface, sz);
+                if (safeRotVolume(level, feet, width, height)) return feet;
+            }
+        }
+        return null;
+    }
+
+    private static boolean safeRotVolume(ServerLevel level, BlockPos feet, double width, double height) {
+        AABB volume = new AABB(feet.getX() + 0.5 - width / 2.0, feet.getY(),
+                feet.getZ() + 0.5 - width / 2.0, feet.getX() + 0.5 + width / 2.0,
+                feet.getY() + height, feet.getZ() + 0.5 + width / 2.0);
+        if (!level.getWorldBorder().isWithinBounds(volume)) return false;
+        for (int x = Mth.floor(volume.minX); x <= Mth.floor(volume.maxX - 0.0001); x++) {
+            for (int z = Mth.floor(volume.minZ); z <= Mth.floor(volume.maxZ - 0.0001); z++) {
+                BlockPos support = new BlockPos(x, feet.getY() - 1, z);
+                if (level.isOutsideBuildHeight(support) || !level.hasChunkAt(support)
+                        || !level.getBlockState(support).isFaceSturdy(level, support, net.minecraft.core.Direction.UP)
+                        || !level.getFluidState(support).isEmpty() || unsafeRotBlock(level.getBlockState(support))) return false;
+                for (int y = feet.getY(); y <= Mth.floor(volume.maxY - 0.0001); y++) {
+                    BlockPos cell = new BlockPos(x, y, z);
+                    if (level.isOutsideBuildHeight(cell) || !level.getFluidState(cell).isEmpty()
+                            || unsafeRotBlock(level.getBlockState(cell))) return false;
+                }
+            }
+        }
+        return level.noCollision(volume)
+                && level.getEntitiesOfClass(LivingEntity.class, volume, Entity::isAlive).isEmpty();
+    }
+
+    private static boolean unsafeRotBlock(net.minecraft.world.level.block.state.BlockState state) {
+        return state.is(net.minecraft.world.level.block.Blocks.CACTUS)
+                || state.is(net.minecraft.world.level.block.Blocks.MAGMA_BLOCK)
+                || state.is(net.minecraft.world.level.block.Blocks.FIRE)
+                || state.is(net.minecraft.world.level.block.Blocks.SOUL_FIRE)
+                || state.is(net.minecraft.world.level.block.Blocks.POWDER_SNOW)
+                || state.is(net.minecraft.world.level.block.Blocks.WITHER_ROSE)
+                || state.is(net.minecraft.world.level.block.Blocks.SWEET_BERRY_BUSH)
+                || state.is(net.minecraft.world.level.block.Blocks.COBWEB)
+                || state.getBlock() instanceof net.minecraft.world.level.block.CampfireBlock
+                || state.getBlock() instanceof net.minecraft.world.level.block.LeavesBlock
+                || state.getBlock() instanceof net.minecraft.world.level.block.Portal;
+    }
+
+
+    private static boolean isRotActiveForPlayer(ServerLevel level, Player player) {
+        if (player.getPersistentData().contains("bw_active_rot_uuid")) {
+            try {
+                java.util.UUID rotUuid = java.util.UUID.fromString(player.getPersistentData().getStringOr("bw_active_rot_uuid", ""));
+                Entity activeRot = level.getEntity(rotUuid);
+                if (activeRot instanceof RotEntity && activeRot.isAlive()) {
+                    return true;
+                }
+            } catch (Exception e) {
+                // Ignore parsing or retrieval errors
+            }
+        }
+        return false;
+    }
+
+    private static boolean isRotNearby(LevelAccessor world, double x, double y, double z, double radius) {
+        double searchRadius = 160.0; // Optimized tracking/simulation distance to prevent chunk search lookup lag
+        return !world.getEntitiesOfClass(RotEntity.class, new AABB(Vec3.ZERO, Vec3.ZERO).move(new Vec3(x, y, z)).inflate(searchRadius), e -> true).isEmpty();
+    }
+
+    private static int getInt(Player p, String key, int def) {
+        // Handles Optional<Integer> return types in 26.1.2
+        return p.getPersistentData().getIntOr(key, def);
+    }
+
+    private static long getLong(Player p, String key, long def) {
+        // Handles Optional<Long> return types in 26.1.2
+        return p.getPersistentData().getLongOr(key, def);
+    }
+
+    private static void putInt(Player p, String key, int value) {
+        p.getPersistentData().putInt(key, value);
+    }
+
+    private static void putLong(Player p, String key, long value) {
+        p.getPersistentData().putLong(key, value);
+    }
+}
+// 26.1.2
+

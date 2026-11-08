@@ -387,6 +387,10 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		CompoundTag mData = mob.getPersistentData();
 		updateWeaverLocomotion(mob);
 		net.mcreator.thebackwoods.WoodweaverSurfaceNavigation.recoverSavedState(mob);
+		if (persistentBoolean(mData, "is_dashing", false) || persistentBoolean(mData, "is_dash_fatigue", false)) {
+			// Dash/fatigue use ordinary collision and gravity, not a traversal adhesion lease.
+			net.mcreator.thebackwoods.WoodweaverSurfaceNavigation.cancel(mob);
+		}
 
 		if (mob.getHealth() > 0.01F && !mob.isDeadOrDying() && !persistentBoolean(mData, "is_dying", false)) {
 			WoodweaverPearlAdaptation.observe(mob);
@@ -1592,6 +1596,7 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		// Surface traversal takes ownership only outside committed combat/animation states.
 		if (!isAnyHypnoActive && !persistentBoolean(mData, "is_attacking", false)
 			&& !persistentBoolean(mData, "is_dashing", false) && !persistentBoolean(mData, "is_leaping", false)
+			&& !persistentBoolean(mData, "is_dash_fatigue", false)
 			&& !persistentBoolean(mData, "is_preparing_leap", false) && !persistentBoolean(mData, "is_landing_anim", false)
 			&& !persistentBoolean(mData, "leap_requested", false)
 			&& net.mcreator.thebackwoods.WoodweaverSurfaceNavigation.tick(mob)) {
@@ -2089,72 +2094,48 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 			double lookZ = mob.getZ() + dirZ * 10.0;
 			mob.getLookControl().setLookAt(lookX, mob.getEyeY(), lookZ, 100.0F, 100.0F);
 
-			// Slope detection and ground clamping (step up slopes without caving or falling)
+			// Steer vertically only from real support; a target height is not a floor.
 			double probeX = mob.getX() + dirX * Math.max(0.8, currentSpeed * 1.5);
 			double probeZ = mob.getZ() + dirZ * Math.max(0.8, currentSpeed * 1.5);
 
-			// Detect sharp drop ahead (at least 2.5 blocks of air below the probe)
-			boolean hasSharpDropAhead = true;
-			BlockPos probeBlockPos = BlockPos.containing(probeX, mob.getY(), probeZ);
-			for (int dy = 0; dy <= 2; dy++) {
-				if (!world.getBlockState(probeBlockPos.below(dy)).isAir()) {
-					hasSharpDropAhead = false;
-					break;
-				}
-			}
-
-			boolean wasFreeFalling = persistentBoolean(mData, "dash_free_fall", false);
-			boolean isFreeFalling = wasFreeFalling;
-
-			if (hasSharpDropAhead) {
-				isFreeFalling = true;
-			}
-			if (mob.onGround()) {
-				isFreeFalling = false;
-			}
+			boolean hasSupport = hasDashSupport(mob);
+			if (!hasSupport) mob.setOnGround(false);
+			boolean isFreeFalling = !hasSupport || !mob.onGround();
 			mData.putBoolean("dash_free_fall", isFreeFalling);
 
 			boolean isUndergroundDash = persistentBoolean(mData, "dash_target_underground", false);
 			double lockedDashY = persistentDouble(mData, "dash_locked_y", targetY);
 			double yVel = mob.getDeltaMovement().y;
 
-			if (isUndergroundDash) {
+			if (isUndergroundDash && !isFreeFalling) {
 				// Bunker-Buster Mode: Player is confirmed underground beneath the hill/bunker.
 				// Do NOT climb the surface slope; lock Y level and bore straight through terrain.
 				double yDiff = lockedDashY - mob.getY();
 				if (Math.abs(yDiff) > 0.4) {
 					yVel = net.minecraft.util.Mth.clamp(yDiff * 0.30, -0.45, 0.45);
 				} else {
-					yVel = 0.0;
+					yVel = Math.min(0.0, yVel);
 				}
-				mob.setOnGround(true);
 			} else if (!isFreeFalling) {
 				// Surface Target Mode: Ram straight through steep upward slopes to prevent IK stretching/spiking,
 				// or step up gentle slopes (<= 1.25 blocks), and smoothly hug downward slopes.
-				BlockPos groundPos = findGroundPos(world, probeX, mob.getY() + 3.0, probeZ);
-				if (groundPos != null) {
-					double groundY = groundPos.getY();
-					double heightDiff = groundY - mob.getY();
+				BlockHitResult groundHit = findDashGround(mob, probeX, probeZ);
+				if (groundHit != null) {
+					double heightDiff = groundHit.getLocation().y - mob.getBoundingBox().minY;
 					if (heightDiff > 1.25) {
 						// Steep upward incline/cliff: Kool-Aid Man ramming mode.
 						// Maintain forward level boring motion; do not heave upward or warp pitch.
-						yVel = 0.0;
-						mob.setOnGround(true);
+						yVel = Math.min(0.0, yVel);
 					} else if (heightDiff > 0.1) {
 						// Gentle step (<= 1.25 blocks): smooth ride up
 						yVel = Math.min(0.50, 0.20 + heightDiff * 0.24);
-						mob.setOnGround(true);
 					} else if (heightDiff < -0.1) {
-						yVel = Math.max(-0.65, yVel - 0.10); // Stick to downward slope
+						yVel = Math.min(yVel, Math.max(-0.65, yVel - 0.10)); // Keep existing falls faster than the slope assist
 					}
 				}
-			} else {
-				// Free falling: let gravity pull natural downward velocity
-				yVel = mob.getDeltaMovement().y;
-				if (!mob.onGround()) {
-					yVel -= 0.08;
-				}
 			}
+			// Unsupported motion keeps its existing Y velocity. Vanilla travel applies
+			// gravity once; do not refresh an airborne height lock or add gravity twice.
 
 			// Dynamic body pitch matching gentle slope or penetration angle (stabilized to prevent IK freakout)
 			float dashPitch = 0.0F;
@@ -5315,6 +5296,25 @@ public class WoodweaverOnEntityTickUpdateProcedure {
 		}
 		BlockPos surfaceGround = findGroundPos(world, target.getX(), target.getY() + 15.0, target.getZ());
 		return surfaceGround != null && target.getY() < (surfaceGround.getY() - 2.5);
+	}
+
+	private static boolean hasDashSupport(Mob mob) {
+		AABB body = mob.getBoundingBox();
+		double inset = Math.min(0.05, Math.min(body.maxX - body.minX, body.maxZ - body.minZ) * 0.25);
+		AABB feet = new AABB(body.minX + inset, body.minY - 0.025, body.minZ + inset,
+			body.maxX - inset, body.minY, body.maxZ - inset);
+		if (!WoodweaverSurfaceNavigation.loadedBox(mob.level(), feet)) return false;
+		for (var shape : mob.level().getBlockCollisions(mob, feet)) {
+			if (!shape.isEmpty()) return true;
+		}
+		return false;
+	}
+
+	private static BlockHitResult findDashGround(Mob mob, double x, double z) {
+		double feetY = mob.getBoundingBox().minY;
+		BlockHitResult hit = WoodweaverSurfaceNavigation.clipLoaded(mob.level(), mob,
+			new Vec3(x, feetY + 3.0, z), new Vec3(x, feetY - 3.0, z));
+		return hit != null && hit.getDirection() == net.minecraft.core.Direction.UP ? hit : null;
 	}
 
 	private static BlockPos findGroundPos(LevelAccessor world, double x, double y, double z) {

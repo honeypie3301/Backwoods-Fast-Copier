@@ -97,6 +97,7 @@ public class WeaverGait {
         public boolean isStepping;
         public boolean grounded;
         public boolean contactAvailable, narrow;
+        public boolean targetHasContact, landingHasContact;
         public Vec3 contactNormal = new Vec3(0, 1, 0);
         public Vec3 targetContactNormal = new Vec3(0, 1, 0);
         public Vec3 takeoffNormal = new Vec3(0, 1, 0);
@@ -114,6 +115,7 @@ public class WeaverGait {
         public long lastRecoveryTick = -1000;
         public Vec3 renderedAnkle;
         public Vec3 renderedNormal;
+        public Vec3 plantedTangent;
         public double renderedAt = Double.NaN;
         public float contactWeight;
         public float minYaw = Float.NaN, maxYaw = Float.NaN;
@@ -132,6 +134,7 @@ public class WeaverGait {
             lastRecoveryTick = -1000;
             plantedAtTick = -100;
             renderedAnkle = renderedNormal = null;
+            plantedTangent = null;
             renderedAt = Double.NaN;
             contactWeight = 1.0f;
             minYaw = maxYaw = Float.NaN;
@@ -175,7 +178,7 @@ public class WeaverGait {
         public double renderedRootAt = Double.NaN;
         public boolean preserveAuthoredRoot;
         public long contactCheckTick = -1;
-        public boolean nearLanding;
+        public boolean nearLanding, terrainSupported, wasTerrainSupported;
         public float landingApproach, legWeight;
         public double legBlendTime = Double.NaN;
         public float actionWeight;
@@ -185,6 +188,9 @@ public class WeaverGait {
         public boolean initialized;
         public double bodyHeight, previousBodyHeight;
         public float pitch, previousPitch, roll, previousRoll;
+        public Vec3 terrainOrigin;
+        public double terrainGradientX, terrainGradientZ;
+        public long terrainPlaneTick = Long.MIN_VALUE;
 
         public EntityGaitState() {
             for (int i = 0; i < legs.length; i++) legs[i] = new LegState();
@@ -203,10 +209,10 @@ public class WeaverGait {
     };
 
     public static boolean canUseGroundIK(Entity entity) {
-        if (WoodweaverSurfaceNavigation.attached(entity) || entity.onGround()) return true;
         EntityGaitState state = getOrCreateState(entity.getUUID());
         if (state.contactCheckTick != entity.tickCount) {
             state.contactCheckTick = entity.tickCount;
+            state.wasTerrainSupported = state.terrainSupported;
             BlockHitResult floor = entity.getDeltaMovement().y <= 0.03
                 ? WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
                     entity.position().add(0, 0.35, 0), entity.position().add(0, -Math.min(12.0,
@@ -215,12 +221,42 @@ public class WeaverGait {
             double distance = floor == null ? Double.POSITIVE_INFINITY
                 : Math.max(0, entity.getY() - floor.getLocation().y);
             state.landingApproach = landingWeight(distance, Math.max(0, -entity.getDeltaMovement().y));
+            // A stair/drop can clear onGround while several feet still support the body.
+            // Validate the existing anchors, rather than replacing them with moving homes.
+            state.terrainSupported = entity.onGround() || WoodweaverSurfaceNavigation.attached(entity);
+            if (!state.terrainSupported && state.initialized && !isLeapPose(entity)
+                    && entity.getDeltaMovement().y <= 0.03) {
+                int supports = 0;
+                Vec3 root = entity.position().add(0, WoodweaverSurfaceNavigation.ROOT_HEIGHT, 0);
+                for (LegState leg : state.legs) {
+                    if (!leg.grounded || leg.isStepping || root.distanceToSqr(leg.currentPlantedPos) > 6.0 * 6.0) continue;
+                    if (validSupport(entity, leg) && ++supports >= 2) break;
+                }
+                state.terrainSupported = supports >= 2
+                    || (distance <= 1.25 && entity.tickCount - state.lastGroundedTick <= 3);
+            }
         }
         // Keep the gait clock warm through ascent/apex; leg weight still follows contact/landing approach.
-        boolean leap = entity instanceof net.mcreator.thebackwoods.entity.WoodweaverEntity woodweaver
+        return state.terrainSupported || state.nearLanding || isLeapPose(entity);
+    }
+
+    private static boolean isLeapPose(Entity entity) {
+        return entity instanceof net.mcreator.thebackwoods.entity.WoodweaverEntity woodweaver
             && (woodweaver.getEntityData().get(net.mcreator.thebackwoods.entity.WoodweaverEntity.DATA_isLeaping)
                 || woodweaver.getEntityData().get(net.mcreator.thebackwoods.entity.WoodweaverEntity.DATA_isLanding));
-        return state.nearLanding || leap;
+    }
+
+    public static boolean hasTerrainSupport(Entity entity) {
+        canUseGroundIK(entity);
+        return getOrCreateState(entity.getUUID()).terrainSupported;
+    }
+
+    private static boolean validSupport(Entity entity, LegState leg) {
+        if (!entity.level().hasChunkAt(BlockPos.containing(leg.currentPlantedPos))) return false;
+        BlockHitResult hit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+            leg.currentPlantedPos.add(leg.contactNormal.scale(0.35)),
+            leg.currentPlantedPos.subtract(leg.contactNormal.scale(0.35)));
+        return hit != null && hit.getLocation().distanceToSqr(leg.currentPlantedPos) <= 0.35 * 0.35;
     }
 
     /** Finish extending the feet two ticks before predicted impact. */
@@ -317,6 +353,10 @@ public class WeaverGait {
     }
 
     private static Contact reachableGround(Level level, Entity entity, Vec3 offset, float yaw, Vec3 prediction, int leg) {
+        return reachableGround(level, entity, offset, yaw, prediction, leg, Vec3.ZERO);
+    }
+
+    private static Contact reachableGround(Level level, Entity entity, Vec3 offset, float yaw, Vec3 prediction, int leg, Vec3 bodyPrediction) {
         Contact contact = findContact(level, entity, offset, yaw, prediction);
         if (contact == null) return null;
         LegState state = getOrCreateState(entity.getUUID()).legs[leg];
@@ -335,6 +375,7 @@ public class WeaverGait {
         }
         if (!entity.onGround() && entity.getDeltaMovement().y < 0)
             hip = hip.add(0, -Math.min(2.0, Math.max(0, entity.getY() - contact.position.y)), 0);
+        hip = hip.add(bodyPrediction);
         double reach = contact.position.add(contact.normal.scale(0.1875)).distanceToSqr(hip);
         Vec3 difference = contact.position.subtract(hip);
         org.joml.Vector3f local = WoodweaverSurfaceNavigation.rotation(entity, 1).conjugate()
@@ -377,7 +418,8 @@ public class WeaverGait {
         boolean reset = !state.initialized || tick < state.lastTick
             || entity.position().distanceToSqr(state.lastBodyPos) > 64;
         state.lastTick = tick;
-        boolean touchdown = entity.onGround() && tick - state.lastGroundedTick > 1;
+        boolean supported = hasTerrainSupport(entity);
+        boolean touchdown = entity.onGround() && tick - state.lastGroundedTick > 1 && !state.wasTerrainSupported;
         if (entity.onGround()) state.lastGroundedTick = tick;
         state.lastBodyPos = entity.position();
         float yaw = entity instanceof LivingEntity living ? living.yBodyRot : entity.getYRot();
@@ -391,17 +433,19 @@ public class WeaverGait {
                 isDashing = living.getPersistentData().getBoolean("is_dashing");
             } catch (Throwable ignored) {}
         }
-        double maxSpeedCap = isDashing ? 2.5 : 1.5;
+        boolean fastGait = isDashing || speed > 0.45;
         if ((isDashing || speed > 0.40) && speed > 0.05) {
             yaw = (float) Math.toDegrees(Math.atan2(motion.z, motion.x)) - 90.0F;
         }
         float yawDelta = entity instanceof LivingEntity living ? Mth.wrapDegrees(living.yBodyRot - living.yBodyRotO) : 0;
         double yawDeltaRad = Math.toRadians(yawDelta);
-        double maxPredict = isDashing || speed > 0.45 ? Math.min(8.0, 3.2 + speed * 4.8) : 3.2;
-        Vec3 linearPredict = motion.scale(Math.min(maxPredict, 2.0 + speed * 3.8));
+        double maxPredict = fastGait ? Math.min(8.0, 3.2 + speed * 4.8) : 3.2;
+        double landingTicks = fastGait ? Mth.clamp(2.2 - speed * 0.8, 1.25, 2.2) : 0;
+        Vec3 bodyPrediction = motion.scale(landingTicks);
+        Vec3 linearPredict = motion.scale(fastGait ? landingTicks + 0.75 : Math.min(maxPredict, 2.0 + speed * 3.8));
         double time = tick;
         Quaternionf surfaceRotation = WoodweaverSurfaceNavigation.rotation(entity, 1);
-        boolean airborneApproach = !entity.onGround() && entity.getDeltaMovement().y < 0 && state.nearLanding;
+        boolean airborneApproach = !supported && entity.getDeltaMovement().y < 0 && state.nearLanding;
         boolean anyStepping = false;
         double[] groupError = new double[2];
         for (int i = 0; i < 6; i++) {
@@ -412,7 +456,12 @@ public class WeaverGait {
             Vec3 predict = linearPredict.add(turnOffset);
             if (predict.length() > maxPredict) predict = predict.scale(maxPredict / predict.length());
             Vec3 offset = new Vec3(x, hipY[i], z);
-            Contact contact = reachableGround(level, entity, offset, yaw, predict, i);
+            Contact contact = reachableGround(level, entity, offset, yaw, predict, i, bodyPrediction);
+            // Keep useful forward lead when the full landing target is obstructed.
+            if (contact == null && fastGait) for (double lead : new double[]{0.75, 0.5, 0.25}) {
+                contact = reachableGround(level, entity, offset, yaw, predict.scale(lead), i, bodyPrediction);
+                if (contact != null) break;
+            }
             if (contact == null && predict.lengthSqr() > 0.001)
                 contact = reachableGround(level, entity, offset, yaw, Vec3.ZERO, i);
             // Search around a ledge before folding the leg inward toward the body.
@@ -443,29 +492,29 @@ public class WeaverGait {
             Vec3 hanging = WoodweaverSurfaceNavigation.footPlane(entity).add(
                 WoodweaverSurfaceNavigation.WeaverFrame.offset(surfaceRotation, yaw, x, 0.2, z));
             Vec3 home = contact != null ? contact.position : hanging;
-            leg.contactAvailable = true;
+            leg.targetHasContact = contact != null;
             if (contact != null) {
                 leg.targetContactNormal = contact.normal;
                 leg.targetNarrow = contact.narrow;
-                leg.contactWeight = Mth.approach(leg.contactWeight, 1.0f, 0.20f);
                 if (reset) { leg.contactNormal = contact.normal; leg.narrow = contact.narrow; }
             } else {
                 leg.targetContactNormal = surfaceUp;
                 leg.targetNarrow = false;
-                leg.contactWeight = Mth.approach(leg.contactWeight, leg.grounded ? 0.85f : 0.0f, 0.12f);
                 if (reset) { leg.contactNormal = surfaceUp; leg.narrow = false; }
             }
             if (!leg.isStepping) leg.liftUp = surfaceUp;
             if (reset) {
                 leg.init(home);
                 leg.grounded = contact != null;
+                leg.landingHasContact = contact != null;
                 leg.plantedAtTick = tick;
                 leg.contactWeight = 1.0f;
             }
             leg.targetHomePos = home;
-            if (!entity.onGround() && !WoodweaverSurfaceNavigation.attached(entity)) {
+            if (!supported) {
                 // In air, feet track the body frame (or anticipate landing floor) rather than lagging at takeoff
-                leg.grounded = contact != null && airborneApproach;
+                leg.plantedTangent = null;
+                leg.grounded = false;
                 leg.isStepping = false;
                 leg.stepProgress = 1;
                 leg.currentPlantedPos = leg.lastPlantedPos = leg.landingPos = home;
@@ -473,7 +522,8 @@ public class WeaverGait {
                 leg.contactNormal = leg.targetContactNormal;
                 leg.narrow = leg.targetNarrow;
             }
-            if (touchdown || (landingPose && entity.onGround() && !leg.grounded)) {
+            if ((touchdown && !leg.grounded) || (landingPose && entity.onGround() && !leg.grounded)) {
+                leg.plantedTangent = null;
                 Vec3 touchdownNormal = leg.sampleNormal(time);
                 if (leg.currentPlantedPos != null && leg.currentPlantedPos.distanceToSqr(home) > 0.04) {
                     leg.lastPlantedPos = leg.currentPlantedPos;
@@ -491,6 +541,7 @@ public class WeaverGait {
                 leg.contactNormal = leg.targetContactNormal;
                 leg.narrow = leg.targetNarrow;
                 leg.grounded = contact != null;
+                leg.landingHasContact = contact != null;
                 leg.plantedAtTick = tick;
             }
             if (leg.isStepping) {
@@ -499,24 +550,18 @@ public class WeaverGait {
                 if (leg.stepProgress >= 1.0f) {
                     leg.currentPlantedPos = leg.landingPos;
                     leg.isStepping = false;
-                    leg.grounded = true;
+                    leg.grounded = leg.landingHasContact && validSupport(entity, leg);
+                    // A swing's recovery request must not immediately lift its new plant.
+                    leg.recoveryRequested = false;
                     leg.plantedAtTick = tick;
                 }
             }
             // Validate planted contacts cheaply, including blocks removed under an idle foot.
-            if (!reset && !leg.isStepping && leg.grounded && (tick + i) % 10 == 0) {
-                BlockPos support = BlockPos.containing(leg.currentPlantedPos);
-                if (!level.hasChunkAt(support)) {
-                    leg.grounded = false;
-                } else {
-                    BlockHitResult existing = WoodweaverSurfaceNavigation.clipLoaded(level, entity,
-                        leg.currentPlantedPos.add(leg.contactNormal.scale(0.35)),
-                        leg.currentPlantedPos.subtract(leg.contactNormal.scale(0.35)));
-                    // Increased tolerance from 0.03 to 0.35 to prevent micro-twitching and spurious step drops
-                    if (existing == null || existing.getLocation().distanceToSqr(leg.currentPlantedPos) > 0.35 * 0.35)
-                        leg.grounded = false;
-                }
+            if (!reset && !leg.isStepping && leg.grounded) {
+                leg.grounded = validSupport(entity, leg);
             }
+            if (supported && !leg.grounded && !leg.isStepping && contact == null)
+                leg.currentPlantedPos = leg.lastPlantedPos = leg.landingPos = hanging;
             leg.contactAvailable = contact != null || leg.grounded || leg.isStepping;
         }
         if (reset) {
@@ -534,7 +579,10 @@ public class WeaverGait {
             state.blendStartedAt = tick;
             state.bodyHeight = state.previousBodyHeight = entity.getY() + STANCE_HEIGHT;
             state.pitch = state.previousPitch = state.roll = state.previousRoll = 0;
-        } else if (!airborneApproach && !landingPose) {
+            state.terrainOrigin = null;
+            state.terrainGradientX = state.terrainGradientZ = 0;
+            state.terrainPlaneTick = Long.MIN_VALUE;
+        } else if (supported || (!airborneApproach && !landingPose)) {
             double baseThreshold = STEP_DISTANCE * STEP_DISTANCE * (speed < 0.04 ? 2.0 : 0.85);
             double comfortThreshold = baseThreshold * 1.6; // ArachnoMod asynchronous comfort boundary
             int supports = 0;
@@ -552,7 +600,7 @@ public class WeaverGait {
             boolean anyStarted = false;
             for (int i : checkOrder) {
                 LegState leg = state.legs[i];
-                if (leg.isStepping || leg.targetHomePos == null) continue;
+                if (leg.isStepping || leg.targetHomePos == null || !leg.targetHasContact) continue;
 
                 Vec3 diff = leg.currentPlantedPos.subtract(leg.targetHomePos);
                 Vec3 tangentDiff = diff.subtract(surfaceUp.scale(diff.dot(surfaceUp)));
@@ -574,17 +622,20 @@ public class WeaverGait {
                             break;
                         }
                     }
-                    if (neighborStepping && leg.grounded && !isComfortBreached) continue;
-                    int minSupports = (isDashing || speed > 0.45) && isComfortBreached ? 2 : 3;
-                    if (leg.grounded && (supports <= minSupports || (!isComfortBreached && !stableSupport(state, i, surfaceUp)))) continue;
+                    boolean urgent = leg.recoveryRequested && speed > 0.04;
+                    if (neighborStepping && leg.grounded && !isComfortBreached && !urgent) continue;
+                    int minSupports = urgent || ((isDashing || speed > 0.45) && isComfortBreached) ? 2 : 3;
+                    if (leg.grounded && (supports <= minSupports || (!urgent && !isComfortBreached && !stableSupport(state, i, surfaceUp)))) continue;
 
                     if (leg.grounded) supports--;
                     leg.lastPlantedPos = leg.currentPlantedPos;
                     leg.landingPos = leg.targetHomePos;
+                    leg.landingHasContact = leg.targetHasContact;
                     leg.takeoffNormal = leg.sampleNormal(time);
                     leg.contactNormal = leg.targetContactNormal;
                     leg.narrow = leg.targetNarrow;
                     leg.stepStart = time;
+                    leg.plantedTangent = null;
                     double stepDist = leg.lastPlantedPos.distanceTo(leg.landingPos);
                     double minStepDuration = isDashing || speed > 0.45 ? 1.25 : 2.4;
                     double maxStepDuration = isDashing || speed > 0.45 ? 2.2 : 4.0;
@@ -629,6 +680,35 @@ public class WeaverGait {
         return bestArea > 0.5;
     }
 
+    /** Least-squares height plane in entity-relative world coordinates. */
+    private static final class TerrainPlane {
+        int count;
+        double x, z, y, xx, xz, zz, xy, zy;
+        double gradientX, gradientZ, height;
+
+        void add(Vec3 point, Vec3 origin) {
+            double px = point.x - origin.x, pz = point.z - origin.z;
+            double py = point.y - origin.y;
+            count++;
+            x += px; z += pz; y += py;
+            xx += px * px; xz += px * pz; zz += pz * pz;
+            xy += px * py; zy += pz * py;
+        }
+
+        boolean solve() {
+            if (count < 3) return false;
+            double cxx = xx - x * x / count, cxz = xz - x * z / count;
+            double czz = zz - z * z / count;
+            double cxy = xy - x * y / count, czy = zy - z * y / count;
+            double determinant = cxx * czz - cxz * cxz;
+            if (determinant <= 1.0e-6 * Math.max(1, cxx * czz)) return false;
+            gradientX = (cxy * czz - czy * cxz) / determinant;
+            gradientZ = (czy * cxx - cxy * cxz) / determinant;
+            height = (y - gradientX * x - gradientZ * z) / count;
+            return Double.isFinite(gradientX) && Double.isFinite(gradientZ) && Double.isFinite(height);
+        }
+    }
+
     private static void updateBody(EntityGaitState state, Entity entity) {
         state.previousBodyHeight = state.bodyHeight;
         state.previousPitch = state.pitch;
@@ -636,72 +716,65 @@ public class WeaverGait {
 
         float yaw = entity instanceof LivingEntity living ? living.yBodyRot : entity.getYRot();
         double speed = Math.hypot(entity.getX() - entity.xo, entity.getZ() - entity.zo);
-        if (speed > 0.40) {
-            yaw = (float) Math.toDegrees(Math.atan2(entity.getZ() - entity.zo, entity.getX() - entity.xo)) - 90.0F;
-        }
-
-        // Direct foot differential adaptation (ArachnoMod):
-        // Front feet (0, 1) vs Rear feet (4, 5) give immediate pitch response to slopes.
-        // Right feet (1, 3, 5) vs Left feet (0, 2, 4) give immediate lateral roll response.
-        Vec3 fl = state.legs[0].grounded ? state.legs[0].currentPlantedPos : state.legs[0].targetHomePos;
-        Vec3 fr = state.legs[1].grounded ? state.legs[1].currentPlantedPos : state.legs[1].targetHomePos;
-        Vec3 ml = state.legs[2].grounded ? state.legs[2].currentPlantedPos : state.legs[2].targetHomePos;
-        Vec3 mr = state.legs[3].grounded ? state.legs[3].currentPlantedPos : state.legs[3].targetHomePos;
-        Vec3 rl = state.legs[4].grounded ? state.legs[4].currentPlantedPos : state.legs[4].targetHomePos;
-        Vec3 rr = state.legs[5].grounded ? state.legs[5].currentPlantedPos : state.legs[5].targetHomePos;
-
-        // Speed-dependent slope anticipation ahead
+        // Measure the footprint, independently of step phase and foot reach failures.
+        // Prediction shifts the sample window, never the frame in which tilt is applied.
         Vec3 forwardDir = rotateHorizontal(new Vec3(0, 0, -1), yaw);
-        double lookDist = 2.4 + speed * 4.0;
-        Vec3 aheadPos = entity.position().add(forwardDir.scale(lookDist));
-        BlockHitResult aheadHit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
-            aheadPos.add(0, 3.5, 0), aheadPos.add(0, -14.0, 0));
-        double terrainSlopePitch = 0;
-        double slopeDrop = 0;
-        if (aheadHit != null) {
-            double dy = aheadHit.getLocation().y - entity.getY();
-            terrainSlopePitch = -Math.atan2(dy, lookDist);
-            if (dy < -0.4) slopeDrop = -dy;
-        } else if (entity.getDeltaMovement().y < -0.05) {
-            // Fast downward descent: derive terrain slope directly from velocity vector
-            double horizSpeed = Math.hypot(entity.getDeltaMovement().x, entity.getDeltaMovement().z);
-            terrainSlopePitch = -Math.atan2(entity.getDeltaMovement().y, Math.max(0.08, horizSpeed));
-            slopeDrop = Math.abs(entity.getDeltaMovement().y) * 4.5;
+        Vec3 rightDir = rotateHorizontal(new Vec3(1, 0, 0), yaw);
+        Vec3 prediction = new Vec3(entity.getX() - entity.xo, 0, entity.getZ() - entity.zo);
+        if (prediction.lengthSqr() > 1.25 * 1.25) prediction = prediction.normalize().scale(1.25);
+        double span = 2.4 + Math.min(1.6, speed);
+        double scanUp = Math.min(12, 3.5 + span * Math.hypot(state.terrainGradientX, state.terrainGradientZ));
+        TerrainPlane plane = new TerrainPlane();
+        for (int i = 0; i < 5; i++) {
+            Vec3 offset = i == 0 ? Vec3.ZERO : i < 3
+                ? forwardDir.scale(i == 1 ? span : -span)
+                : rightDir.scale(i == 3 ? span : -span);
+            Vec3 probe = entity.position().add(prediction).add(offset);
+            BlockHitResult hit = WoodweaverSurfaceNavigation.clipLoaded(entity.level(), entity,
+                probe.add(0, scanUp, 0), probe.add(0, -18, 0));
+            if (hit != null && WoodweaverSurfaceNavigation.normal(hit.getDirection()).y > 0.5)
+                plane.add(hit.getLocation(), entity.position());
         }
-
-        if (fl != null && fr != null && ml != null && mr != null && rl != null && rr != null) {
-            double frontY = (fl.y + fr.y) * 0.5;
-            double rearY = (rl.y + rr.y) * 0.5;
-            double dy = frontY - rearY;
-            double pitch = -Math.atan2(dy, 4.8); // 4.8 blocks span between front and rear contacts
-
-            double rightY = (fr.y + mr.y + rr.y) / 3.0;
-            double leftY = (fl.y + ml.y + rl.y) / 3.0;
-            double roll = -Math.atan2(rightY - leftY, FOOT_SPREAD * 2.0);
-
-            if (terrainSlopePitch != 0 && Math.abs(terrainSlopePitch) > Math.abs(pitch)) {
-                pitch = Mth.lerp(0.55, pitch, terrainSlopePitch);
+        boolean measured = plane.solve();
+        if (!measured) {
+            // Only actual contacts may rescue a missing terrain sample; hanging homes are not terrain.
+            plane = new TerrainPlane();
+            for (LegState leg : state.legs) {
+                if (leg.grounded && !leg.isStepping && leg.contactNormal.y > 0.5)
+                    plane.add(leg.currentPlantedPos, entity.position());
+                else if (leg.targetHasContact && leg.targetContactNormal.y > 0.5)
+                    plane.add(leg.targetHomePos, entity.position());
             }
-
-            double avgSupportY = (fl.y + fr.y + ml.y + mr.y + rl.y + rr.y) / 6.0;
-            double crouch = Mth.clamp(slopeDrop * 0.35, 0, 1.2);
-            double floorWeight = Mth.clamp(WoodweaverSurfaceNavigation.up(entity, 1).y, 0, 1);
-            floorWeight = floorWeight * floorWeight * (3 - 2 * floorWeight);
-            pitch *= floorWeight;
-            roll *= floorWeight;
-            double targetHeight = Mth.lerp(floorWeight, entity.getY() + STANCE_HEIGHT,
-                avgSupportY + STANCE_HEIGHT - crouch);
-
-            state.bodyHeight = Mth.lerp(0.35, state.bodyHeight,
-                Mth.clamp(targetHeight, entity.getY() + 0.8, entity.getY() + 4.5));
-            state.roll = Mth.lerp(0.35f, state.roll, (float) Mth.clamp(roll, -1.15, 1.15));
-            state.pitch = Mth.lerp(0.40f, state.pitch, (float) Mth.clamp(pitch, -1.25, 1.25));
-        } else {
-            double crouch = Mth.clamp(slopeDrop * 0.40, 0, 1.5);
-            state.bodyHeight = Mth.lerp(0.25, state.bodyHeight, entity.getY() + STANCE_HEIGHT - crouch);
-            state.roll = Mth.lerp(0.20f, state.roll, 0);
-            state.pitch = Mth.lerp(0.35f, state.pitch, (float) Mth.clamp(terrainSlopePitch, -1.25, 1.25));
+            measured = plane.solve();
         }
+        if (measured) {
+            state.terrainGradientX = plane.gradientX;
+            state.terrainGradientZ = plane.gradientZ;
+            state.terrainOrigin = new Vec3(entity.getX(), entity.getY() + plane.height, entity.getZ());
+            state.terrainPlaneTick = entity.tickCount;
+        }
+        boolean havePlane = state.terrainOrigin != null && (measured || state.terrainSupported
+            || (entity.tickCount - state.terrainPlaneTick <= 4 && state.nearLanding));
+        double pitch = 0, roll = 0, targetHeight = entity.getY() + STANCE_HEIGHT;
+        if (havePlane) {
+            double forwardSlope = state.terrainGradientX * forwardDir.x + state.terrainGradientZ * forwardDir.z;
+            double rightSlope = state.terrainGradientX * rightDir.x + state.terrainGradientZ * rightDir.z;
+            pitch = -Math.atan(forwardSlope);
+            roll = -Math.atan2(rightSlope, Math.sqrt(1 + forwardSlope * forwardSlope));
+            double supportY = state.terrainOrigin.y + state.terrainGradientX * (entity.getX() - state.terrainOrigin.x)
+                + state.terrainGradientZ * (entity.getZ() - state.terrainOrigin.z);
+            double crouch = Mth.clamp(Math.max(0, -forwardSlope) * span * 0.35, 0, 1.2);
+            targetHeight = supportY + STANCE_HEIGHT - crouch;
+        }
+        double floorWeight = Mth.clamp(WoodweaverSurfaceNavigation.up(entity, 1).y, 0, 1);
+        floorWeight = floorWeight * floorWeight * (3 - 2 * floorWeight);
+        targetHeight = Mth.lerp(floorWeight, entity.getY() + STANCE_HEIGHT, targetHeight);
+        state.bodyHeight = Mth.lerp(0.35, state.bodyHeight,
+            Mth.clamp(targetHeight, entity.getY() + 0.8, entity.getY() + 4.5));
+        // Fast travel needs a quicker response; tick interpolation supplies render smoothness.
+        float response = (float)(1 - Math.exp(-(0.65 + Math.min(2.5, speed) * 1.6)));
+        state.pitch = Mth.lerp(response, state.pitch, (float)Mth.clamp(pitch * floorWeight, -1.25, 1.25));
+        state.roll = Mth.lerp(response, state.roll, (float)Mth.clamp(roll * floorWeight, -1.15, 1.15));
     }
 }
 // 1.21.1

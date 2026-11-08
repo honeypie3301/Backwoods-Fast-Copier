@@ -85,6 +85,8 @@ public final class WoodweaverSurfaceNavigation {
         final Quaternionf rotation = new Quaternionf();
         Vec3 orientationNormal;
         int orientationAt = -100;
+        Direction orientationFace;
+        double orientationSpeed;
         double standoff = ROOT_HEIGHT;
         Key sensedTransition, committedTransition;
         int sensedAt = -100, candidateSince = -1, transitionSeenAt, lastFaceSwitch = -100;
@@ -481,15 +483,30 @@ public final class WoodweaverSurfaceNavigation {
             next.key.face.getStepX(), next.key.face.getStepY(), next.key.face.getStepZ());
         // Adapt Nyf's separation of discrete path sides and collision-derived body orientation.
         // The same quaternion is published to rendering, combat transforms and terrain IK.
-        if (mob.tickCount - state.orientationAt >= 3 || state.orientationNormal == null
-            || state.orientationNormal.dot(normal(next.key.face)) < 0.8) {
+        // Surface-owned movement runs below this solve, so current tick displacement
+        // can still be zero. Include the commanded speed instead of assuming idle.
+        double orientationSpeed = Math.max(Math.hypot(mob.getX() - mob.xo, mob.getZ() - mob.zo),
+            mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        state.orientationSpeed = orientationSpeed;
+        int orientationInterval = next.key.face == Direction.UP && orientationSpeed > 0.10 ? 1 : 3;
+        if (mob.tickCount - state.orientationAt >= orientationInterval || state.orientationNormal == null
+            || state.orientationFace != next.key.face) {
             Vec3 measured = supportNormal(mob, next.key.face);
-            state.orientationNormal = measured != null ? measured : normal(next.key.face);
+            if (measured != null) {
+                state.orientationNormal = measured;
+            } else if (state.orientationNormal == null || state.orientationFace != next.key.face) {
+                // Unknown coverage is not a new level surface. Keep the last measured
+                // normal on the same supported route face instead of snapping upright.
+                state.orientationNormal = normal(next.key.face);
+            }
+            state.orientationFace = next.key.face;
             state.orientationAt = mob.tickCount;
         }
         Vec3 bodyUp = state.orientationNormal;
         wanted.rotationTo(0, 1, 0, (float)bodyUp.x, (float)bodyUp.y, (float)bodyUp.z);
-        approachRotation(state.rotation, wanted, ROTATION_DEGREES_PER_TICK);
+        float rotationSpeed = ROTATION_DEGREES_PER_TICK + (next.key.face == Direction.UP
+            ? (float)Math.min(22.5, orientationSpeed * 18) : 0);
+        approachRotation(state.rotation, wanted, rotationSpeed);
         state.standoff += Mth.clamp(standoff(next.key.face) - state.standoff, -0.08, 0.08);
         Vec3 movement = next.position.subtract(mob.position());
         double distance = movement.length();
@@ -672,18 +689,29 @@ public final class WoodweaverSurfaceNavigation {
         Vec3 x = Math.abs(n.y) > 0.5 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0);
         Vec3 z = n.cross(x);
         Vec3 plane = mob.position().add(0, ROOT_HEIGHT, 0).subtract(n.scale(standoff(face)));
+        Controller controller = STATES.get(mob);
+        double probeSpeed = Math.hypot(mob.getX() - mob.xo, mob.getZ() - mob.zo);
+        if (controller != null && controller.owns)
+            probeSpeed = Math.max(probeSpeed, mob.getAttributeValue(net.minecraft.world.entity.ai.attributes.Attributes.MOVEMENT_SPEED));
+        double radius = face == Direction.UP ? 2.4 + Math.min(1.6, probeSpeed) : 1;
+        Vec3 previousNormal = controller == null ? null : controller.orientationNormal;
+        double previousSlope = previousNormal != null && previousNormal.y > 0.1
+            ? Math.hypot(previousNormal.x, previousNormal.z) / previousNormal.y : 0;
+        double scanUp = face == Direction.UP ? Math.min(12, 3.5 + radius * previousSlope) : 2.5;
+        double scanDown = face == Direction.UP ? 18 : 4.8;
         double sx = 0, sz = 0, sh = 0, sxx = 0, szz = 0, sxz = 0, sxh = 0, szh = 0;
         int count = 0;
         for (int ix = -1; ix <= 1; ix++) for (int iz = -1; iz <= 1; iz++) {
-            Vec3 point = plane.add(x.scale(ix)).add(z.scale(iz));
-            Vec3 from = point.add(n.scale(2.5)), to = point.subtract(n.scale(4.8));
+            double px = ix * radius, pz = iz * radius;
+            Vec3 point = plane.add(x.scale(px)).add(z.scale(pz));
+            Vec3 from = point.add(n.scale(scanUp)), to = point.subtract(n.scale(scanDown));
             if (!loadedBox(mob.level(), new AABB(from, to).inflate(0.01))) return null;
             BlockHitResult hit = clipLoaded(mob.level(), mob, from, to);
             if (hit == null || hit.getDirection() != face) continue;
             double h = hit.getLocation().subtract(plane).dot(n);
-            sx += ix; sz += iz; sh += h;
-            sxx += ix * ix; szz += iz * iz; sxz += ix * iz;
-            sxh += ix * h; szh += iz * h;
+            sx += px; sz += pz; sh += h;
+            sxx += px * px; szz += pz * pz; sxz += px * pz;
+            sxh += px * h; szh += pz * h;
             count++;
         }
         if (count < 3) return null;
@@ -954,7 +982,8 @@ public final class WoodweaverSurfaceNavigation {
     }
     private static void publish(Mob mob, Controller state, boolean force) { publish(mob, state, force, true); }
     private static void publish(Mob mob, Controller state, boolean force, boolean active) {
-        if (!force && mob.tickCount - state.lastPacket < 4) return;
+        int interval = state.orientationFace == Direction.UP && state.orientationSpeed > 0.10 ? 2 : 4;
+        if (!force && mob.tickCount - state.lastPacket < interval) return;
         state.lastPacket = mob.tickCount;
         PacketDistributor.sendToPlayersTrackingEntity(mob, packet(mob, state, active));
     }
@@ -1038,7 +1067,9 @@ public final class WoodweaverSurfaceNavigation {
             return p != null && p.uuid.equals(entity.getUUID()) ? p : null;
         }
         private static Quaternionf sample(Pose p, double now) {
-            return new Quaternionf(p.from).slerp(p.to, (float)Mth.clamp((now - p.at) / 4.0, 0, 1)).normalize();
+            float upY = 1 - 2 * (p.to.x * p.to.x + p.to.z * p.to.z);
+            double blendTicks = p.active && upY > 0.1f ? 2.0 : 4.0;
+            return new Quaternionf(p.from).slerp(p.to, (float)Mth.clamp((now - p.at) / blendTicks, 0, 1)).normalize();
         }
         private static Quaternionf rotation(Entity entity, float partial) {
             Pose p = pose(entity);

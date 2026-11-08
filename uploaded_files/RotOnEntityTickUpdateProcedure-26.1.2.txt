@@ -1086,14 +1086,14 @@ private static float lerpAngle(float pct, float start, float end) {
 										if (st.isAir() || st.getBlock() == net.minecraft.world.level.block.Blocks.BEDROCK) continue;
 
 										if (dist2 <= coreVoidR2) {
-											serverLevel.setBlock(mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
+											net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(serverLevel, mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
 										} else {
 											double dist = Math.sqrt(dist2);
 											double rimNorm = (dist - coreVoidR) / (blastCraterR - coreVoidR);
 											double noise = 0.5 + 0.25 * Math.sin(bx * 0.35 + bz * 0.3) * Math.cos(by * 0.3) + 0.15 * Math.cos(bx * 0.6 - by * 0.4) * Math.sin(bz * 0.5);
 
 											if (rimNorm + (0.35 * (1.0 - noise)) < 0.72) {
-												serverLevel.setBlock(mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
+												net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(serverLevel, mpos, net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(), 18);
 											}
 										}
 									}
@@ -2108,7 +2108,7 @@ private static float lerpAngle(float pct, float start, float end) {
 						if (distSq <= randomRadius * randomRadius) {
 							BlockState bs = level.getBlockState(bp);
 							if (!bs.isAir() && bs.getDestroySpeed(level, bp) >= 0 && bs.getDestroySpeed(level, bp) < (totemActive ? 80.0F : 50.0F)) {
-								level.destroyBlock(bp, false);
+								net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, bp, false);
 							}
 						}
 					}
@@ -3555,7 +3555,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			for (BlockPos bp : BlockPos.betweenClosed(centerPos.offset(-2, -1, -2), centerPos.offset(2, 1, 2))) {
 				BlockState st = level.getBlockState(bp);
 				if (st.is(net.minecraft.world.level.block.Blocks.ICE) || st.is(net.minecraft.world.level.block.Blocks.SNOW)) {
-					level.destroyBlock(bp, false);
+					net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, bp, false);
 				}
 			}
 
@@ -3869,7 +3869,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					}
 
 					if (drillProgress >= 1.0) {
-						level.destroyBlock(hitPos, false);
+						net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, hitPos, false);
 						playHostileSound(level, hitPos, "entity.item.break", 0.8F, 0.8F);
 
 						for (int dy = -1; dy <= 2; dy++) {
@@ -3883,7 +3883,7 @@ private static float lerpAngle(float pct, float start, float end) {
 										} else {
 											float adjHard = adjState.getDestroySpeed(level, adj);
 											if (adjHard >= 0.0F && adjHard <= hardness + 1.5F && !adjState.isAir()) {
-												level.destroyBlock(adj, false);
+												net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, adj, false);
 											}
 										}
 									}
@@ -3897,7 +3897,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 			BlockPos firePos = hitPos.relative(blockHit.getDirection());
 			if (level.isEmptyBlock(firePos) && level.getBlockState(firePos.below()).isSolidRender()) {
-				level.setBlock(firePos, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
+				net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, firePos, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
 			}
 		}
 
@@ -3908,7 +3908,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				beamEnd.z + (level.getRandom().nextDouble() - 0.5) * 4.0
 			);
 			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender()) {
-				level.setBlock(nearBeam, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
+				net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, nearBeam, net.minecraft.world.level.block.Blocks.FIRE.defaultBlockState(), 3);
 			}
 		}
 
@@ -4154,7 +4154,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					}
 
 					if (drillProgress >= 1.0) {
-						level.destroyBlock(hitPos, false);
+						net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, hitPos, false);
 						playHostileSound(level, hitPos, "block.glass.break", 1.0F, 1.2F);
 
 						for (int dy = -1; dy <= 2; dy++) {
@@ -4168,7 +4168,7 @@ private static float lerpAngle(float pct, float start, float end) {
 										} else {
 											float adjHard = adjState.getDestroySpeed(level, adj);
 											if (adjHard >= 0.0F && adjHard <= hardness + 1.5F && !adjState.isAir()) {
-												level.destroyBlock(adj, false);
+												net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, adj, false);
 											}
 										}
 									}
@@ -4182,7 +4182,7 @@ private static float lerpAngle(float pct, float start, float end) {
 
 			BlockPos surfacePos = hitPos.relative(blockHit.getDirection());
 			if (level.isEmptyBlock(surfacePos) && level.getBlockState(surfacePos.below()).isSolidRender()) {
-				level.setBlock(surfacePos, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
+				net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, surfacePos, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
 			}
 		}
 
@@ -4193,7 +4193,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				beamEnd.z + (level.getRandom().nextDouble() - 0.5) * 4.0
 			);
 			if (level.isEmptyBlock(nearBeam) && level.getBlockState(nearBeam.below()).isSolidRender()) {
-				level.setBlock(nearBeam, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
+				net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, nearBeam, net.minecraft.world.level.block.Blocks.SNOW.defaultBlockState(), 3);
 			}
 		}
 
@@ -5934,7 +5934,7 @@ private static float lerpAngle(float pct, float start, float end) {
 							if (!st.isAir() && canMine(world, bp, targetLiv)) {
 								float hard = st.getDestroySpeed(level, bp);
 								if (hard >= 0.0F && hard <= dynamicHardnessLimit) {
-									level.destroyBlock(bp, false);
+									net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, bp, false);
 								}
 							}
 						}
@@ -6594,9 +6594,9 @@ private static float lerpAngle(float pct, float start, float end) {
 				BlockPos widenUp = facePos.above();
 				BlockPos widenL = facePos.west();
 				BlockPos widenR = facePos.east();
-				if (canMine(world, widenUp, foundPlayer)) world.destroyBlock(widenUp, false);
-				if (canMine(world, widenL, foundPlayer)) world.destroyBlock(widenL, false);
-				if (canMine(world, widenR, foundPlayer)) world.destroyBlock(widenR, false);
+				if (canMine(world, widenUp, foundPlayer)) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, widenUp, false);
+				if (canMine(world, widenL, foundPlayer)) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, widenL, false);
+				if (canMine(world, widenR, foundPlayer)) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, widenR, false);
 			} else if (stuckTier == 1) {
 				if (self instanceof Mob mob && target != null) {
 					mob.getNavigation().moveTo(target, 1.25);
@@ -6678,10 +6678,10 @@ private static float lerpAngle(float pct, float start, float end) {
 			float mineThreshold = speedRef * MINE_SPEED_MULTIPLIER + MINE_SPEED_BASE;
 
 			if (mineProgress > mineThreshold) {
-				if (canMineDown) world.destroyBlock(downPos, false);
-				if (canMineFeet) world.destroyBlock(feetPos, false);
-				if (canMineFace) world.destroyBlock(facePos, false);
-				if (canMineHead) world.destroyBlock(headPos, false);
+				if (canMineDown) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, downPos, false);
+				if (canMineFeet) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, feetPos, false);
+				if (canMineFace) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, facePos, false);
+				if (canMineHead) net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(world, headPos, false);
 				if (self instanceof Mob mob) mob.getNavigation().stop();
 				if (self instanceof RotEntity rotSet) {
 					rotSet.getEntityData().set(RotEntity.DATA_mineProgress, 0);
@@ -7472,7 +7472,7 @@ private static float lerpAngle(float pct, float start, float end) {
 							BlockState bs = serverLevel.getBlockState(bp);
 
 							if (bs.is(Blocks.WATER) || bs.getFluidState().is(FluidTags.WATER)) {
-								serverLevel.setBlock(bp, Blocks.AIR.defaultBlockState(), 3);
+								net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(serverLevel, bp, Blocks.AIR.defaultBlockState(), 3);
 								transformedCount++;
 								if (serverLevel.getRandom().nextDouble() < 0.35) {
 									serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, bx + 0.5, by + 0.5, bz + 0.5, 2, 0.3, 0.3, 0.3, 0.04);
@@ -7481,13 +7481,13 @@ private static float lerpAngle(float pct, float start, float end) {
 							}
 							else if (bs.is(Blocks.POWDER_SNOW) || bs.is(Blocks.SNOW) || bs.is(Blocks.SNOW_BLOCK) 
 								|| bs.is(Blocks.ICE) || bs.is(Blocks.PACKED_ICE) || bs.is(Blocks.FROSTED_ICE)) {
-								serverLevel.setBlock(bp, Blocks.AIR.defaultBlockState(), 3);
+								net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(serverLevel, bp, Blocks.AIR.defaultBlockState(), 3);
 								transformedCount++;
 								serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, bx + 0.5, by + 0.5, bz + 0.5, 3, 0.3, 0.3, 0.3, 0.05);
 								serverLevel.sendParticles(ParticleTypes.FLAME, bx + 0.5, by + 0.5, bz + 0.5, 1, 0.1, 0.1, 0.1, 0.02);
 							}
 							else if (bs.is(Blocks.BLUE_ICE)) {
-								serverLevel.setBlock(bp, Blocks.WATER.defaultBlockState(), 3);
+								net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(serverLevel, bp, Blocks.WATER.defaultBlockState(), 3);
 								transformedCount++;
 								serverLevel.sendParticles(ParticleTypes.CAMPFIRE_COSY_SMOKE, bx + 0.5, by + 0.5, bz + 0.5, 2, 0.3, 0.3, 0.3, 0.03);
 							}
@@ -8386,7 +8386,7 @@ private static float lerpAngle(float pct, float start, float end) {
 							} else {
 								float hardness = state.getDestroySpeed(level, bp);
 								if (hardness >= 0.0F && hardness <= 50.0F && !state.isAir()) {
-									level.destroyBlock(bp, false);
+									net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, bp, false);
 									level.sendParticles(ParticleTypes.EXPLOSION, bp.getX() + 0.5, bp.getY() + 0.5, bp.getZ() + 0.5, 1, 0.1, 0.1, 0.1, 0.02);
 								}
 							}
@@ -8400,7 +8400,7 @@ private static float lerpAngle(float pct, float start, float end) {
 					} else {
 						float hardness = state.getDestroySpeed(level, bp);
 						if (hardness >= 0.0F && hardness <= 50.0F && !state.isAir()) {
-							level.destroyBlock(bp, false);
+							net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, bp, false);
 							level.sendParticles(ParticleTypes.CRIT, bp.getX() + 0.5, bp.getY() + 0.5, bp.getZ() + 0.5, 3, 0.2, 0.2, 0.2, 0.02);
 						}
 					}
@@ -12240,6 +12240,9 @@ private static float lerpAngle(float pct, float start, float end) {
 		hive.updateMemory(owner, memory);
 	}
 
+	public static double threatRotMaxHealth(double inherited,double estimate) {
+        return Math.min(2048.0, Math.max(550.0, Math.max(inherited, estimate)));
+    }
 	public static void restoreThreatRotAdaptation(Entity rot) {
 		UUID owner = threatRotOwner(rot);
 		if (owner == null) return;
@@ -12257,7 +12260,7 @@ private static float lerpAngle(float pct, float start, float end) {
 			Player ownerPlayer = serverLevel.getPlayerByUUID(owner);
 			double inheritedMaxHp = getRotPersistentDouble(rot, "inherited_max_health", 20.0);
 			double threatMaxHp = ownerPlayer != null ? calculateIntelligentPlayerThreat(ownerPlayer) : 20.0;
-			double finalMaxHp = Math.min(2048.0, Math.max(20.0, Math.max(inheritedMaxHp, threatMaxHp)));
+			double finalMaxHp = threatRotMaxHealth(inheritedMaxHp, threatMaxHp);
 
 			var attrInstance = living.getAttribute(Attributes.MAX_HEALTH);
 			if (attrInstance != null) {
@@ -15172,7 +15175,7 @@ private static float lerpAngle(float pct, float start, float end) {
 				if (!st.isAir() && canMine(world, checkPos, foundTarget)) {
 					float hard = st.getDestroySpeed(level, checkPos);
 					if (hard >= 0.0F && hard <= 35.0F) {
-						level.destroyBlock(checkPos, false);
+						net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, checkPos, false);
 						playHostileSound(level, checkPos, "entity.item.break", 0.9F, 0.85F);
 						return true;
 					}
@@ -15228,7 +15231,7 @@ private static float lerpAngle(float pct, float start, float end) {
 						if (!st.isAir() && canMine(world, carvePos, target instanceof LivingEntity ? (LivingEntity) target : null)) {
 							float hard = st.getDestroySpeed(level, carvePos);
 							if (hard >= 0.0F && hard <= dynamicHardnessLimit) {
-								level.destroyBlock(carvePos, false);
+								net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, carvePos, false);
 							}
 						}
 					}
@@ -15517,7 +15520,7 @@ private static float lerpAngle(float pct, float start, float end) {
 		if (state.isAir()) {
 			return;
 		}
-		level.destroyBlock(pos, false, attacker);
+		net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(level, pos, false, attacker);
 		Identifier blockId = BuiltInRegistries.BLOCK.getKey(state.getBlock());
 		String path = blockId.toString().toLowerCase(java.util.Locale.ROOT);
 
@@ -15608,9 +15611,9 @@ private static float lerpAngle(float pct, float start, float end) {
 					BlockPos p = basePos.offset(dx, dy, dz);
 					BlockState bs = level.getBlockState(p);
 					if (bs.is(net.minecraft.world.level.block.Blocks.GRASS_BLOCK) || bs.is(net.minecraft.world.level.block.Blocks.DIRT)) {
-						level.setBlock(p, net.minecraft.world.level.block.Blocks.COARSE_DIRT.defaultBlockState(), 3);
+						net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, p, net.minecraft.world.level.block.Blocks.COARSE_DIRT.defaultBlockState(), 3);
 					} else if (bs.is(net.minecraft.world.level.block.Blocks.STONE) || bs.is(net.minecraft.world.level.block.Blocks.COBBLESTONE) || bs.is(net.minecraft.world.level.block.Blocks.ANDESITE)) {
-						level.setBlock(p, net.minecraft.world.level.block.Blocks.BASALT.defaultBlockState(), 3);
+						net.mcreator.thebackwoods.DimensionRegeneration.woodboundSet(level, p, net.minecraft.world.level.block.Blocks.BASALT.defaultBlockState(), 3);
 					}
 				}
 			}
@@ -16185,7 +16188,7 @@ private static float lerpAngle(float pct, float start, float end) {
 	                if (hardness < 0 && job.swept != null) job.strike.blocked = true;
 	                if (hardness < 0 || hardness > MAX_BLOCK_HARDNESS || !state.canEntityDestroy(job.level, pos, rot)
 	                        || !net.neoforged.neoforge.event.EventHooks.onEntityDestroyBlock(rot, pos, state)) continue;
-	                if (debris(work, job, pos, state) || job.level.destroyBlock(pos, DROP_BLOCKS, rot)) { job.strike.broken++; changes--; }
+	                if (debris(work, job, pos, state) || net.mcreator.thebackwoods.DimensionRegeneration.woodboundDestroy(job.level, pos, DROP_BLOCKS, rot)) { job.strike.broken++; changes--; }
 	            }
 	            if (job.cursor >= job.volume || job.strike.broken >= limit) work.finish(job); else work.jobs.add(job);
 	        }
