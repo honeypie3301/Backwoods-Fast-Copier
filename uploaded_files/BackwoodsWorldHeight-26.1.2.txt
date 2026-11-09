@@ -21,27 +21,27 @@ import net.neoforged.bus.api.SubscribeEvent;
 
 @EventBusSubscriber(modid="the_backwoods")
 public class BackwoodsWorldHeight {
-    public static boolean ENABLE_AUTO_WORLD_HEIGHT_GEN = true; // Development data generation; new worlds only.
-    public static boolean DRY_RUN = false;
-    public static boolean BACKUP_ORIGINAL_FILES = true;
-    public static boolean ENABLE_BACKWOODS = false;
-    public static int BACKWOODS_HEIGHT = 384;
-    public static boolean ENABLE_LOSS = false;
-    public static int LOSS_HEIGHT = 384;
-    public static boolean ENABLE_ROTTING = false;
-    public static int ROTTING_HEIGHT = 384;
-    public static boolean ENABLE_CROSSWORKS = false;
-    public static int CROSSWORKS_HEIGHT = 768;
-    public static boolean ENABLE_FAMILIAR = false;
-    public static int FAMILIAR_HEIGHT = 384;
-    public static boolean ENABLE_GRAIN = false;
-    public static int GRAIN_HEIGHT = 384;
-    public static boolean ENABLE_PETRIFIED_WEALD = false;
-    public static int PETRIFIED_WEALD_HEIGHT = 384;
-    public static boolean ENABLE_STILL = false;
-    public static int STILL_HEIGHT = 384;
-    public static boolean ENABLE_SUB_STRATA = false;
-    public static int SUB_STRATA_HEIGHT = 768;
+    public static final boolean ENABLE_AUTO_WORLD_HEIGHT_GEN = true; // Development data generation; new worlds only.
+    public static final boolean DRY_RUN = false;
+    public static final boolean BACKUP_ORIGINAL_FILES = true;
+    public static final boolean ENABLE_BACKWOODS = false;
+    public static final int BACKWOODS_HEIGHT = 384;
+    public static final boolean ENABLE_LOSS = false;
+    public static final int LOSS_HEIGHT = 384;
+    public static final boolean ENABLE_ROTTING = false;
+    public static final int ROTTING_HEIGHT = 384;
+    public static final boolean ENABLE_CROSSWORKS = true;
+    public static final int CROSSWORKS_HEIGHT = 1152;
+    public static final boolean ENABLE_FAMILIAR = false;
+    public static final int FAMILIAR_HEIGHT = 384;
+    public static final boolean ENABLE_GRAIN = false;
+    public static final int GRAIN_HEIGHT = 384;
+    public static final boolean ENABLE_PETRIFIED_WEALD = false;
+    public static final int PETRIFIED_WEALD_HEIGHT = 384;
+    public static final boolean ENABLE_STILL = false;
+    public static final int STILL_HEIGHT = 384;
+    public static final boolean ENABLE_SUB_STRATA = false;
+    public static final int SUB_STRATA_HEIGHT = 768;
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
     private record HeightRule(String dimension,boolean enabled,int height) {}
     private static HeightRule[] rules() {
@@ -145,4 +145,3 @@ public class BackwoodsWorldHeight {
 	}
 }
 // 26.1.2
-

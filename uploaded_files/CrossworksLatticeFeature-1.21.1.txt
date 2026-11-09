@@ -43,7 +43,19 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
     public static final boolean ENABLE_ROOF_PLATE_2 = true; // Toggle for outer second roof plate
     public static final int ROOF_PLATE_2_HEIGHT_OFFSET = 35; // Configurable height rise above lower plate (rubber band stair rise)
     public static final int ROOF_PLATE_2_THICKNESS = 1; // Thickness of the outer roof plate
-    public static final int ROOF_PLATE_2_BOUNDARY = 20000; // 20km x 20km outer boundary (-10000 to +10000)
+    public static final int ROOF_PLATE_2_BOUNDARY = 80000; // 80km across; generated lazily by chunk, never as one enormous structure.
+
+    public static final boolean ENABLE_PLATE_2_WALL = true, ENABLE_PLATE_2_CITY = true;
+    public static final int OUTWARD_PILLAR_DISTANCE=500; // Maximum outward reach, in blocks.
+    public static final int PLATE_2_WALL_THICKNESS = 6, PLATE_2_WALL_HEIGHT = 32;
+    public static final int CITY_LOT_SIZE = 32, CITY_MAX_HEIGHT = 40, CITY_WALL_SETBACK = 16;
+    public static final int CITY_BUILDING_SPACING = 24, CITY_DENSITY_PERCENT = 100;
+    public static final boolean CITY_SCATTERED_LAYOUT = true;
+    public static final int CITY_STAIR_WIDTH = 3, CITY_DOORWAY_HEIGHT = 3, CITY_OPEN_DOORWAY_PERCENT = 8;
+    public static final boolean ENABLE_PLATE_SUPPORTS = true;
+    public static final int CITY_CEILING_GAP = 12, CITY_CEILING_THICKNESS = 4;
+    public static final int WINDOW_PANE_PERCENT = 3, WINDOW_FENCE_PERCENT = 2, WINDOW_EMPTY_PERCENT = 1;
+    public static final int CITY_FLOOR_HEIGHT = 6, CITY_BRIDGE_Y = 12;
 
     // Configurable Boundary Clamping
     public static final int BOUNDARY_CLAMP_SIZE = 2500; // Total boundary width in blocks (-1250 to +1250)
@@ -116,11 +128,11 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
         return ((hash(seed, x, z) >>> 11) * 0x1.0p-53) * 100.0;
     }
 
-    public static final int TOP_MARGIN = 3; // Air padding below max build height for Roof Plate 2
+    public static final int TOP_MARGIN = 3, LATTICE_REFERENCE_MAX_Y = 960; // Restore the original 1024-high world layout.
 
     public static int getLatticeBaseY(int max) {
         int totalRoofOffset = (ENABLE_ROOF_PLATE_2 ? ROOF_PLATE_2_HEIGHT_OFFSET : 0) + CEILING_PLATE_GAP + CEILING_PLATE_THICKNESS + 1;
-        int gridTopY = max - TOP_MARGIN - totalRoofOffset;
+        int gridTopY = Math.min(max,LATTICE_REFERENCE_MAX_Y) - TOP_MARGIN - totalRoofOffset;
         return gridTopY - VERTICAL_THICKNESS;
     }
 
@@ -133,11 +145,14 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
             throw new IllegalStateException("Invalid CrossworksLatticeFeature geometry settings");
         }
 
+        if(PLATE_2_WALL_THICKNESS<1||PLATE_2_WALL_HEIGHT<1||PLATE_2_WALL_HEIGHT>256||CITY_MAX_HEIGHT<36||CITY_MAX_HEIGHT>256||CITY_LOT_SIZE!=32||CITY_WALL_SETBACK<1)
+            throw new IllegalStateException("Invalid plate-two wall/city settings");
         int min = level.getMinBuildHeight();
         int max = level.getMaxBuildHeight();
 
         int gridBaseY = getLatticeBaseY(max);
         int gridTopY = gridBaseY + VERTICAL_THICKNESS;
+        boolean cityFits=getPlate2TopY(max)+CITY_MAX_HEIGHT+3<=getCityCeilingY(max);
         if (gridBaseY < min || gridTopY > max) {
             return false;
         }
@@ -148,7 +163,7 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
         int halfInner = BOUNDARY_CLAMP_SIZE / 2;
         int halfOuter = (ENABLE_ROOF_PLATE_2) ? (ROOF_PLATE_2_BOUNDARY / 2) : halfInner;
         if (ENABLE_BOUNDARY_CLAMPING) {
-            if (baseX + 15 < -halfOuter || baseX > halfOuter || baseZ + 15 < -halfOuter || baseZ > halfOuter) {
+            if (baseX + 15 < -halfOuter-OUTWARD_PILLAR_DISTANCE || baseX > halfOuter+OUTWARD_PILLAR_DISTANCE || baseZ + 15 < -halfOuter-OUTWARD_PILLAR_DISTANCE || baseZ > halfOuter+OUTWARD_PILLAR_DISTANCE) {
                 return false;
             }
         }
@@ -193,9 +208,11 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
         long seed = level.getSeed();
         int sectorSize = Math.max(16, (BOUNDARY_CLAMP_SIZE - 2 * GAP_SIZE) / 3);
 
+        var cityCache=new java.util.HashMap<Long,CityLot>();
+        byte[] supports=ENABLE_PLATE_SUPPORTS?SuspendedWardFeature.plateSupportKinds(baseX,baseZ,min,max,seed):new byte[256];
         for (int lz = 0; lz < 16; lz++) {
             int wz = baseZ + lz;
-            if (ENABLE_BOUNDARY_CLAMPING && (wz < -halfOuter || wz >= halfOuter)) continue;
+            if (ENABLE_BOUNDARY_CLAMPING && (wz < -halfOuter-OUTWARD_PILLAR_DISTANCE || wz >= halfOuter+OUTWARD_PILLAR_DISTANCE)) continue;
 
             int distZ = (wz >= halfInner) ? (wz - halfInner) : ((wz < -halfInner) ? ((-halfInner - 1) - wz) : -1);
             int dirZ = (wz >= halfInner) ? 1 : ((wz < -halfInner) ? -1 : 0);
@@ -203,7 +220,12 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
 
             for (int lx = 0; lx < 16; lx++) {
                 int wx = baseX + lx;
-                if (ENABLE_BOUNDARY_CLAMPING && (wx < -halfOuter || wx >= halfOuter)) continue;
+                if(wx < -halfOuter||wx>=halfOuter||wz < -halfOuter||wz>=halfOuter){
+                    if(ENABLE_PLATE_2_WALL&&cityFits)for(int by=1;by<=PLATE_2_WALL_HEIGHT;by++)if(outwardPillarVoxel(wx,wz,by)){
+                        pos.set(wx,getPlate2TopY(max)+by,wz);chunk.setBlockState(pos,plank,false);
+                    }
+                    continue;
+                }
 
                 int distX = (wx >= halfInner) ? (wx - halfInner) : ((wx < -halfInner) ? ((-halfInner - 1) - wx) : -1);
                 int dirX = (wx >= halfInner) ? 1 : ((wx < -halfInner) ? -1 : 0);
@@ -248,7 +270,7 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
                                 chunk.setBlockState(pos, underStairState, false);
                             }
                         } else if (outDist < halfOuter) {
-                            // Lattice Roof Plate 2 (20km x 20km outer boundary)
+                            // Lattice Roof Plate 2 (chunk-local outer region)
                             int plate2TopY = plate1TopY + ROOF_PLATE_2_HEIGHT_OFFSET;
                             for (int dy = 0; dy < ROOF_PLATE_2_THICKNESS; dy++) {
                                 int y = plate2TopY - dy;
@@ -257,11 +279,89 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
                                     chunk.setBlockState(pos, plank, false);
                                 }
                             }
+                            if(supports[lz*16+lx]!=0){for(int py=SuspendedWardFeature.getWardRoofY(max);py<plate2TopY;py++){
+                                pos.set(wx,py,wz);var supportState=supports[lz*16+lx]==13?net.minecraft.world.level.block.Blocks.LADDER.defaultBlockState().setValue(net.minecraft.world.level.block.LadderBlock.FACING,net.minecraft.core.Direction.EAST):plank;chunk.setBlockState(pos,supportState,false);
+                            }}
+                            if(ENABLE_PLATE_2_CITY&&cityFits){
+                                for(int cy=0;cy<CITY_CEILING_THICKNESS;cy++){
+                                    pos.set(wx,getCityCeilingY(max)+cy,wz);chunk.setBlockState(pos,plank,false);
+                                }
+                            }
+                            if(ENABLE_PLATE_2_WALL&&cityFits&&isPlate2WallColumn(wx,wz)){
+                                for(int wy=1;wy<=PLATE_2_WALL_HEIGHT;wy++){
+                                    pos.set(wx,plate2TopY+wy,wz);chunk.setBlockState(pos,plank,false);
+                                }
+                                int along=Math.abs(wx)>Math.abs(wz)?wz:wx;
+                                if(Math.floorMod(along,32)<3)for(int wallY=plate2TopY+PLATE_2_WALL_HEIGHT+1;wallY<getCityCeilingY(max);wallY++){
+                                    pos.set(wx,wallY,wz);chunk.setBlockState(pos,plank,false);
+                                }
+                            }else if(cityFits&&wallRampY(wx,wz)>0){
+                                int rise=wallRampY(wx,wz);for(int wy=1;wy<=rise;wy++){
+                                    pos.set(wx,plate2TopY+wy,wz);
+                                    var state=wy==rise?net.minecraft.world.level.block.Blocks.OAK_STAIRS.defaultBlockState().setValue(net.minecraft.world.level.block.StairBlock.FACING,wallRampFacing(wx,wz)):plank;
+                                    chunk.setBlockState(pos,state,false);
+                                }
+                            }else if(cityFits&&(isRampCeilingSupport(wx,wz)||isLandingCeilingSupport(wx,wz))){
+                                for(int py=plate2TopY+1;py<getCityCeilingY(max);py++){pos.set(wx,py,wz);chunk.setBlockState(pos,plank,false);}
+                            }else if(ENABLE_PLATE_2_CITY){
+                                int cx=Math.floorDiv(wx,citySpacing(CITY_BUILDING_SPACING)),cz=Math.floorDiv(wz,citySpacing(CITY_BUILDING_SPACING));
+                                CityLot city=cachedCity(cityCache,seed,cx,cz),westCity=cachedCity(cityCache,seed,cx-1,cz),eastCity=cachedCity(cityCache,seed,cx+1,cz);
+                                generateCityColumn(level,chunk,pos,seed,city,westCity,eastCity,wx,wz,plate2TopY,plank,fence);
+                                if(supports[lz*16+lx]==13){
+                                    pos.set(wx,plate2TopY,wz);chunk.setBlockState(pos,net.minecraft.world.level.block.Blocks.LADDER.defaultBlockState().setValue(net.minecraft.world.level.block.LadderBlock.FACING,net.minecraft.core.Direction.EAST),false);
+                                    pos.set(wx,plate2TopY+1,wz);chunk.setBlockState(pos,net.minecraft.world.level.block.Blocks.OAK_TRAPDOOR.defaultBlockState(),false);
+                                }
+                            }
                         }
                     }
                     continue;
                 }
 
+                if(ENABLE_CEILING_PLATE){
+                    int floorY=gridTopY+CEILING_PLATE_GAP+CEILING_PLATE_THICKNESS;
+                    if(GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS<ROOF_PLATE_2_HEIGHT_OFFSET&&floorY+GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS<=max)for(int gy=0;gy<GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS;gy++){
+                        int kind=galleryVoxel(wx,wz,gy);if(kind==0)continue;
+                        var state=plank;
+                        if(kind>=10&&kind<=13)state=net.minecraft.world.level.block.Blocks.OAK_DOOR.defaultBlockState().setValue(net.minecraft.world.level.block.DoorBlock.FACING,kind<12?net.minecraft.core.Direction.NORTH:net.minecraft.core.Direction.EAST).setValue(net.minecraft.world.level.block.DoorBlock.HINGE,Math.floorMod(wx+wz,2)==0?net.minecraft.world.level.block.state.properties.DoorHingeSide.LEFT:net.minecraft.world.level.block.state.properties.DoorHingeSide.RIGHT).setValue(net.minecraft.world.level.block.DoorBlock.HALF,(kind&1)==0?net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER:net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER);
+                        if(kind==3)state=net.minecraft.world.level.block.Blocks.LADDER.defaultBlockState().setValue(net.minecraft.world.level.block.LadderBlock.FACING,net.minecraft.core.Direction.EAST);
+                        if(kind==2){state=fence;for(var direction:new net.minecraft.core.Direction[]{net.minecraft.core.Direction.NORTH,net.minecraft.core.Direction.EAST,net.minecraft.core.Direction.SOUTH,net.minecraft.core.Direction.WEST}){
+                            int neighbor=galleryVoxel(wx+direction.getStepX(),wz+direction.getStepZ(),gy);
+                            var property=direction==net.minecraft.core.Direction.NORTH?net.minecraft.world.level.block.FenceBlock.NORTH:direction==net.minecraft.core.Direction.EAST?net.minecraft.world.level.block.FenceBlock.EAST:direction==net.minecraft.core.Direction.SOUTH?net.minecraft.world.level.block.FenceBlock.SOUTH:net.minecraft.world.level.block.FenceBlock.WEST;
+                            state=state.setValue(property,neighbor!=0);
+                        }}
+                        pos.set(wx,floorY+gy,wz);chunk.setBlockState(pos,state,false);
+                    }
+                }
+                if(ENABLE_CEILING_PLATE){
+                    int baseY=gridTopY+CEILING_PLATE_GAP+CEILING_PLATE_THICKNESS+GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS-1;
+                    if(baseY+UPPER_DISTRICT_HEIGHT<max)for(int uy=1;uy<=UPPER_DISTRICT_HEIGHT;uy++){
+                        int kind=upperDistrictVoxel(wx,wz,uy);if(kind==0)continue;
+                        var state=kind==8?net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState():kind==3?net.minecraft.world.level.block.Blocks.LADDER.defaultBlockState().setValue(net.minecraft.world.level.block.LadderBlock.FACING,net.minecraft.core.Direction.EAST):plank;
+                        if(kind==9)state=net.minecraft.world.level.block.Blocks.OAK_STAIRS.defaultBlockState().setValue(net.minecraft.world.level.block.StairBlock.FACING,net.minecraft.core.Direction.SOUTH);
+                        if(kind==2){state=fence;for(var dir:new net.minecraft.core.Direction[]{net.minecraft.core.Direction.NORTH,net.minecraft.core.Direction.EAST,net.minecraft.core.Direction.SOUTH,net.minecraft.core.Direction.WEST}){
+                            int neighbor=upperDistrictVoxel(wx+dir.getStepX(),wz+dir.getStepZ(),uy);
+                            var prop=dir==net.minecraft.core.Direction.NORTH?net.minecraft.world.level.block.FenceBlock.NORTH:dir==net.minecraft.core.Direction.EAST?net.minecraft.world.level.block.FenceBlock.EAST:dir==net.minecraft.core.Direction.SOUTH?net.minecraft.world.level.block.FenceBlock.SOUTH:net.minecraft.world.level.block.FenceBlock.WEST;
+                            state=state.setValue(prop,neighbor==1||neighbor==2||neighbor==8);
+                        }}pos.set(wx,baseY+uy,wz);chunk.setBlockState(pos,state,false);
+                    }
+                }
+                if(ENABLE_CEILING_PLATE){
+                    int anchorY=max-INVERTED_PLATE_THICKNESS;
+                    int upperBase=gridTopY+CEILING_PLATE_GAP+CEILING_PLATE_THICKNESS+GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS-1;
+                    int bound=BOUNDARY_CLAMP_SIZE/2-GALLERY_EDGE_INSET-20;
+                    if(anchorY-INVERTED_CITY_DEPTH>=upperBase+13&&wx>=-bound&&wx<bound&&wz>=-bound&&wz<bound){
+                        for(int py=anchorY;py<max;py++){pos.set(wx,py,wz);chunk.setBlockState(pos,plank,false);}
+                        for(int depth=1;depth<=INVERTED_CITY_DEPTH;depth++){
+                            int kind=invertedDistrictVoxel(wx,wz,depth);if(kind==0)continue;
+                            var state=kind==8?net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState():plank;
+                            if(kind==2){state=fence;for(var dir:new net.minecraft.core.Direction[]{net.minecraft.core.Direction.NORTH,net.minecraft.core.Direction.EAST,net.minecraft.core.Direction.SOUTH,net.minecraft.core.Direction.WEST}){
+                                int neighbor=invertedDistrictVoxel(wx+dir.getStepX(),wz+dir.getStepZ(),depth);
+                                var prop=dir==net.minecraft.core.Direction.NORTH?net.minecraft.world.level.block.FenceBlock.NORTH:dir==net.minecraft.core.Direction.EAST?net.minecraft.world.level.block.FenceBlock.EAST:dir==net.minecraft.core.Direction.SOUTH?net.minecraft.world.level.block.FenceBlock.SOUTH:net.minecraft.world.level.block.FenceBlock.WEST;
+                                state=state.setValue(prop,neighbor==1||neighbor==2||neighbor==8);
+                            }}pos.set(wx,anchorY-depth,wz);chunk.setBlockState(pos,state,false);
+                        }
+                    }
+                }
                 if (scZ == null || scZ.sector < 0) continue;
                 SectorCoord scX = mapAxis(wx, halfInner, BOUNDARY_CLAMP_SIZE, sectorSize, GAP_SIZE, BRIDGE_EXTENSION);
                 if (scX.sector < 0) continue;
@@ -389,6 +489,661 @@ public class CrossworksLatticeFeature extends net.minecraft.world.level.levelgen
 
         return true;
     }
+
+    // Pure world-seeded layout: adjacent chunks independently agree on the same buildings and bridges.
+    public record CityLot(int cellX,int cellZ,int centerX,int centerZ,int radius,int height,int variant,boolean enabled) {}
+    private static CityLot cachedCity(java.util.Map<Long,CityLot> cache,long seed,int x,int z){return cache.computeIfAbsent(((long)x<<32)^(z&0xffffffffL),k->cityLot(seed,x,z));}
+    public static final net.minecraft.resources.ResourceKey<net.minecraft.world.level.storage.loot.LootTable> SETTLEMENT_LOOT_TABLE=net.minecraft.resources.ResourceKey.create(net.minecraft.core.registries.Registries.LOOT_TABLE,net.minecraft.resources.ResourceLocation.parse("the_backwoods:chests/settlement_loot"));
+    public static void ensureGeneratedBlockEntity(net.minecraft.world.level.WorldGenLevel level,net.minecraft.core.BlockPos pos,net.minecraft.world.level.block.state.BlockState state){
+        if(!state.hasBlockEntity())return;
+        if(level.getBlockEntity(pos)==null&&state.getBlock() instanceof net.minecraft.world.level.block.EntityBlock block){
+            var entity=block.newBlockEntity(pos.immutable(),state);
+            if(entity!=null)level.getChunk(pos).setBlockEntity(entity);
+        }
+    }
+    public static void placeSettlementLoot(net.minecraft.world.level.WorldGenLevel level,net.minecraft.core.BlockPos pos,net.minecraft.world.level.block.state.BlockState state){
+        level.setBlock(pos,state,2);
+        ensureGeneratedBlockEntity(level,pos,state);
+        if(level.getBlockEntity(pos) instanceof net.minecraft.world.level.block.entity.RandomizableContainerBlockEntity container)container.setLootTable(SETTLEMENT_LOOT_TABLE);
+    }
+    public static int getCityCeilingY(int max){return Math.min(max-CITY_CEILING_THICKNESS,getPlate2TopY(max)+CITY_MAX_HEIGHT+CITY_CEILING_GAP);}
+    public static int getPlate2TopY(int max) {
+        return getLatticeBaseY(max)+VERTICAL_THICKNESS+CEILING_PLATE_GAP+CEILING_PLATE_THICKNESS-1+ROOF_PLATE_2_HEIGHT_OFFSET;
+    }
+    public static boolean outwardPillarVoxel(int x,int z,int y){
+        if(OUTWARD_PILLAR_DISTANCE<1)return false;
+        int half=ROOF_PLATE_2_BOUNDARY/2;
+        int side=Math.abs((long)x)>Math.abs((long)z)?(x<0?0:1):(z<0?2:3);
+        int outward=side<2?(x<0?-half-x:x-half+1):(z<0?-half-z:z-half+1),along=side<2?z:x;
+        if(outward<0||outward>OUTWARD_PILLAR_DISTANCE||Math.abs((long)along)>=half-16)return false;
+        int cell=Math.floorDiv(along,160);
+        for(int c=cell-1;c<=cell+1;c++){
+            long h=hash(0xBEA41L+side,c,0);if(Math.floorMod(h,100)>=48)continue;
+            int center=c*160+(int)Math.floorMod(h>>>8,121)+20,radius=3+(int)Math.floorMod(h>>>20,6);
+            int reach=Math.max(1,OUTWARD_PILLAR_DISTANCE*(60+(int)Math.floorMod(h>>>28,41))/100);
+            int height=8+(int)Math.floorMod(h>>>40,17);
+            if(outward<=reach&&Math.abs(along-center)<=radius&&Math.abs(y-height)<=radius)return true;
+        }
+        return false;
+    }
+    public static boolean isOutsidePlate2Wall(int x,int z,int clearance) {
+        int half=ROOF_PLATE_2_BOUNDARY/2,margin=Math.max(0,clearance);
+        return (long)x < -(long)half-margin || (long)x >= (long)half+margin
+                || (long)z < -(long)half-margin || (long)z >= (long)half+margin;
+    }
+    public static int wallRampY(int x,int z){
+        if(!ENABLE_PLATE_2_WALL)return 0;
+        int half=ROOF_PLATE_2_BOUNDARY/2,d=Math.min(Math.min(x+half,half-1-x),Math.min(z+half,half-1-z));
+        if(d<PLATE_2_WALL_THICKNESS||d>=PLATE_2_WALL_THICKNESS+PLATE_2_WALL_HEIGHT)return 0;
+        int along=Math.abs(x)>Math.abs(z)?z:x;
+        return Math.floorMod(along,64)<3?PLATE_2_WALL_HEIGHT-(d-PLATE_2_WALL_THICKNESS):0;
+    }
+    public static net.minecraft.core.Direction wallRampFacing(int x,int z){return Math.abs(x)>Math.abs(z)?(x<0?net.minecraft.core.Direction.WEST:net.minecraft.core.Direction.EAST):(z<0?net.minecraft.core.Direction.NORTH:net.minecraft.core.Direction.SOUTH);}
+    public static boolean isPlate2WallColumn(int x,int z) {
+        int half=ROOF_PLATE_2_BOUNDARY/2;
+        if(x < -half||x>=half||z < -half||z>=half)return false;
+        return Math.min(Math.min(x+half,half-1-x),Math.min(z+half,half-1-z))<PLATE_2_WALL_THICKNESS;
+    }
+    public static net.minecraft.world.level.block.Block settlementBed(long seed,int x,int z){
+        int roll=(int)Math.floorMod(hash(seed^0xBEDL,x,z),100);
+        if(roll<47)return net.minecraft.world.level.block.Blocks.WHITE_BED;
+        if(roll<94)return net.minecraft.world.level.block.Blocks.RED_BED;
+        return switch(roll){case 94->net.minecraft.world.level.block.Blocks.BLUE_BED;case 95->net.minecraft.world.level.block.Blocks.GREEN_BED;case 96->net.minecraft.world.level.block.Blocks.YELLOW_BED;case 97->net.minecraft.world.level.block.Blocks.BLACK_BED;case 98->net.minecraft.world.level.block.Blocks.GRAY_BED;default->net.minecraft.world.level.block.Blocks.BROWN_BED;};
+    }
+    // Source-only settings: 100 selects every new pillar settlement for testing; 0 disables it.
+    public static final int UPSIDE_DOWN_SETTLEMENT_PERCENT = 2;
+    public static boolean invertedSettlement(long seed,int x,int z,int floor){return Math.floorMod(hash(seed^0x1A7EEL,x+floor*31,z),100)<Math.max(0,Math.min(100,UPSIDE_DOWN_SETTLEMENT_PERCENT));}
+    public static boolean isLandingCeilingSupport(int x,int z){
+        int half=BOUNDARY_CLAMP_SIZE/2;
+        int dx=x>=half?x-half:x< -half?-half-1-x:-1,dz=z>=half?z-half:z< -half?-half-1-z:-1;
+        int d=Math.max(dx,dz),along=dx>dz?z:x;
+        return d>=ROOF_PLATE_2_HEIGHT_OFFSET&&d<ROOF_PLATE_2_HEIGHT_OFFSET+25&&Math.floorMod(along,48)<25;
+    }
+    private static net.minecraft.nbt.ListTag floats(float... values){var list=new net.minecraft.nbt.ListTag();for(float f:values)list.add(net.minecraft.nbt.FloatTag.valueOf(f));return list;}
+    public static net.minecraft.nbt.CompoundTag invertedDisplayData(net.minecraft.core.BlockPos pos,net.minecraft.world.level.block.state.BlockState state){
+        var data=new net.minecraft.nbt.CompoundTag();data.putString("id","minecraft:block_display");data.put("block_state",net.minecraft.nbt.NbtUtils.writeBlockState(state));
+        var transform=new net.minecraft.nbt.CompoundTag();transform.put("translation",floats(0,1,1));transform.put("scale",floats(1,1,1));transform.put("left_rotation",floats(1,0,0,0));transform.put("right_rotation",floats(0,0,0,1));data.put("transformation",transform);
+        data.putFloat("view_range",1);return data;
+    }
+    private static void addGeneratedDisplay(net.minecraft.world.level.WorldGenLevel level,net.minecraft.core.BlockPos pos,net.minecraft.nbt.CompoundTag data,String suffix){
+        var entity=net.minecraft.world.entity.EntityType.loadEntityRecursive(data,level.getLevel(),e->e);
+        if(entity!=null){entity.setPos(pos.getX(),pos.getY(),pos.getZ());entity.setUUID(java.util.UUID.nameUUIDFromBytes((level.getSeed()+":"+pos.asLong()+":"+suffix).getBytes(java.nio.charset.StandardCharsets.UTF_8)));level.addFreshEntity(entity);}
+    }
+    public static void invertedFurniture(net.minecraft.world.level.WorldGenLevel level,net.minecraft.core.BlockPos pos,int kind){
+        var state=(kind==27?net.minecraft.world.level.block.Blocks.CRAFTING_TABLE:kind==28?net.minecraft.world.level.block.Blocks.FURNACE:kind==29?net.minecraft.world.level.block.Blocks.BOOKSHELF:net.minecraft.world.level.block.Blocks.OAK_PLANKS).defaultBlockState();
+        if(kind==28)state=state.setValue(net.minecraft.world.level.block.FurnaceBlock.FACING,net.minecraft.core.Direction.SOUTH);
+        var data=invertedDisplayData(pos,state);
+        addGeneratedDisplay(level,pos,data,"block");
+    }
+    public static int citySpacing(int requested){return Math.max(24,Math.min(96,requested));}
+    public static int stairWidth(int requested){return Math.max(1,Math.min(3,requested));}
+    public static int doorwayHeight(int requested){return Math.max(2,Math.min(4,requested));}
+    public static CityLot cityLot(long seed,int cellX,int cellZ) {
+        int spacing=citySpacing(CITY_BUILDING_SPACING);
+        long h=hash(seed^0x497A13F01D2BL,cellX,cellZ);
+        int radius=7+(int)Math.floorMod(h,3),height=24+(int)Math.floorMod(h>>>8,3)*6;
+        int jitter=CITY_SCATTERED_LAYOUT?Math.max(0,(spacing-2*radius-3)/2):0;
+        int x=cellX*spacing+spacing/2+(int)Math.floorMod(h>>>24,jitter*2+1)-jitter;
+        int z=cellZ*spacing+spacing/2+(int)Math.floorMod(h>>>36,jitter*2+1)-jitter;
+        int variant=(int)Math.floorMod(h>>>16,16),half=ROOF_PLATE_2_BOUNDARY/2;
+        int setback=PLATE_2_WALL_THICKNESS+PLATE_2_WALL_HEIGHT+CITY_WALL_SETBACK;
+        int inner=BOUNDARY_CLAMP_SIZE/2+ROOF_PLATE_2_HEIGHT_OFFSET+Math.max(spacing,25);
+        boolean onPlate=x-radius>=-half+setback&&x+radius<half-setback&&z-radius>=-half+setback&&z+radius<half-setback
+                &&(x-radius>=inner||x+radius < -inner||z-radius>=inner||z+radius < -inner);
+        boolean density=Math.floorMod(h>>>44,100)<Math.max(0,Math.min(100,CITY_DENSITY_PERCENT));
+        boolean reserved=false;
+        return new CityLot(cellX,cellZ,x,z,radius,height,variant,ENABLE_PLATE_2_CITY&&onPlate&&density&&!reserved);
+    }
+    // Rare self-contained interiors, chosen per storey without mutable runtime configuration.
+    public static final int UPPER_DISTRICT_HEIGHT=84,UPPER_DISTRICT_SPACING=64;
+    public static final int INVERTED_CITY_DEPTH=90,INVERTED_PLATE_THICKNESS=4;
+    public record DistrictLot(int cellX,int cellZ,int x,int z,int rx,int rz,int height,int shape,boolean enabled) {}
+    private record DistrictKey(int x,int z,boolean inverted) {}
+    private static final java.util.Map<DistrictKey,DistrictLot> DISTRICTS=new java.util.LinkedHashMap<>(1024,.75f,true){protected boolean removeEldestEntry(java.util.Map.Entry<DistrictKey,DistrictLot> e){return size()>1024;}};
+    private static DistrictLot districtCandidate(int cx,int cz,boolean inverted){
+        long h=hash(inverted?0x1A9E12L:0xA991L,cx,cz);
+        int x=cx*64+(int)Math.floorMod(h>>>12,45)-22,z=cz*64+(int)Math.floorMod(h>>>24,45)-22;
+        int rx=(inverted?5:10)+(int)Math.floorMod(h>>>36,inverted?5:9),rz=(inverted?5:10)+(int)Math.floorMod(h>>>44,inverted?5:9),bound=BOUNDARY_CLAMP_SIZE/2-GALLERY_EDGE_INSET-20;
+        boolean enabled=Math.floorMod(h,100)<86&&x-rx-3>=-bound&&x+rx+3<bound&&z-rz-3>=-bound&&z+rz+3<bound;
+        return new DistrictLot(cx,cz,x,z,rx,rz,inverted?72+(int)Math.floorMod(h>>>8,4)*6:64+(int)Math.floorMod(h>>>8,3)*10,(int)Math.floorMod(h>>>4,4),enabled);
+    }
+    public static DistrictLot districtLot(int cx,int cz,boolean inverted){
+        synchronized(DISTRICTS){var key=new DistrictKey(cx,cz,inverted);var cached=DISTRICTS.get(key);if(cached!=null)return cached;
+            var lot=districtCandidate(cx,cz,inverted);boolean accepted=lot.enabled;
+            long priority=hash(inverted?17:31,cx,cz);
+            if(accepted)for(int dz=-1;dz<=1;dz++)for(int dx=-1;dx<=1;dx++)if(dx!=0||dz!=0){
+                var other=districtCandidate(cx+dx,cz+dz,inverted);
+                if(other.enabled&&Math.abs(lot.x-other.x)<=lot.rx+other.rx+8&&Math.abs(lot.z-other.z)<=lot.rz+other.rz+8&&Long.compareUnsigned(hash(inverted?17:31,cx+dx,cz+dz),priority)<0)accepted=false;
+            }
+            // Hanging towers may descend beside the upper district, never through its buildings or stairs.
+            if(accepted&&inverted)for(int dz=-1;dz<=1;dz++)for(int dx=-1;dx<=1;dx++){
+                var upper=districtLot(cx+dx,cz+dz,false);
+                if(upper.enabled&&Math.abs(lot.x-upper.x)<=lot.rx+upper.rx+5&&Math.abs(lot.z-upper.z)<=lot.rz+upper.rz+5)accepted=false;
+            }
+            var result=new DistrictLot(cx,cz,lot.x,lot.z,lot.rx,lot.rz,lot.height,lot.shape,accepted);DISTRICTS.put(key,result);return result;
+        }
+    }
+    private static DistrictLot districtOwner(int x,int z,boolean inverted){
+        int cx=Math.floorDiv(x+32,64),cz=Math.floorDiv(z+32,64);
+        for(int dz=-1;dz<=1;dz++)for(int dx=-1;dx<=1;dx++){var candidate=districtLot(cx+dx,cz+dz,inverted);if(candidate.enabled&&Math.abs(x-candidate.x)<=candidate.rx+3&&Math.abs(z-candidate.z)<=candidate.rz+3)return candidate;}
+        if(inverted)for(int dz=-1;dz<=1;dz++)for(int dx=-1;dx<=1;dx++){
+            var a=districtLot(cx+dx,cz+dz,true);if(!a.enabled)continue;
+            if(elbowDeck(a,districtLot(a.cellX+1,a.cellZ,true),x,z)||elbowDeck(a,districtLot(a.cellX,a.cellZ+1,true),x,z))return a;
+        }
+        return districtLot(cx,cz,inverted);
+    }
+    private static int interpolate(int a,int b,int p,int from,int to){double t=Math.max(0,Math.min(1,(p-from)/(double)(to-from)));return (int)Math.round(a+(b-a)*t);}
+    private static boolean elbowDeck(DistrictLot a,DistrictLot b,int x,int z){
+        if(!b.enabled)return false;
+        // Both endpoints select the same bend, so the path remains continuous across ownership boundaries.
+        DistrictLot first=a.cellX<b.cellX||a.cellX==b.cellX&&a.cellZ<b.cellZ?a:b,second=first==a?b:a;
+        return x>=Math.min(first.x,second.x)-4&&x<=Math.max(first.x,second.x)+4&&Math.abs(z-first.z)<=4
+            ||z>=Math.min(first.z,second.z)-4&&z<=Math.max(first.z,second.z)+4&&Math.abs(x-second.x)<=4;
+    }
+    private static boolean districtDeck(DistrictLot lot,DistrictLot west,DistrictLot east,DistrictLot north,DistrictLot south,int x,int z){
+        if(Math.abs(x-lot.x)<=lot.rx+3&&Math.abs(z-lot.z)<=lot.rz+3)return true;
+        var h=x<lot.x?west:east;var v=z<lot.z?north:south;
+        return h.enabled&&Math.abs(z-interpolate(lot.z,h.z,x,lot.x,h.x))<=4||v.enabled&&Math.abs(x-interpolate(lot.x,v.x,z,lot.z,v.z))<=4;
+    }
+    public static int upperRoof(int x,int z){
+        var lot=districtOwner(x,z,false);int dx=x-lot.x,dz=z-lot.z;
+        return Math.max(46,lot.height-switch(lot.shape){case 1->Math.abs(dx)*2;case 2->Math.abs(dz)*2;case 3->dx+18;default->0;});
+    }
+    public static int upperDistrictVoxel(int x,int z,int y){return districtVoxel(x,z,y,false);}
+    public static int invertedDistrictVoxel(int x,int z,int depth){return districtVoxel(x,z,depth,true);}
+    private static int districtVoxel(int x,int z,int y,boolean inverted){
+        if(y<1||y>(inverted?INVERTED_CITY_DEPTH:UPPER_DISTRICT_HEIGHT))return 0;
+        var lot=districtOwner(x,z,inverted);int cx=lot.cellX,cz=lot.cellZ;if(!lot.enabled)return 0;
+        var west=districtLot(cx-1,cz,inverted);var east=districtLot(cx+1,cz,inverted);var north=districtLot(cx,cz-1,inverted);var south=districtLot(cx,cz+1,inverted);
+        int dx=x-lot.x,dz=z-lot.z,rx=lot.rx,rz=lot.rz,top=inverted?lot.height:upperRoof(x,z);
+        boolean body=Math.abs(dx)<=rx&&Math.abs(dz)<=rz;
+        if(!inverted){
+            if(y<=12&&Math.abs(Math.abs(dx)-(rx-2))<=1&&Math.abs(Math.abs(dz)-(rz-2))<=1)return 1;
+            if(dx==-rx&&dz==-rz+1&&y<=top)return 1;
+            if(dx==-rx+1&&dz==-rz+1&&y<Math.min(top,upperRoof(x-1,z)))return 3;
+            if(lot.shape!=0&&dx>=rx+1&&dx<=rx+2&&dz>=-6&&dz<=5){int sy=19+dz;if(y==sy)return 9;if(y==sy-1)return 1;if(y>sy&&y<=sy+3)return 0;}
+        }
+        for(int tier:new int[]{12,24,36}){
+            if(inverted&&tier>=lot.height)continue;
+            boolean deck=inverted?(body||Math.abs(dx)<=rx+3&&Math.abs(dz)<=rz+3||elbowDeck(lot,west,x,z)||elbowDeck(lot,east,x,z)||elbowDeck(lot,north,x,z)||elbowDeck(lot,south,x,z)):districtDeck(lot,west,east,north,south,x,z);
+            if(y==tier&&deck)return 1;
+            if(y==tier+1&&deck&&!body&&districtVoxel(x,z,tier,inverted)==1){
+                if(districtVoxel(x-1,z,tier,inverted)==0||districtVoxel(x+1,z,tier,inverted)==0||districtVoxel(x,z-1,tier,inverted)==0||districtVoxel(x,z+1,tier,inverted)==0||districtVoxel(x-1,z-1,tier,inverted)==0||districtVoxel(x-1,z+1,tier,inverted)==0||districtVoxel(x+1,z-1,tier,inverted)==0||districtVoxel(x+1,z+1,tier,inverted)==0)return 2;
+            }
+        }
+        if(!body||y<(inverted?1:13)||y>top)return 0;
+        if(y>=top-1)return 1;
+        boolean wall=Math.abs(dx)==rx||Math.abs(dz)==rz;
+        if(wall){
+            var h=dx<0?west:east;var v=dz<0?north:south;
+            int hz=h.enabled?interpolate(lot.z,h.z,x,lot.x,h.x):lot.z,vx=v.enabled?interpolate(lot.x,v.x,z,lot.z,v.z):lot.x;
+            if(inverted){hz=lot.z;vx=lot.x;}
+            int doorHeight=inverted?3+(int)Math.floorMod(hash(29,cx,cz),3):3;
+            for(int tier:new int[]{12,24,36})if(y>tier&&y<=tier+doorHeight&&(Math.abs(dx)==rx&&Math.abs(z-hz)<3||Math.abs(dz)==rz&&Math.abs(x-vx)<3))return 0;
+            int along=Math.abs(dx)==rx?dz:dx,phase=Math.floorMod(y-(inverted?0:12),6);
+            if((Math.abs(dx)<rx-1||Math.abs(dz)<rz-1)&&phase>=2&&phase<=3&&Math.floorMod(along,6)>=2&&Math.floorMod(along,6)<=3)return 8;
+            return 1;
+        }
+        return Math.floorMod(y-(inverted?0:12),6)==0?1:0;
+    }
+    public static final int GALLERY_HEIGHT=32,GALLERY_CEILING_THICKNESS=2,GALLERY_SPACING=32;
+    // Floor is immediately above ceiling plate 1; the upper plate stays below the outer city's floor.
+    public static final int GALLERY_EDGE_INSET=20,GALLERY_WALL_CLEARANCE=30,GALLERY_WALL_THICKNESS=224;
+    private static boolean galleryRailOnEdge(int x,int z,int deckY){
+        return galleryVoxel(x-1,z,deckY)==0||galleryVoxel(x+1,z,deckY)==0||galleryVoxel(x,z-1,deckY)==0||galleryVoxel(x,z+1,deckY)==0;
+    }
+    private static int galleryWallVoxel(int x,int z,int y){
+        int half=BOUNDARY_CLAMP_SIZE/2,d=Math.min(Math.min(x+half,half-1-x),Math.min(z+half,half-1-z));
+        if(d<GALLERY_WALL_CLEARANCE)return -1;
+        boolean perimeter=d<GALLERY_WALL_CLEARANCE+GALLERY_WALL_THICKNESS;
+        int cx=Math.floorDiv(x,128)*128+64,cz=Math.floorDiv(z,128)*128+64,dx=x-cx,dz=z-cz;
+        boolean island=Math.floorMod(hash(0x6A11L,Math.floorDiv(x,128),Math.floorDiv(z,128)),100)<12&&Math.abs(dx)<=12&&Math.abs(dz)<=12;
+        boolean balcony=Math.floorMod(hash(0x6A11L,Math.floorDiv(x,128),Math.floorDiv(z,128)),100)<12&&Math.abs(dx)<=15&&Math.abs(dz)<=15;
+        // The gallery side of the perimeter wall carries continuous balconies; isolated masses get wraparound decks.
+        boolean outerBalcony=d>=GALLERY_WALL_CLEARANCE+GALLERY_WALL_THICKNESS&&d<=GALLERY_WALL_CLEARANCE+GALLERY_WALL_THICKNESS+3;
+        if(!perimeter&&!island){
+            if(outerBalcony||balcony){if(y==10||y==22)return 1;if(y==11||y==23)return galleryRailOnEdge(x,z,y-1)?2:0;}
+            return -1;
+        }
+        if(y==10||y==22)return 1;
+        int base=y<10?0:y<22?10:22,rise=y-base;
+        int gx=Math.floorMod(x,9),gz=Math.floorMod(z+(int)Math.floorMod(hash(17,Math.floorDiv(x,9),0),3),9);
+        long roomHash=hash(0xA2E1L,Math.floorDiv(x,9),Math.floorDiv(z,9));
+        int thickness=1+(int)Math.floorMod(roomHash>>>8,3);
+        boolean partition=(gx<thickness||gz<thickness)&&Math.floorMod(roomHash,100)<76;
+        boolean skin=perimeter?d==GALLERY_WALL_CLEARANCE||d==GALLERY_WALL_CLEARANCE+GALLERY_WALL_THICKNESS-1:Math.abs(dx)==12||Math.abs(dz)==12;
+        boolean xWall=skin?(perimeter?Math.min(x+half,half-1-x)==d:Math.abs(dx)==12):gx<thickness;
+        int along=skin?Math.floorMod(xWall?z:x,9):xWall?gz:gx;
+        long doorHash=hash(0xD00FL,xWall?Math.floorDiv(x,9):Math.floorDiv(z,9),xWall?Math.floorDiv(z,9):Math.floorDiv(x,9));
+        int width=Math.floorMod(doorHash>>>8,5)==0?3:Math.floorMod(roomHash>>>12,3)==0?2:1;
+        int gateStart=3+(int)Math.floorMod(doorHash>>>16,3);
+        boolean gate=along>=gateStart&&along<gateStart+width;
+        if((partition||skin)&&gate&&rise>=1&&rise<=2){
+            if(rise<=2&&Math.floorMod(doorHash,100)<20)return (xWall?12:10)+rise-1;
+            return 0;
+        }
+        return partition||skin?1:0;
+    }
+    public static int galleryVoxel(int x,int z,int y){
+        int half=BOUNDARY_CLAMP_SIZE/2-GALLERY_EDGE_INSET;if(x< -half||x>=half||z< -half||z>=half||y<0||y>=GALLERY_HEIGHT+GALLERY_CEILING_THICKNESS)return 0;
+        if(y==0||y>=GALLERY_HEIGHT)return 1;
+        int originalHalf=BOUNDARY_CLAMP_SIZE/2;
+        int setback=Math.min(Math.min(x+originalHalf,originalHalf-1-x),Math.min(z+originalHalf,originalHalf-1-z));
+        if(setback<GALLERY_WALL_CLEARANCE)return 0;
+        int wall=galleryWallVoxel(x,z,y);if(wall>=0)return wall;
+        int dx=Math.floorMod(x+16,GALLERY_SPACING)-16,dz=Math.floorMod(z+16,GALLERY_SPACING)-16;
+        if(dx>=-2&&dx<=1&&dz>=-2&&dz<=1)return 1;
+        if(dx==2&&dz==0&&y<=22)return 3;
+        for(int tier:new int[]{10,22}){
+            boolean platform=Math.abs(dx)<=5&&Math.abs(dz)<=5;
+            boolean bridgeX=Math.abs(dz)<=2,bridgeZ=Math.abs(dx)<=2;
+            if(y==tier&&(platform||bridgeX||bridgeZ))return 1;
+            if(y==tier+1){
+                boolean rim=platform&&(Math.abs(dx)==5||Math.abs(dz)==5);
+                boolean xRail=bridgeX&&Math.abs(dz)==2&&!platform,zRail=bridgeZ&&Math.abs(dx)==2&&!platform;
+                // Keep the mouths of all bridges open through the platform railings.
+                if(rim&&!(Math.abs(dx)==5&&Math.abs(dz)<2||Math.abs(dz)==5&&Math.abs(dx)<2)||xRail||zRail)return galleryRailOnEdge(x,z,tier)?2:0;
+            }
+        }
+        return 0;
+    }
+    public static int roomSettlementDesign(long seed,CityLot lot,int floor){
+        if(!lot.enabled||isVisitorSite(seed,lot)||floor<0||stillLifeFloor(lot,floor)>=0)return -1;
+        long h=hash(seed^0x5E771EL,lot.cellX+floor*97,lot.cellZ);
+        if(Math.floorMod(h,1000)>=8)return -1;
+        for(int x=4;x<lot.radius;x++)for(int z=2;z<lot.radius;z++)if(!footprint(lot,x,z)||cityRoof(lot,x,z)<=floor*6+5)return -1;
+        return (int)Math.floorMod(h>>>16,64);
+    }
+    public static int roomSettlementVoxel(long seed,CityLot lot,int dx,int dz,int y){
+        int design=roomSettlementDesign(seed,lot,y/6),phase=Math.floorMod(y,6),r=lot.radius;
+        if(design<0||dx<4||dx>=r||dz<2||dz>=r)return -1;
+        if((design&32)!=0)dz=r+1-dz;
+        if(phase==0)return dx==r-2&&dz==r-3&&(design&3)==0?44:43;
+        if(dx==r-1&&dz==r-2&&phase<=2&&(design&7)!=7)return 41;
+        if(dx==r-2&&dz==r-2&&phase==2&&(design&1)==0)return 42;
+        if(dx==r-1&&dz==r-4&&phase==1)return (design&2)==0?40:17;
+        if(dx==r-1&&dz==2&&phase==1)return (design&4)==0?8:47;
+        if(dx==4&&phase==1&&(design&8)!=0){if(dz==3)return 45;if(dz==4)return 46;}
+        if(dx==r-1&&dz==r-3&&phase==1&&(design&16)!=0)return 17;
+        return -1;
+    }
+    public static int stillLifeFloor(CityLot lot,int floor){
+        if(floor<1)return -1;
+        int roll=(int)Math.floorMod(hash(lot.centerX^0x57111FL,lot.cellX+floor*41,lot.cellZ),100);
+        return roll<18?roll%6:-1;
+    }
+    private static int stillLifeVoxel(CityLot lot,int dx,int dz,int y){
+        int style=stillLifeFloor(lot,y/CITY_FLOOR_HEIGHT),phase=Math.floorMod(y,CITY_FLOOR_HEIGHT),r=lot.radius;
+        if(style<1||phase==0)return -1;
+        // Keep furniture away from every staircase and all three ladder arrangements.
+        if(style==1&&dx>=4&&dx<r&&dz>=2&&dz<r){
+            if(dx==4||dz==2||dz==r-1)return 1; // Sealed waiting room, chairs facing its blank far wall.
+            if(phase==1&&dz==r-3&&dx%2==0)return 31;
+            return 0;
+        }
+        if(style==2&&dx<=-4&&dx>-r&&dz>=2&&dz<r){
+            if(dx==-r+1)return 1;
+            if(phase==1&&(dz==3||dz==6)&&dx<-4)return 2;
+        }
+        if(style==3&&dx>=4&&dx<r){
+            // A numbered door has solid oak immediately behind it.
+            if(dz==3)return 1;
+            if(dz==2&&dx==5){if(phase<=2)return 10+phase-1;return 1;}
+            if(dz==1&&dx==5&&phase==3)return 30;
+        }
+        if(style==4&&dx>=4&&dx<r&&dz>=2&&dz<r-1){
+            if(phase==1&&dx==4&&dz==3)return 17;
+            if(phase==1&&dx==4&&dz==4)return 8;
+            if(dx==5&&dz==3){if(phase<=2)return 2;if(phase==3)return 32;}
+        }
+        if(style==5&&dx>=4&&dx<r&&dz>=2&&dz<r-1){
+            if(dx==5&&dz==3){if(phase<=2)return 2;if(phase==3)return 32;}
+            if(phase==1&&dx==6&&dz==3)return 23;
+        }
+        return -1;
+    }
+    public static boolean isRampCeilingSupport(int x,int z){
+        if(!ENABLE_PLATE_2_WALL)return false;
+        int half=ROOF_PLATE_2_BOUNDARY/2,d=Math.min(Math.min(x+half,half-1-x),Math.min(z+half,half-1-z));
+        int along=Math.abs(x)>Math.abs(z)?z:x,phase=Math.floorMod(along,64);
+        return d>=PLATE_2_WALL_THICKNESS+2&&d<=PLATE_2_WALL_THICKNESS+4&&(phase==62||phase==63||phase==4||phase==5);
+    }
+    public static void labelStillLife(net.minecraft.world.level.WorldGenLevel level,net.minecraft.core.BlockPos pos,CityLot lot,int y,int kind){
+        if(level.getBlockEntity(pos) instanceof net.minecraft.world.level.block.entity.SignBlockEntity sign){
+            int style=stillLifeFloor(lot,y/CITY_FLOOR_HEIGHT);
+            String first=kind==30?"ROOM "+(100+Math.floorMod(hash(lot.centerX,lot.cellX+y/6,lot.cellZ),900)):style==4?"SURVEY 0" : "EXIT --->";
+            if(kind==42)first=switch(Math.floorMod(roomSettlementDesign(level.getSeed(),lot,y/6),8)){case 0->"ore and stuff";case 1->"do not bring back";case 2->"leave some";case 3->"tools";case 4->"not safe outside";case 5->"someone was here";case 6->"supplies";default->"we went up";};
+            String second=kind==30?"PLEASE WAIT":style==4?"NO CHANGE":"KEEP GOING";
+            if(kind==42)second=first.equals("do not bring back")?"to overworld":"";
+            var text=new net.minecraft.world.level.block.entity.SignText().setMessage(0,net.minecraft.network.chat.Component.literal(first)).setMessage(1,net.minecraft.network.chat.Component.literal(second));
+            var data=new net.minecraft.nbt.CompoundTag();
+            data.putString("id","minecraft:sign");data.putInt("x",pos.getX());data.putInt("y",pos.getY());data.putInt("z",pos.getZ());data.putBoolean("is_waxed",true);
+            data.put("front_text",net.minecraft.world.level.block.entity.SignText.DIRECT_CODEC.encodeStart(level.registryAccess().createSerializationContext(net.minecraft.nbt.NbtOps.INSTANCE),text).getOrThrow());
+            var generated=net.minecraft.world.level.block.entity.BlockEntity.loadStatic(pos.immutable(),sign.getBlockState(),data,level.registryAccess());
+            if(generated!=null)level.getChunk(pos).setBlockEntity(generated);
+        }
+    }
+    public static boolean usesLadder(CityLot lot){return Math.floorMod(hash(lot.centerX,lot.cellX,lot.cellZ),100)<12;}
+    private static int ladderVoxel(CityLot lot,int dx,int dz){
+        int variant=(int)Math.floorMod(hash(lot.centerZ,lot.cellX,lot.cellZ),3);
+        int lx=variant==0?-lot.radius+1:variant==1?lot.radius-1:0,lz=variant<2?-lot.radius+1:0;
+        if(dx==lx&&dz==lz)return variant==1?28:27;
+        if(variant==2&&dx==-1&&dz==0)return 1;
+        return -1;
+    }
+    public static int buildingDesign(CityLot lot){return (int)Math.floorMod(hash(lot.centerX^lot.centerZ,lot.cellX,lot.cellZ),4);}
+    private static boolean hasFlight(CityLot lot,int floor){return floor>=0&&stillLifeFloor(lot,floor)!=0&&stillLifeFloor(lot,floor+1)!=0&&floor*6+10<Math.min(cityRoof(lot,-4,-3),cityRoof(lot,2,3));}
+    public static int cityStair(CityLot lot,int dx,int dz,int y){
+        int width=stairWidth(CITY_STAIR_WIDTH);
+        // Two three-step flights, a turning landing, and clearance for the complete walking route.
+        for(int floor=Math.max(0,y/6-1);floor<=y/6;floor++){
+            if(!hasFlight(lot,floor))continue;
+            int base=floor*6;
+            for(int step=0;step<6;step++){
+                boolean east=step<3;int x=east?-3+step:2-step,z=east?-3:1,sy=base+step+1;
+                if(dx==x&&dz>=z&&dz<z+width){
+                    if(y==sy)return east?4:5;
+                    if(y==sy-1)return 1;
+                    if(y>sy&&y<=sy+3)return 0;
+                }
+            }
+            if(dx>=0&&dx<=1&&dz>=-3&&dz<1+width){
+                if(y==base+3)return 1;
+                if(y>base+3&&y<=base+6)return 0;
+            }
+        }
+        return -1;
+    }
+    private static boolean campCandidate(long seed,int x,int z){
+        long priority=hash(seed^0xCA41L,x,z);if(Math.floorMod(priority,100)!=0)return false;
+        for(int dz=-2;dz<=2;dz++)for(int dx=-2;dx<=2;dx++)if(dx!=0||dz!=0){
+            long other=hash(seed^0xCA41L,x+dx,z+dz);
+            if(Math.floorMod(other,100)==0&&Long.compareUnsigned(other,priority)<0)return false;
+        }return true;
+    }
+    public static boolean isCamp(long seed,CityLot lot){return false;} // Camps no longer reserve city lots.
+    public static int campVoxel(int x,int z,int y,int variant){
+        if(y<1||y>5)return 0;
+        int q=(variant>>>2)&3;int a=q==1?z:q==2?-x:q==3?-z:x,b=q==1?-x:q==2?-z:q==3?x:z;return campBaseVoxel(a,b,y,variant);
+    }
+    private static int campBaseVoxel(int x,int z,int y,int variant){
+        if(variant>=16){
+            if(y==1&&x==1&&z==0)return 18;if(y==1&&x==1&&z==1)return 19;
+            if(y==1&&x==-1&&z==-1)return 8;if(y==1&&x==-1&&z==0)return 16;if(y==1&&x==-1&&z==1)return 17;
+            if(y<=3&&x==-1&&Math.abs(z)==2)return 2;
+            if(y==4&&Math.abs(x)<=1&&Math.abs(z)<=2)return 7;return 0;
+        }
+        int side=(variant&1)==0?1:-1;
+        if(y==1&&x==-5*side&&z==-2)return 8;
+        if(y==1&&x==-5*side&&z==0)return 16;
+        if(y==1&&x==-5*side&&z==1)return 17;
+        if(y==1&&x==1&&z==0)return 18;
+        if(y==1&&x==1&&z==1)return 19;
+        if(y==3&&x==1&&z==0)return 20;
+        if(y==1&&x==-4*side&&z==2)return 9;
+        if(y==1&&x>=3&&x<=5&&z==3)return 1;
+        if(z==-2&&Math.abs(x)==2&&y<=2)return 2;
+        if(Math.abs(z)<=2&&Math.abs(x)+y>=4&&Math.abs(x)+y<=5)return 7;
+        return 0;
+    }
+    public static boolean canExitPillarLadder(long seed,int x,int z){
+        int spacing=citySpacing(CITY_BUILDING_SPACING);
+        for(int dx=-1;dx<=1;dx++)for(int dz=-1;dz<=1;dz++){
+            int wx=x+dx,wz=z+dz;var lot=cityLot(seed,Math.floorDiv(wx,spacing),Math.floorDiv(wz,spacing));
+            var w=cityLot(seed,lot.cellX-1,lot.cellZ);var e=cityLot(seed,lot.cellX+1,lot.cellZ);
+            for(int y=1;y<=3;y++)if(cityVoxel(seed,lot,w,e,wx,wz,y)!=0)return false;
+        }return true;
+    }
+    // Independent traces of visitors, not a material variant of the formal skybridges.
+    public static boolean isVisitorSite(long seed,CityLot lot){return lot.enabled&&!isCamp(seed,lot)&&Math.floorMod(hash(seed^0xC0BB1EL,lot.cellX,lot.cellZ),100)<3;}
+    public static int visitorTowerHeight(long seed,CityLot lot){return 6+(int)Math.floorMod(hash(seed^0x70AEL,lot.cellX,lot.cellZ),23);}
+    private static int towerOffset(long seed,CityLot lot,int y,boolean z){
+        return (int)Math.floorMod(hash(seed^(z?0xACEL:0xBACL),lot.cellX*31+y/5,lot.cellZ),3)-1;
+    }
+    private static int visitorVoxel(long seed,CityLot start,CityLot end,int x,int z,int y){
+        int height=visitorTowerHeight(seed,start),shape=(int)Math.floorMod(hash(seed^0x5A9EL,start.cellX,start.cellZ),48);
+        int family=shape%4;
+        boolean crossing=family>=2&&end.enabled&&!isCamp(seed,end)&&!isVisitorSite(seed,end);
+        if(crossing)height=Math.min(height,cityRoof(end,-end.radius,0)-2);
+        int dx=x-start.centerX,dz=z-start.centerZ;
+        if(y<=height){
+            if(shape>=12&&y==height/2&&dz==0&&dx>=-2-shape%3&&dx<=1)return 23;
+            int a=towerOffset(seed,start,y,false),b=towerOffset(seed,start,y,true);
+            int nextA=towerOffset(seed,start,Math.max(1,y-1),false),nextB=towerOffset(seed,start,Math.max(1,y-1),true);
+            // Horizontal elbows join each jog to the preceding vertical column.
+            if(dx>=Math.min(a,nextA)&&dx<=Math.max(a,nextA)&&dz>=Math.min(b,nextB)&&dz<=Math.max(b,nextB))return 23;
+            if(family==1&&Math.abs(dx)<=1&&Math.abs(dz)<=1)return 23;
+            if(family==2&&y<=height/2&&dx>=-2&&dx<=0&&dz==0)return 23;
+            if(family==3&&y==height/2&&dx>=-3&&dx<=1&&dz==b)return 23;
+        }
+        int tx=start.centerX+towerOffset(seed,start,height,false),tz=start.centerZ+towerOffset(seed,start,height,true);
+        int platform=shape>=8?2:1;
+        if(y==height&&Math.abs(x-tx)<=platform&&Math.abs(z-tz)<=platform)return 23;
+        long supplies=hash(seed^0x5A991EL,start.cellX,start.cellZ);
+        if(y==height+1&&x==tx&&z==tz&&Math.floorMod(supplies,100)<45)return shape%2==0?25:8;
+        if(y==height+1&&x==tx-1&&z==tz-1&&Math.floorMod(supplies>>>8,100)<40)return 24;
+        if(shape>=4&&y==height+1&&x==tx+1&&z==tz+1)return shape%2==0?17:16;
+        // Small lean-to shelters and incomplete railings give the platforms separate identities.
+        if(shape>=8){
+            if(shape%3==0&&y>height&&y<=height+2&&x==tx-2&&Math.abs(z-tz)<=2)return 23;
+            if(y>height&&y<=height+3&&x==tx-2&&Math.abs(z-tz)==2)return 29;
+            if(y==height+3&&x>=tx-2&&x<=tx&&Math.abs(z-tz)<=2)return 33;
+        }else if(shape>=4&&y==height+1&&x==tx-1&&z==tz+1)return 2;
+        int endX=end.centerX-end.radius-1;
+        if(crossing&&x>tx&&x<=endX){
+            double t=(x-tx)/(double)(endX-tx),previous=(x-1-tx)/(double)(endX-tx);
+            int bend=(int)Math.floorMod(hash(seed^0xB12DL,start.cellX,start.cellZ),3)-1;
+            int cz=tz+(int)Math.round((end.centerZ-tz)*t)+bend*(int)Math.round(Math.sin(t*Math.PI));
+            int pz=tz+(int)Math.round((end.centerZ-tz)*previous)+bend*(int)Math.round(Math.sin(previous*Math.PI));
+            if(y==height&&z>=Math.min(cz,pz)&&z<=Math.max(cz,pz))return 23;
+            if(y==height+1&&z==cz&&Math.floorMod(x-tx,7)==0)return 2;
+        }
+        return 0;
+    }
+    private static boolean cityBridge(long seed,CityLot west,CityLot east) {
+        return west.enabled&&east.enabled&&!isCamp(seed,west)&&!isCamp(seed,east)&&!isVisitorSite(seed,west)&&!isVisitorSite(seed,east)&&Math.floorMod(hash(seed^0x83B7621L,west.cellX,west.cellZ),100)<25;
+    }
+    private static boolean footprint(CityLot lot,int dx,int dz){
+        return Math.abs(dx)<=lot.radius&&Math.abs(dz)<=lot.radius&&!(lot.variant==3&&dx>lot.radius-3&&dz>lot.radius-3);
+    }
+    public static int windowKind(long seed,CityLot lot,int dx,int dz,int floor){
+        int roll=(int)Math.floorMod(hash(seed^0x71D0FL,lot.centerX+dx+floor*37,lot.centerZ+dz),100);
+        if(roll<WINDOW_PANE_PERCENT)return 6;
+        if(roll<WINDOW_PANE_PERCENT+WINDOW_FENCE_PERCENT)return 2;
+        if(roll<WINDOW_PANE_PERCENT+WINDOW_FENCE_PERCENT+WINDOW_EMPTY_PERCENT)return 0;
+        return 3;
+    }
+    public static int cityRoof(CityLot lot,int dx,int dz){
+        return Math.max(CITY_BRIDGE_Y+doorwayHeight(CITY_DOORWAY_HEIGHT)+3,switch(lot.variant){
+            case 1->lot.height-Math.abs(dx);
+            case 2->Math.abs(dx)>lot.radius-2?lot.height-8:lot.height;
+            case 4->lot.height-(Math.abs(dx)+Math.abs(dz))/2;
+            case 5->lot.height-4+Math.abs(dx)/2;
+            case 6->dz>1?lot.height-6:lot.height;
+            case 7->lot.height-dx*dx/(lot.radius*2);
+            case 8->lot.height-Math.abs(dz);
+            case 9->Math.abs(dz)>lot.radius-2?lot.height-8:lot.height;
+            case 10->lot.height-Math.max(Math.abs(dx),Math.abs(dz))/2;
+            case 11->Math.abs(dx)<3?lot.height:lot.height-4;
+            case 12->lot.height-Math.floorMod(dx+lot.radius,4);
+            case 13->lot.height-(Math.abs(dx)+Math.abs(dz))/3;
+            case 14->lot.height-Math.max(0,Math.abs(dx)-3);
+            case 15->lot.height-(dz>0?6:0);
+            default->lot.height;});
+    }
+    private static int bridgeZ(CityLot a,CityLot b,int x){
+        double t=Math.max(0,Math.min(1,(x-a.centerX)/(double)(b.centerX-a.centerX)));
+        return (int)Math.round(a.centerZ+(b.centerZ-a.centerZ)*t);
+    }
+    // 0 air, 1 oak, 2 fence, 3 glass, 4 east-facing stair, 10..15 paired door halves.
+    public record CampSite(int x,int z,int base,int variant) {}
+    private record CampKey(long seed,int x,int z) {}
+    private static final java.util.Map<CampKey,java.util.Optional<CampSite>> CAMPS=new java.util.LinkedHashMap<>(256,.75f,true){protected boolean removeEldestEntry(java.util.Map.Entry<CampKey,java.util.Optional<CampSite>> e){return size()>256;}};
+    public static CampSite campSite(long seed,int tileX,int tileZ){
+        synchronized(CAMPS){var key=new CampKey(seed,tileX,tileZ);var cached=CAMPS.get(key);if(cached!=null)return cached.orElse(null);
+            CampSite site=null;long h=hash(seed^0xCA9151L,tileX,tileZ);
+            if(Math.floorMod(h,100)<35)for(int attempt=0;attempt<6&&site==null;attempt++){
+                long a=hash(h,tileX+attempt*31,tileZ);int x=tileX*64+8+(int)Math.floorMod(a,48),z=tileZ*64+8+(int)Math.floorMod(a>>>16,48);
+                var lot=cityLot(seed,Math.floorDiv(x,citySpacing(CITY_BUILDING_SPACING)),Math.floorDiv(z,citySpacing(CITY_BUILDING_SPACING)));
+                if(!lot.enabled||isVisitorSite(seed,lot))continue;
+                int base=attempt<4?cityRoof(lot,x-lot.centerX,z-lot.centerZ):0;
+                int variant=(int)Math.floorMod(a>>>32,16)+(attempt>=4?16:0);boolean clear=true;
+                for(int dz=-6;dz<=6&&clear;dz++)for(int dx=-6;dx<=6&&clear;dx++){
+                    boolean used=false;for(int y=1;y<=5;y++)if(campVoxel(dx,dz,y,variant)!=0){used=true;if(baseVoxelAt(seed,x+dx,z+dz,base+y)!=0){clear=false;break;}}
+                    if(used&&base>0){int floor=baseVoxelAt(seed,x+dx,z+dz,base);if(floor!=1&&floor!=23&&floor!=29)clear=false;}
+                    if(used&&base==0){var own=cityLot(seed,Math.floorDiv(x+dx,citySpacing(CITY_BUILDING_SPACING)),Math.floorDiv(z+dz,citySpacing(CITY_BUILDING_SPACING)));if(!own.enabled)clear=false;}
+                }
+                if(clear)site=new CampSite(x,z,base,variant);
+            }
+            CAMPS.put(key,java.util.Optional.ofNullable(site));return site;
+        }
+    }
+    private static int baseVoxelAt(long seed,int x,int z,int y){int spacing=citySpacing(CITY_BUILDING_SPACING);var lot=cityLot(seed,Math.floorDiv(x,spacing),Math.floorDiv(z,spacing));if(lot.enabled&&!isVisitorSite(seed,lot)&&x==lot.centerX+2&&z==lot.centerZ+2&&y>cityRoof(lot,2,2)&&y<CITY_MAX_HEIGHT+CITY_CEILING_GAP&&Math.floorMod(hash(seed^0xA17EL,lot.cellX,lot.cellZ),100)<3)return 2;return cityBaseVoxel(seed,lot,cityLot(seed,lot.cellX-1,lot.cellZ),cityLot(seed,lot.cellX+1,lot.cellZ),x,z,y);}
+    public static int cityVoxel(long seed,CityLot lot,CityLot west,CityLot east,int x,int z,int y){
+        var site=campSite(seed,Math.floorDiv(x,64),Math.floorDiv(z,64));
+        if(site!=null){int kind=campVoxel(x-site.x,z-site.z,y-site.base,site.variant);if(kind!=0)return kind;}
+        return cityBaseVoxel(seed,lot,west,east,x,z,y);
+    }
+    private static int cityBaseVoxel(long seed,CityLot lot,CityLot west,CityLot east,int x,int z,int y) {
+        if(!lot.enabled||y<1||y>CITY_MAX_HEIGHT)return 0;
+        int dx=x-lot.centerX,dz=z-lot.centerZ,r=lot.radius;
+        if(isCamp(seed,lot))return campVoxel(dx,dz,y,lot.variant);
+        if(isVisitorSite(seed,lot))return visitorVoxel(seed,lot,east,x,z,y);
+        boolean toWest=cityBridge(seed,west,lot),toEast=cityBridge(seed,lot,east);
+        int antennaRoof=cityRoof(lot,2,2);
+        if(Math.floorMod(hash(seed^0xA17EL,lot.cellX,lot.cellZ),100)<15&&y>cityRoof(lot,dx,dz)
+                &&(dx==2&&dz==2&&y>antennaRoof&&y<=antennaRoof+4||dx==3&&dz==2&&y==antennaRoof+3))return 2;
+        if(footprint(lot,dx,dz)){
+            int top=cityRoof(lot,dx,dz);if(y>top)return 0;
+            if(stillLifeFloor(lot,y/CITY_FLOOR_HEIGHT)==0)return 1;
+            // Complete stepped roof slabs, including setback shoulders, before carving any openings.
+            if(y>=top-(lot.variant==12?3:1))return 1;
+            boolean edgeX=!footprint(lot,dx-1,dz)||!footprint(lot,dx+1,dz)||cityRoof(lot,dx-1,dz)<y||cityRoof(lot,dx+1,dz)<y;
+            boolean edgeZ=!footprint(lot,dx,dz-1)||!footprint(lot,dx,dz+1)||cityRoof(lot,dx,dz-1)<y||cityRoof(lot,dx,dz+1)<y;
+            boolean wall=edgeX||edgeZ;
+            int doorBase=dz==-r&&dx==0?0:dx==-r&&toWest&&Math.abs(z-bridgeZ(west,lot,x))==0?CITY_BRIDGE_Y:dx==r&&toEast&&Math.abs(z-bridgeZ(lot,east,x))==0?CITY_BRIDGE_Y:-99;
+            int dh=doorwayHeight(CITY_DOORWAY_HEIGHT);
+            if(wall&&doorBase>=0&&y>doorBase&&y<=doorBase+dh){
+                int rise=y-doorBase;
+                if(rise>2)return 3;
+                if(Math.floorMod(hash(seed^0xD001L,lot.cellX,lot.cellZ),100)<CITY_OPEN_DOORWAY_PERCENT)return 0;
+                int facing=doorBase==0?10:dx>0?12:14;
+                return facing+rise-1;
+            }
+            int roomDetail=roomSettlementVoxel(seed,lot,dx,dz,y);if(roomDetail>=0)return roomDetail;
+            int phase=y%CITY_FLOOR_HEIGHT;
+            if(!wall){int detail=stillLifeVoxel(lot,dx,dz,y);if(detail>=0)return detail;}
+            if(!wall){int access=usesLadder(lot)?ladderVoxel(lot,dx,dz):cityStair(lot,dx,dz,y);if(access>=0)return access;}
+            if(phase==0)return 1;
+            if(wall){
+                if(!(edgeX&&edgeZ)&&Math.abs(dx)<r-1&&Math.abs(dz)<r-1)return 1;
+                boolean awayFromCorners=edgeX?Math.abs(dz)<r-1:Math.abs(dx)<r-1;
+                int along=edgeX?dz:dx;
+                if(awayFromCorners&&!(edgeX&&edgeZ)&&phase>=2&&phase<=3&&Math.floorMod(along,buildingDesign(lot)==1?4:3)==0)return windowKind(seed,lot,dx,dz,y/CITY_FLOOR_HEIGHT);
+                return buildingDesign(lot)==2&&edgeX&&edgeZ?29:1;
+            }
+            return 0;
+        }
+        if(dx < -r&&isVisitorSite(seed,west)){int trace=visitorVoxel(seed,west,lot,x,z,y);if(trace!=0)return trace;}
+        boolean left=dx < -r&&toWest,right=dx>r&&toEast;
+        int center=left?bridgeZ(west,lot,x):bridgeZ(lot,east,x);
+        if(left||right){
+            int next=left?bridgeZ(west,lot,x+1):bridgeZ(lot,east,x+1);
+            boolean rail=(z>=Math.min(center-2,next-2)&&z<=Math.max(center-2,next-2))
+                    ||(z>=Math.min(center+2,next+2)&&z<=Math.max(center+2,next+2));
+            // Join rail turns with face-connected elbows; support every elbow with deck below.
+            if(y==CITY_BRIDGE_Y&&(Math.abs(z-center)<=2||rail))return 1;
+            if(y==CITY_BRIDGE_Y+1&&rail)return 2;
+
+        }
+        // Streets remain flush with the plate: only occasional unlit, fence-only posts rise above it.
+        int spacing=citySpacing(CITY_BUILDING_SPACING),lx=Math.floorMod(x,spacing),lz=Math.floorMod(z,spacing);
+        boolean post=Math.floorMod(hash(seed^0x1A6FL,lot.cellX,lot.cellZ),100)<15;
+        if(post&&lz==spacing/2&&((lx==0&&y<=4)||(lx==1&&y==4)))return 2;
+        return 0;
+    }
+    public static net.minecraft.world.level.block.state.BlockState cityState(long seed,CityLot lot,CityLot west,CityLot east,int x,int z,int y,int kind){
+        var camp=campSite(seed,Math.floorDiv(x,64),Math.floorDiv(z,64));
+        if(camp!=null&&campVoxel(x-camp.x,z-camp.z,y-camp.base,camp.variant)==kind&&kind!=0)lot=new CityLot(lot.cellX,lot.cellZ,camp.x,camp.z,lot.radius,lot.height,camp.variant,true);
+        if(kind==40)return net.minecraft.world.level.block.Blocks.FURNACE.defaultBlockState().setValue(net.minecraft.world.level.block.FurnaceBlock.FACING,net.minecraft.core.Direction.WEST);
+        if(kind==41)return net.minecraft.world.level.block.Blocks.CHEST.defaultBlockState().setValue(net.minecraft.world.level.block.ChestBlock.FACING,net.minecraft.core.Direction.WEST);
+        if(kind==42)return net.minecraft.world.level.block.Blocks.OAK_WALL_SIGN.defaultBlockState().setValue(net.minecraft.world.level.block.WallSignBlock.FACING,net.minecraft.core.Direction.WEST);
+        if(kind==43)return (Math.floorMod(hash(seed,x,z),4)==0?net.minecraft.world.level.block.Blocks.ANDESITE:net.minecraft.world.level.block.Blocks.COBBLESTONE).defaultBlockState();
+        if(kind==44)return net.minecraft.world.level.block.Blocks.SHROOMLIGHT.defaultBlockState();
+        if(kind==45||kind==46)return settlementBed(seed,lot.centerX,lot.centerZ).defaultBlockState().setValue(net.minecraft.world.level.block.BedBlock.FACING,(roomSettlementDesign(seed,lot,y/6)&32)!=0?net.minecraft.core.Direction.NORTH:net.minecraft.core.Direction.SOUTH).setValue(net.minecraft.world.level.block.BedBlock.PART,kind==45?net.minecraft.world.level.block.state.properties.BedPart.FOOT:net.minecraft.world.level.block.state.properties.BedPart.HEAD);
+        if(kind==47)return net.minecraft.world.level.block.Blocks.BOOKSHELF.defaultBlockState();
+        if(kind==30)return net.minecraft.world.level.block.Blocks.OAK_WALL_SIGN.defaultBlockState().setValue(net.minecraft.world.level.block.WallSignBlock.FACING,net.minecraft.core.Direction.NORTH);
+        if(kind==32)return net.minecraft.world.level.block.Blocks.OAK_SIGN.defaultBlockState().setValue(net.minecraft.world.level.block.StandingSignBlock.ROTATION,8);
+        if(kind==31)return net.minecraft.world.level.block.Blocks.OAK_STAIRS.defaultBlockState().setValue(net.minecraft.world.level.block.StairBlock.FACING,net.minecraft.core.Direction.NORTH);
+        if(kind==33)return net.minecraft.world.level.block.Blocks.OAK_SLAB.defaultBlockState();
+        if(kind==23)return net.minecraft.world.level.block.Blocks.COBBLESTONE.defaultBlockState();
+        if(kind==24)return net.minecraft.world.level.block.Blocks.TORCH.defaultBlockState();
+        if(kind==25)return net.minecraft.world.level.block.Blocks.CHEST.defaultBlockState();
+        if(kind==27||kind==28)return net.minecraft.world.level.block.Blocks.LADDER.defaultBlockState().setValue(net.minecraft.world.level.block.LadderBlock.FACING,kind==27?net.minecraft.core.Direction.EAST:net.minecraft.core.Direction.WEST);
+        if(kind==29)return net.minecraft.world.level.block.Blocks.OAK_LOG.defaultBlockState();
+        if(kind==16)return net.minecraft.world.level.block.Blocks.FURNACE.defaultBlockState().setValue(net.minecraft.world.level.block.FurnaceBlock.FACING,(lot.variant&1)==0?net.minecraft.core.Direction.EAST:net.minecraft.core.Direction.WEST);
+        if(kind==17)return net.minecraft.world.level.block.Blocks.CRAFTING_TABLE.defaultBlockState();
+        if(kind==18||kind==19)return settlementBed(seed,lot.centerX,lot.centerZ).defaultBlockState().setValue(net.minecraft.world.level.block.BedBlock.FACING,switch((lot.variant>>>2)&3){case 1->net.minecraft.core.Direction.WEST;case 2->net.minecraft.core.Direction.NORTH;case 3->net.minecraft.core.Direction.EAST;default->net.minecraft.core.Direction.SOUTH;}).setValue(net.minecraft.world.level.block.BedBlock.PART,kind==18?net.minecraft.world.level.block.state.properties.BedPart.FOOT:net.minecraft.world.level.block.state.properties.BedPart.HEAD);
+        if(kind==20)return net.minecraft.world.level.block.Blocks.LANTERN.defaultBlockState().setValue(net.minecraft.world.level.block.LanternBlock.HANGING,true);
+        if(kind==7)return (lot.variant%3==0?net.minecraft.world.level.block.Blocks.WHITE_WOOL:lot.variant%3==1?net.minecraft.world.level.block.Blocks.LIGHT_GRAY_WOOL:net.minecraft.world.level.block.Blocks.GRAY_WOOL).defaultBlockState();
+        if(kind==8)return net.minecraft.world.level.block.Blocks.BARREL.defaultBlockState();
+        if(kind==9)return net.minecraft.world.level.block.Blocks.CAMPFIRE.defaultBlockState().setValue(net.minecraft.world.level.block.CampfireBlock.LIT,false);
+        if(kind==3)return net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState();
+        if(kind==4||kind==5)return net.minecraft.world.level.block.Blocks.OAK_STAIRS.defaultBlockState().setValue(net.minecraft.world.level.block.StairBlock.FACING,kind==4?net.minecraft.core.Direction.EAST:net.minecraft.core.Direction.WEST);
+        if(kind>=10&&kind<=15){
+            var facing=kind<12?net.minecraft.core.Direction.NORTH:kind<14?net.minecraft.core.Direction.EAST:net.minecraft.core.Direction.WEST;
+            return net.minecraft.world.level.block.Blocks.OAK_DOOR.defaultBlockState().setValue(net.minecraft.world.level.block.DoorBlock.FACING,facing)
+                .setValue(net.minecraft.world.level.block.DoorBlock.HALF,(kind&1)==0?net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER:net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER);
+        }
+        if(kind==2||kind==6){
+            var fence=(kind==6?net.minecraft.world.level.block.Blocks.GLASS_PANE:net.minecraft.world.level.block.Blocks.OAK_FENCE).defaultBlockState();
+            for(var dir:new net.minecraft.core.Direction[]{net.minecraft.core.Direction.NORTH,net.minecraft.core.Direction.EAST,net.minecraft.core.Direction.SOUTH,net.minecraft.core.Direction.WEST}){
+                int nx=x+dir.getStepX(),nz=z+dir.getStepZ(),spacing=citySpacing(CITY_BUILDING_SPACING);
+                var own=Math.floorDiv(nx,spacing)==lot.cellX&&Math.floorDiv(nz,spacing)==lot.cellZ?lot:cityLot(seed,Math.floorDiv(nx,spacing),Math.floorDiv(nz,spacing));
+                var w=cityLot(seed,own.cellX-1,own.cellZ);var e=cityLot(seed,own.cellX+1,own.cellZ);
+                int neighbor=cityVoxel(seed,own,w,e,nx,nz,y);
+                var property=dir==net.minecraft.core.Direction.NORTH?net.minecraft.world.level.block.FenceBlock.NORTH:dir==net.minecraft.core.Direction.EAST?net.minecraft.world.level.block.FenceBlock.EAST:dir==net.minecraft.core.Direction.SOUTH?net.minecraft.world.level.block.FenceBlock.SOUTH:net.minecraft.world.level.block.FenceBlock.WEST;
+                fence=fence.setValue(property,neighbor!=0&&neighbor<10);
+            }
+            return fence;
+        }
+        return net.minecraft.world.level.block.Blocks.OAK_PLANKS.defaultBlockState();
+    }
+    private static void generateCityColumn(net.minecraft.world.level.WorldGenLevel level,net.minecraft.world.level.chunk.ChunkAccess chunk,
+            net.minecraft.core.BlockPos.MutableBlockPos pos,long seed,CityLot lot,CityLot west,CityLot east,
+            int x,int z,int plateY,net.minecraft.world.level.block.state.BlockState plank,
+            net.minecraft.world.level.block.state.BlockState fence) {
+
+        if(!isCamp(seed,lot)&&!isVisitorSite(seed,lot)&&x==lot.centerX+2&&z==lot.centerZ+2&&Math.floorMod(hash(seed^0xA17EL,lot.cellX,lot.cellZ),100)<3){
+            int roof=cityRoof(lot,2,2);
+            for(int ay=roof+1;ay<getCityCeilingY(level.getMaxBuildHeight())-plateY;ay++){pos.set(x,plateY+ay,z);chunk.setBlockState(pos,fence.setValue(net.minecraft.world.level.block.FenceBlock.EAST,false).setValue(net.minecraft.world.level.block.FenceBlock.WEST,false).setValue(net.minecraft.world.level.block.FenceBlock.NORTH,false).setValue(net.minecraft.world.level.block.FenceBlock.SOUTH,false),false);}
+        }
+        int ground=roomSettlementVoxel(seed,lot,x-lot.centerX,z-lot.centerZ,0);
+        if(ground==43||ground==44){pos.set(x,plateY,z);chunk.setBlockState(pos,cityState(seed,lot,west,east,x,z,0,ground),false);}
+        int limit=getCityCeilingY(level.getMaxBuildHeight())-plateY-1;
+        for(int dy=1;dy<=limit;dy++){
+            int kind=cityVoxel(seed,lot,west,east,x,z,dy);
+            if(kind==0){
+                if(!isCamp(seed,lot)&&!isVisitorSite(seed,lot)&&!usesLadder(lot)&&footprint(lot,x-lot.centerX,z-lot.centerZ)&&cityStair(lot,x-lot.centerX,z-lot.centerZ,dy)==0){
+                    pos.set(x,plateY+dy,z);var obstructing=chunk.getBlockState(pos);
+                    if(obstructing.is(net.minecraft.world.level.block.Blocks.OAK_PLANKS)||obstructing.is(net.minecraft.world.level.block.Blocks.OAK_STAIRS))chunk.setBlockState(pos,net.minecraft.world.level.block.Blocks.AIR.defaultBlockState(),false);
+                }
+                continue;
+            }
+            pos.set(x,plateY+dy,z);
+            // The city owns a reserved band over its plate. Never overwrite block entities or bedrock.
+            var old=chunk.getBlockState(pos);
+            if(old.hasBlockEntity()){ensureGeneratedBlockEntity(level,pos,old);continue;}
+            if(old.is(net.minecraft.world.level.block.Blocks.BEDROCK))continue;
+            var state=cityState(seed,lot,west,east,x,z,dy,kind);
+            if(old!=state){chunk.setBlockState(pos,state,false);
+                ensureGeneratedBlockEntity(level,pos,state);
+                if(kind==8||kind==25||kind==41)placeSettlementLoot(level,pos,state);
+                if(kind==30||kind==32||kind==42)labelStillLife(level,pos,lot,dy,kind);
+            }
+        }
+    }
+
 
     public static void autoGenerateDataPackJsons() {
         if (!ENABLE_AUTO_DATAPACK_GEN) return;

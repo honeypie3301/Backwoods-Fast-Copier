@@ -53,11 +53,14 @@ public class BackwoodsThreatSystemProcedure {
     private static final ResourceKey<Level> ROTTING_DIM =
             ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:rotting"));
 
+    private static final ResourceKey<Level> CROSSWORKS_DIM = ResourceKey.create(Registries.DIMENSION, Identifier.parse("the_backwoods:the_crossworks"));
+
     private static final Set<ResourceKey<Level>> VALID_THREAT_DIMENSIONS = Set.of(
             BACKWOODS_DIM,
             SUB_STRATA_DIM,
             GRAIN_DIM,
-            ROTTING_DIM
+            ROTTING_DIM,
+            CROSSWORKS_DIM
     );
 
     private static boolean isValidThreatDimension(Level level) {

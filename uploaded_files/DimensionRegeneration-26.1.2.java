@@ -52,27 +52,33 @@ import java.util.zip.GZIPOutputStream;
  */
 @EventBusSubscriber
 public final class DimensionRegeneration {
+    // Source-only toggles. Rebuild/restart after changing; no config file is generated.
+    private static final boolean ENABLED=true;
+    private static final boolean CHAT_STATUS_ENABLED=true;
+    private static final int CHAT_STATUS_INTERVAL_TICKS=20;
     private static final int RADIUS_BLOCKS = 128;
     private static final long TICK_BUDGET_NANOS = 2_000_000L;
-    private static final long QUIET_BUDGET_NANOS = 100_000L, RECORDING_BUDGET_NANOS = 750_000L;
-    private static final int SECTION_CHECK_INTERVAL = 20, MAX_SECTION_CHECKS_PER_TICK = 128;
+    private static final long QUIET_BUDGET_NANOS = 750_000L, RECORDING_BUDGET_NANOS = 750_000L;
+    private static final int SECTION_CHECK_INTERVAL = 5, MAX_SECTION_CHECKS_PER_TICK = 256;
     private static final int MAX_COMPARISONS_PER_TICK = 32_768;
     // Source-only speed controls. A continuous per-tick quota; unused quota never accumulates.
-    private static final int BASE_PLACEMENTS_PER_TICK = 12, PEAK_PLACEMENTS_PER_TICK = 12;
-    private static final int ACCELERATION_INTERVAL_TICKS = 200;
-    private static final int NETWORK_MIN_TICKS = 600, NETWORK_FALLBACK_TICKS = 2400;
-    private static final int STRAND_IDLE_TIMEOUT_TICKS = 200;
-    private static final int MAX_PLACEMENTS_PER_TICK = 12;
-    private static final long SNAPSHOT_CACHE_BYTES = 256L * 1024 * 1024;
-    private static final int MAX_WOUND_CELLS = 131_072;
+    private static final int BASE_PLACEMENTS_PER_TICK = 12, PEAK_PLACEMENTS_PER_TICK = 2880;
+    private static final int ACCELERATION_INTERVAL_TICKS = 20;
+    private static final int NETWORK_MIN_TICKS = 100, NETWORK_FALLBACK_TICKS = 600;
+    private static final int STRAND_IDLE_TIMEOUT_TICKS = 200, NETWORK_SETTLE_TICKS=40;
+    private static final int MAX_PLACEMENTS_PER_TICK = 2880;
+    private static final long SNAPSHOT_CACHE_BYTES = 512L * 1024 * 1024;
+    private static final int MAX_WOUND_CELLS = 524_288;
     private static final int HEAL_DELAY_TICKS = 100;
+    private static final int FEED_BOOST_TICKS=100, MAX_FEED_QUERIES_PER_TICK=2;
+    private static final int MAX_CONSUMED_ITEMS_PER_TICK=128, MAX_CONSUMED_ENTITIES_PER_TICK=16;
     private static final List<Integer> GROWTH_INTERVAL_TICKS = List.of(10, 16, 24, 34);
-    private static final int TENDON_LIFETIME_TICKS = 240;
+    private static final int TENDON_LIFETIME_TICKS = 80;
     private static final int MAX_TENDON_RADIUS = 2, RETRACTION_INTERVAL_TICKS = 2;
     private static final List<Integer> DAMAGE_THRESHOLDS = List.of(64, 512, 4096);
     private static final List<Integer> TENDON_DIAMETERS = List.of(1, 3, 5, 7);
     private static final String TENDON_BLOCK = "the_backwoods:lignum_caro";
-    private static final boolean LOG_METRICS = false;
+    private static final boolean LOG_METRICS = true;
     private static final int MAX_DETOUR_DISTANCE = 48, MAX_DETOUR_NODES = 4096;
     private static final int MAX_DETOUR_JOBS = 16, MAX_DETOUR_LENGTH = 192;
     private static final int MAX_SPAN_DISTANCE = 256, MAX_ROUTE_EXTRA_CELLS = 32768;
@@ -101,7 +107,7 @@ public final class DimensionRegeneration {
     }
     private static void validateConfiguration() {
         if(RADIUS_BLOCKS<0||RADIUS_BLOCKS>512||TICK_BUDGET_NANOS<=0||MAX_COMPARISONS_PER_TICK<1
-                ||MAX_PLACEMENTS_PER_TICK<1||SNAPSHOT_CACHE_BYTES<1_048_576||MAX_WOUND_CELLS<1
+                ||CHAT_STATUS_INTERVAL_TICKS<1||MAX_PLACEMENTS_PER_TICK<1||SNAPSHOT_CACHE_BYTES<1_048_576||MAX_WOUND_CELLS<1
                 ||HEAL_DELAY_TICKS<0||TENDON_LIFETIME_TICKS<40
                 ||DAMAGE_THRESHOLDS.size()+1!=TENDON_DIAMETERS.size()||GROWTH_INTERVAL_TICKS.size()!=TENDON_DIAMETERS.size())
             throw new IllegalArgumentException("Invalid DimensionRegeneration configuration");
@@ -185,7 +191,37 @@ public final class DimensionRegeneration {
     public static long fillTile(BlockPos pos){return BlockPos.asLong(pos.getX()>>1,pos.getY()>>1,pos.getZ()>>1);}
     public static int materialDelay(long position){return TENDON_LIFETIME_TICKS+Math.floorMod(position^(position>>>23),20);}
     public static int adaptedInterval(int interval,int trauma){return Math.max(1,interval*8/(8+Math.min(64,Math.max(0,trauma))));}
-    public static int healingRate(int damage,long age){return Math.min(PEAK_PLACEMENTS_PER_TICK,BASE_PLACEMENTS_PER_TICK+Math.min(Math.max(0,damage)/512,(int)Math.min(PEAK_PLACEMENTS_PER_TICK-BASE_PLACEMENTS_PER_TICK,Math.max(0,age)/ACCELERATION_INTERVAL_TICKS)));}
+    public static int healingRate(int damage,long age){
+        int increase=Math.min(PEAK_PLACEMENTS_PER_TICK-BASE_PLACEMENTS_PER_TICK,(damage<64?0:Math.max(0,damage)/8));
+        long ramp=Math.min(200,Math.max(0,age));
+        return BASE_PLACEMENTS_PER_TICK+(int)(increase*ramp/200);
+    }
+    public static int difficultyPlacements(int normal,boolean hard){return Math.max(0,Math.min(MAX_PLACEMENTS_PER_TICK,normal))*(hard?2:1);}
+    public static net.minecraft.world.phys.Vec3 feedingVelocity(net.minecraft.world.phys.Vec3 current,net.minecraft.world.phys.Vec3 offset,boolean gravity){
+        double distance=offset.length();var desired=distance<0.001?net.minecraft.world.phys.Vec3.ZERO:offset.scale(0.18/distance);
+        var velocity=current.scale(0.55).add(desired.scale(0.45)).add(0,gravity?0.04:0,0);double speed=velocity.length();
+        return speed>0.18?velocity.scale(0.18/speed):velocity;
+    }
+    public static int coordinatedInterval(int interval,String dimension,BlockPos anchor,long now){
+        long epoch=Math.floorDiv(now,400),hash=((long)dimension.hashCode()<<32)^((long)(anchor.getX()>>6)*0x9E3779B97F4A7C15L)
+                ^((long)(anchor.getY()>>6)*0xC2B2AE3D27D4EB4FL)^((long)(anchor.getZ()>>6)*0x165667B19E3779F9L)^epoch*0xD6E8FEB86659FD93L;
+        hash^=hash>>>33;hash*=0xFF51AFD7ED558CCDL;hash^=hash>>>33;
+        boolean pulse=Math.floorMod(hash,4)==0&&Math.floorMod(now+Math.floorMod(hash>>>8,40),40)<8;
+        return pulse?Math.max(1,interval*4/5):interval;
+    }
+    public static long workBudgetNanos(long averageTick,long targetTick){
+        long headroom=Math.max(0,Math.max(1,targetTick)-Math.max(0,averageTick));
+        return Math.min(TICK_BUDGET_NANOS*4,Math.max(500_000L,headroom/5));
+    }
+    public static int adaptivePlacementLimit(int current,int desired,long averageTick,long targetTick,long previousWork,boolean ramp){
+        desired=Math.max(1,Math.min(MAX_PLACEMENTS_PER_TICK,desired));current=Math.max(1,Math.min(current,desired));
+        long target=Math.max(1,targetTick);
+        long work=workBudgetNanos(averageTick,target);
+        if(averageTick>=target-target/10||previousWork>work+work/4)
+            return Math.max(1,current-Math.max(2,current/4));
+        if(ramp&&averageTick<target-target/4)return Math.min(desired,current+Math.min(12,Math.max(1,(desired-current+31)/32)));
+        return current;
+    }
     /** Local topology guard: deleting a voxel must not split its face-connected remaining tissue. */
     public static boolean retractionLeavesConnected(Set<BlockPos> tissue) {
         Set<BlockPos> faces=new HashSet<>();for(Direction side:DIRECTIONS)if(tissue.contains(BlockPos.ZERO.relative(side)))faces.add(BlockPos.ZERO.relative(side));
@@ -195,11 +231,21 @@ public final class DimensionRegeneration {
         return visited.containsAll(faces);
     }
     public static boolean networkPhaseReady(long age,long idle,int active,boolean targetReached){
-        return age>=NETWORK_MIN_TICKS&&(active==0&&(targetReached||age>=NETWORK_FALLBACK_TICKS)
-                ||age>=NETWORK_FALLBACK_TICKS&&idle>=STRAND_IDLE_TIMEOUT_TICKS);
+        return age>=NETWORK_MIN_TICKS&&(active==0&&(targetReached||idle>=NETWORK_SETTLE_TICKS)||age>=NETWORK_FALLBACK_TICKS);
+    }
+    public static boolean visibleNetworkReady(int volume,int extent,int depth,long visibleAge){
+        int required=Math.min(12,Math.max(2,extent/6));
+        return volume<64||depth>=required&&visibleAge>=100;
+    }
+    public static int routeWorkLimit(int placements){return Math.max(32,Math.min(256,placements));}
+    public static int parallelSpans(int volume){return Math.min(MAX_DETOUR_JOBS,2+Math.max(0,volume)/1024);}
+    public static int tendonNetworkTarget(int volume,int width,int height,int depth){
+        int desired=volume<512?2:volume<4096?8:volume<16384?16:volume<65536?32:48;
+        long cross=Math.min((long)width*height,Math.min((long)width*depth,(long)height*depth));
+        return Math.min(desired,(int)Math.min(48,Math.max(2,cross*2)));
     }
     public static int tipRadius(int maximum,int behind){return Math.min(maximum,Math.max(0,behind));}
-    private static boolean enabled(ServerLevel level) { return DIMENSIONS.contains(level.dimension().identifier().toString()); }
+    private static boolean enabled(ServerLevel level) { return ENABLED && DIMENSIONS.contains(level.dimension().identifier().toString()); }
     private static Runtime runtime(ServerLevel level) { return SERVERS.computeIfAbsent(level.getServer(), Runtime::new); }
     public static boolean isTemporary(LevelAccessor world, BlockPos pos) {
         if (!(world instanceof ServerLevel level) || !enabled(level)) return false;
@@ -280,6 +326,20 @@ public final class DimensionRegeneration {
         } else rt.defer(level, event.getPos(), event.getPlacedBlock(), false);
     }
     @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onNeighborChange(BlockEvent.NeighborNotifyEvent event) {
+        if(event.isCanceled()||!(event.getLevel() instanceof ServerLevel level)||!enabled(level))return;
+        Runtime rt=runtime(level);rt.changed(level,event.getPos());
+        for(Direction side:event.getNotifiedSides())rt.changed(level,event.getPos().relative(side));
+    }
+    @SubscribeEvent(priority = EventPriority.LOWEST)
+    public static void onFallingBlock(net.neoforged.neoforge.event.entity.EntityJoinLevelEvent event) {
+        if(event.isCanceled()||event.loadedFromDisk()||!(event.getLevel() instanceof ServerLevel level)||!enabled(level)
+                ||!(event.getEntity() instanceof net.minecraft.world.entity.item.FallingBlockEntity falling))return;
+        // Viltrumite launches vanilla falling blocks at the removed terrain cell.
+        // Observe only an existing baseline: another mod's moving block is not proof of pristine terrain.
+        Runtime rt=runtime(level);rt.changed(level,falling.blockPosition());
+    }
+    @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onLivingDestroy(LivingDestroyBlockEvent event) {
         if (event.isCanceled() || !woodbound(event.getEntity()) || !(event.getEntity().level() instanceof ServerLevel level)
                 || !enabled(level)) return;
@@ -299,10 +359,12 @@ public final class DimensionRegeneration {
         for (BlockPos pos : event.getAffectedBlocks()) {
             if (--remaining < 0) break;
             rt.capture(level, pos, level.getBlockState(pos));
+            rt.prioritize(Key.of(level,pos));
         }
     }
     private static boolean woodbound(Entity entity) { return entity != null && entity.getType().builtInRegistryHolder().is(WOODBOUND); }
     @SubscribeEvent public static void tick(ServerTickEvent.Post event) {
+        if(!ENABLED)return;
         Runtime rt = SERVERS.computeIfAbsent(event.getServer(), Runtime::new);
         rt.tick();
     }
@@ -312,6 +374,83 @@ public final class DimensionRegeneration {
     }
 
     private record Position(String dimension, long packed) {}
+    private static final int MAX_WOUND_CHUNK_ADMISSIONS_PER_TICK=2, WOUND_TICKET_RADIUS=2; // Level 31: entity-ticking centers, matching forced-chunk readiness.
+    private static final net.minecraft.server.level.TicketType WOUND_TICKET=new net.minecraft.server.level.TicketType(0,net.minecraft.server.level.TicketType.FLAG_LOADING|net.minecraft.server.level.TicketType.FLAG_SIMULATION|net.minecraft.server.level.TicketType.FLAG_KEEP_DIMENSION_ACTIVE);
+    private record WoundChunk(String dimension,int x,int z) {}
+    /** Equal per-chunk shares; extras rotate and unused shares expire each tick. */
+    private static final class ChunkPacing<K>{
+        final LinkedHashMap<K,Boolean> active=new LinkedHashMap<>();
+        final Map<K,Integer> quota=new HashMap<>(),used=new HashMap<>();
+        void register(K key,boolean present){if(present)active.put(key,true);else{active.remove(key);quota.remove(key);used.remove(key);}}
+        void begin(int limit){
+            quota.clear();used.clear();int count=active.size();if(count==0)return;
+            int base=limit/count,extra=limit%count,visits=Math.min(count,limit);
+            for(int i=0;i<visits;i++){
+                var iterator=active.keySet().iterator();K key=iterator.next();iterator.remove();active.put(key,true);
+                quota.put(key,base+(i<extra?1:0));
+            }
+            if(visits==count&&count>1){var iterator=active.keySet().iterator();K key=iterator.next();iterator.remove();active.put(key,true);}
+        }
+        boolean allows(K key){return used.getOrDefault(key,0)<quota.getOrDefault(key,active.containsKey(key)?0:1);}
+        void placed(K key){used.merge(key,1,Integer::sum);}
+    }
+    /** Visit each wound column in turn instead of walking one giant global cell queue. */
+    private static final class ChunkRepairQueue{
+        final LinkedHashMap<WoundChunk,ArrayDeque<Cell>> columns=new LinkedHashMap<>();
+        void add(Cell cell){columns.computeIfAbsent(new WoundChunk(cell.key.dimension,cell.key.x,cell.key.z),k->new ArrayDeque<>()).add(cell);}
+        Cell poll(){
+            if(columns.isEmpty())return null;var iterator=columns.entrySet().iterator();var entry=iterator.next();
+            WoundChunk key=entry.getKey();ArrayDeque<Cell> queue=entry.getValue();iterator.remove();Cell cell=queue.poll();
+            if(!queue.isEmpty())columns.put(key,queue);return cell;
+        }
+        void removeColumn(WoundChunk key){columns.remove(key);}
+        boolean isEmpty(){return columns.isEmpty();}
+    }
+    private record FoodKey(String dimension,int x,int y,int z){}
+    private record FoodSite(BlockPos pos,long expires){}
+    private static final class FeedingPull{
+        final net.minecraft.world.entity.item.ItemEntity item;
+        final String dimension;final BlockPos target;final net.minecraft.world.item.Item material;
+        final long started,expires;
+        FeedingPull(net.minecraft.world.entity.item.ItemEntity item,String dimension,BlockPos target,net.minecraft.world.item.Item material,long now){
+            this.item=item;this.dimension=dimension;this.target=target.immutable();this.material=material;started=now;expires=now+100;
+        }
+    }
+    private static final class NourishmentField{
+        final LinkedHashMap<FoodKey,ArrayDeque<FoodSite>> sites=new LinkedHashMap<>();
+        void feed(String dimension,BlockPos pos,long now){
+            var bucket=sites.computeIfAbsent(new FoodKey(dimension,pos.getX()>>5,pos.getY()>>5,pos.getZ()>>5),key->new ArrayDeque<>());
+            bucket.removeIf(site->site.expires<=now||site.pos.equals(pos));
+            bucket.add(new FoodSite(pos.immutable(),now+FEED_BOOST_TICKS));while(bucket.size()>8)bucket.remove();
+            while(sites.size()>1024){var iterator=sites.keySet().iterator();iterator.next();iterator.remove();}
+        }
+        long expires(String dimension,BlockPos pos,long now){
+            long expiry=now;int x=pos.getX()>>5,y=pos.getY()>>5,z=pos.getZ()>>5;
+            for(int dz=-1;dz<=1;dz++)for(int dy=-1;dy<=1;dy++)for(int dx=-1;dx<=1;dx++){
+                var bucket=sites.get(new FoodKey(dimension,x+dx,y+dy,z+dz));if(bucket==null)continue;
+                for(FoodSite site:bucket){if(site.expires<=now)continue;
+                    long sx=(long)site.pos.getX()-pos.getX(),sy=(long)site.pos.getY()-pos.getY(),sz=(long)site.pos.getZ()-pos.getZ();
+                    if(sx*sx+sy*sy+sz*sz<=32L*32)expiry=Math.max(expiry,site.expires);
+                }
+            }
+            return expiry;
+        }
+        void prune(long now){sites.values().removeIf(bucket->{bucket.removeIf(site->site.expires<=now);return bucket.isEmpty();});}
+    }
+    private static final class WoundLoadingQueue {
+        final Map<WoundChunk,Integer> references=new HashMap<>();
+        final ArrayDeque<WoundChunk> order=new ArrayDeque<>();
+        final Set<WoundChunk> queued=new HashSet<>();
+        void offer(WoundChunk column){if(references.containsKey(column)&&queued.add(column))order.add(column);}
+        WoundChunk poll(){var column=order.poll();if(column!=null)queued.remove(column);return column;}
+        void update(WoundChunk column,int delta){int previous=references.getOrDefault(column,0),count=previous+delta;if(count<=0)references.remove(column);else {references.put(column,count);if(previous==0)offer(column);}}
+        void clear(){references.clear();order.clear();queued.clear();}
+    }
+    // Section coordinates are unbounded during neighbor searches; chunk arrays are not.
+    private static int snapshotSectionIndex(int sectionY,int minY,int sectionCount) {
+        long index=(long)sectionY-(minY>>4);
+        return index>=0&&index<sectionCount?(int)index:-1;
+    }
     private record Key(String dimension, int x, int y, int z) {
         static Key of(ServerLevel level, BlockPos pos) {
             return new Key(level.dimension().identifier().toString(), pos.getX() >> 4, pos.getY() >> 4, pos.getZ() >> 4);
@@ -323,14 +462,16 @@ public final class DimensionRegeneration {
         Group parent = this;
         int size, diameter = 1;
         boolean seeded;
-        long lastGrowth;
+        long lastGrowth,feedUntil,nextFeed,nextShareCheck;
         boolean connected, filling;
         long networkBorn=Long.MAX_VALUE;
         int spansActive, connectedVolume, trauma;
         long nextSpan, nextRetraction, nextAdaptation;
         final Set<Long> spanGoals=new HashSet<>();
+        final Map<Long,Integer> beamLengths=new HashMap<>();
         final WoundBounds bounds=new WoundBounds();
-        int spanStarts;
+        int spanStarts,beamDepth;
+        long beamVisibleSince=Long.MAX_VALUE;
         BlockPos groundAnchor;
         Group root() { Group p = this; while (p.parent != p) p = p.parent; Group n = this; while(n.parent != n) { Group next=n.parent; n.parent=p; n=next; } return p; }
         static void join(Group a, Group b) {
@@ -341,9 +482,10 @@ public final class DimensionRegeneration {
             a.connected|=b.connected;a.spansActive+=b.spansActive;
             a.connectedVolume=Math.max(a.connectedVolume,b.connectedVolume);
             a.nextSpan=Math.max(a.nextSpan,b.nextSpan);a.nextRetraction=Math.max(a.nextRetraction,b.nextRetraction);
-            a.spanGoals.addAll(b.spanGoals);
+            a.spanGoals.addAll(b.spanGoals);for(var entry:b.beamLengths.entrySet())a.beamLengths.merge(entry.getKey(),entry.getValue(),Math::max);
             a.bounds.merge(b.bounds);a.spanStarts+=b.spanStarts;if(a.groundAnchor==null)a.groundAnchor=b.groundAnchor;
-            a.lastGrowth=Math.max(a.lastGrowth,b.lastGrowth);
+            a.beamDepth=Math.max(a.beamDepth,b.beamDepth);a.beamVisibleSince=Math.min(a.beamVisibleSince,b.beamVisibleSince);
+            a.lastGrowth=Math.max(a.lastGrowth,b.lastGrowth);a.feedUntil=Math.max(a.feedUntil,b.feedUntil);a.nextShareCheck=Math.min(a.nextShareCheck,b.nextShareCheck);a.nextFeed=Math.max(a.nextFeed,b.nextFeed);
             a.diameter = Math.max(Math.max(a.diameter, b.diameter), tendonDiameter(a.size));
         }
     }
@@ -356,26 +498,26 @@ public final class DimensionRegeneration {
         void merge(WoundBounds b){if(b.present){include(new BlockPos(b.minX,b.minY,b.minZ));include(new BlockPos(b.maxX,b.maxY,b.maxZ));}}
         boolean contains(BlockPos p,int pad){return present&&p.getX()>=minX-pad&&p.getX()<=maxX+pad&&p.getY()>=minY-pad&&p.getY()<=maxY+pad&&p.getZ()>=minZ-pad&&p.getZ()<=maxZ+pad;}
     }
-    /** A bounded connected-solid search biased toward the supporting body below the wound floor. */
+    /** A bounded search for a surviving recorded body, including horizontal platforms and ceilings. */
     private static final class SupportSearch {
         final BlockPos start;
-        final int floor;
+        final int floor,ceiling;
         final PriorityQueue<BlockPos> open;
         final Set<BlockPos> seen=new HashSet<>();
         BlockPos current;
         int direction, examined;
         boolean done, valid;
         long expires;
-        SupportSearch(BlockPos start,int floor){this.start=start;this.floor=floor;
+        SupportSearch(BlockPos start,int floor){this.start=start;this.floor=floor;this.ceiling=start.getY()+Math.max(1,start.getY()-floor);
             open=new PriorityQueue<>(Comparator.comparingInt((BlockPos p)->p.getY()).thenComparingInt(p->p.distManhattan(start)));open.add(start);seen.add(start);}
         void finish(boolean result){done=true;valid=result;current=null;open.clear();seen.clear();}
         void step(int quantum,java.util.function.BooleanSupplier budget,java.util.function.Predicate<BlockPos> solid){
             for(int work=0;work<quantum&&!done&&budget.getAsBoolean();work++){
                 if(current==null){current=open.poll();direction=0;if(current==null){finish(false);return;}
                     if(!solid.test(current)){current=null;continue;}
-                    if(current.getY()<=floor){finish(true);return;}}
+                    if(current.getY()<=floor||current.getY()>=ceiling||Math.abs(current.getX()-start.getX())>=ceiling-start.getY()||Math.abs(current.getZ()-start.getZ())>=ceiling-start.getY()){finish(true);return;}}
                 BlockPos next=current.relative(DIRECTIONS[direction++]);if(direction==DIRECTIONS.length)current=null;
-                if(seen.contains(next)||Math.abs(next.getX()-start.getX())>24||Math.abs(next.getZ()-start.getZ())>24||next.getY()>start.getY()+4)continue;
+                if(seen.contains(next)||Math.abs(next.getX()-start.getX())>24||Math.abs(next.getZ()-start.getZ())>24||next.getY()>ceiling)continue;
                 if(++examined>MAX_SUPPORT_NODES){finish(false);return;}
                 seen.add(next);if(solid.test(next))open.add(next);
             }
@@ -390,7 +532,9 @@ public final class DimensionRegeneration {
         BlockState observed;
         int phase, axis, depth;
         long born, grown, next;
-        long nextRoute;
+        long nextRoute,brushRetryTick;
+        int probeAttempts;
+        boolean brushDeferred;
         BlockPos detourTarget;
         boolean scaffold;
         BlockPos anchor;
@@ -402,6 +546,8 @@ public final class DimensionRegeneration {
             group = new Group(); group.size = 1;
         }
         Position position() { return new Position(key.dimension, pos.asLong()); }
+        void deferBrushVoxel(){brushDeferred=true;brushCursor++;}
+        void completeBrushPass(int total,long now){if(brushCursor>=total&&brushDeferred){brushCursor=0;brushDeferred=false;brushRetryTick=now+1;}}
         void interrupt(BlockState replacement,long now) {
             if(phase!=3&&phase!=4&&now>=group.root().nextAdaptation){group.root().trauma=Math.min(64,group.root().trauma+1);group.root().nextAdaptation=now+20;}
             if(phase!=4)phase=3;observed=replacement;
@@ -554,7 +700,7 @@ public final class DimensionRegeneration {
         DetourSearch search;
         List<BlockPos> path;
         List<BlockPos> continuation=List.of();
-        boolean span;
+        boolean span,inward;
         int cursor, attempts;
         long next;
         long lastProgress;
@@ -572,12 +718,15 @@ public final class DimensionRegeneration {
         final Cell source;
         final Direction heading;
         int distance=1;
-        BlockPos goal;
+        long readyAt;
+        BlockPos goal,lastMissing;
+        boolean inward;
         final double dx,dy,dz;
         SpanProbe(Cell source,Direction heading){this.source=source;this.heading=heading;
-            int variant=Math.floorMod(source.pos.asLong()^source.group.root().spanStarts,9);
+            int variant=Math.floorMod(source.pos.asLong()+(long)source.probeAttempts++,25);
             double yaw=Math.atan2(heading.getStepZ(),heading.getStepX())+(variant%5-2)*0.19;
-            dx=Math.cos(yaw);dz=Math.sin(yaw);dy=heading==Direction.UP?0.35:(variant/3-1)*0.16;}
+            double vertical=heading.getAxis()==Direction.Axis.Y?heading.getStepY()*(1.0+(variant/5)*0.25):(variant/5-2)*0.5;
+            double norm=Math.sqrt(1+vertical*vertical);dx=Math.cos(yaw)/norm;dz=Math.sin(yaw)/norm;dy=vertical/norm;}
         BlockPos at(int d){return new BlockPos((int)Math.round(source.pos.getX()+dx*d),(int)Math.round(source.pos.getY()+dy*d),(int)Math.round(source.pos.getZ()+dz*d));}
     }
 
@@ -619,8 +768,19 @@ public final class DimensionRegeneration {
                 lastMin=min;lastPy=py;
             }
             int sy=vertical[section];
-            if (++section>=count) {section=0;offset=(offset+1)%offsets.size();if(offset==0){complete=true;nextCycle=now+200;}}
+            advance(count,now);
             return new Key(dim,x+delta[0],sy,z+delta[1]);
+        }
+        void advance(int count,long now){
+            // Cover a five-section vertical band across neighboring columns before visiting distant heights.
+            int band=section/5;
+            if(++section>=Math.min(count,band*5+5)){
+                section=band*5;
+                if(++offset>=offsets.size()){
+                    offset=0;section=Math.min(count,band*5+5);
+                    if(section>=count){section=0;complete=true;nextCycle=now+200;}
+                }
+            }
         }
     }
 
@@ -631,6 +791,9 @@ public final class DimensionRegeneration {
         final Map<Key, Snapshot> snapshots = new LinkedHashMap<>();
         final PriorityQueue<Snapshot> scans = new PriorityQueue<>(Comparator.comparingLong((Snapshot s)->s.nextScan).thenComparingLong(s->s.scanOrder));
         Snapshot scanning;
+        final ArrayDeque<Key> urgentScans=new ArrayDeque<>();
+        final Set<Key> urgentKeys=new HashSet<>();
+        boolean servedUrgent;
         final FriendlyByteBuf scratch = new FriendlyByteBuf(Unpooled.buffer(8192,65536));
         final Map<String,ServerLevel> levels = new HashMap<>();
         ServerLevel cachedChunkLevel;
@@ -639,7 +802,11 @@ public final class DimensionRegeneration {
         long cachedChunkTick=-1, scanSequence;
         final Set<Key> backlog = new HashSet<>();
         final Map<Position, Cell> cells = new HashMap<>();
-        final ArrayDeque<Cell> repairs = new ArrayDeque<>();
+        final WoundLoadingQueue woundLoading=new WoundLoadingQueue();
+        final java.util.LinkedHashSet<WoundChunk> ticketed=new java.util.LinkedHashSet<>();
+        long lastTicketStep=-1;
+        final ChunkRepairQueue repairs = new ChunkRepairQueue();
+        final ChunkPacing<WoundChunk> chunkPacing=new ChunkPacing<>();
         final Set<Position> filledThisTick = new HashSet<>();
         final ArrayDeque<RouteJob> routes = new ArrayDeque<>();
         final ArrayDeque<SpanProbe> probes = new ArrayDeque<>();
@@ -655,7 +822,10 @@ public final class DimensionRegeneration {
         final ArrayDeque<ExplosionWork> exemptExplosions = new ArrayDeque<>();
         final ConcurrentLinkedQueue<Runnable> finished = new ConcurrentLinkedQueue<>();
         long time, deadline, estimatedBytes, comparisons, placements, ticks, elapsedNanos, peakNanos;
-        long activeSince; int placementLimit=1;
+        long networkWaitChecks,supportWaitChecks,pacingWaitChecks;
+        long chatPlacements,chatTicks;
+        boolean chatHadActivity;
+        long activeSince,lastWorkNanos; int normalPlacementLimit=BASE_PLACEMENTS_PER_TICK,placementLimit=BASE_PLACEMENTS_PER_TICK,placementCeiling=MAX_PLACEMENTS_PER_TICK;
         int pendingIO, phase, playerCursor, queuedEdits, sectionChecks, discoveries;
         long lastWarning=-1200;
         boolean closed;
@@ -664,7 +834,36 @@ public final class DimensionRegeneration {
         ServerLevel level(String dim) {
             return levels.get(dim);
         }
+        void woundColumn(Cell cell,int delta){
+            var column=new WoundChunk(cell.key.dimension,cell.key.x,cell.key.z);
+            woundLoading.update(column,delta);
+            chunkPacing.register(column,woundLoading.references.containsKey(column));
+            if(!woundLoading.references.containsKey(column))repairs.removeColumn(column);
+            if(!woundLoading.references.containsKey(column))releaseWoundTicket(column);
+        }
+        void releaseWoundTicket(WoundChunk column){
+            if(!ticketed.remove(column))return;
+            ServerLevel level=level(column.dimension);if(level!=null){var pos=new net.minecraft.world.level.ChunkPos(column.x,column.z);level.getChunkSource().removeTicketWithRadius(WOUND_TICKET,pos,WOUND_TICKET_RADIUS);}
+        }
+        void releaseWoundTickets(){
+            for(var column:new ArrayList<>(ticketed))releaseWoundTicket(column);
+        }
+        void woundTicketStep(){
+            if(lastTicketStep==time)return;lastTicketStep=time;
+            // A strand may depend on the entire wound, not just one rotating loading window.
+            // Keep each wounded column continuously ticking until its final repair completes.
+            int admitted=0;
+            for(int checked=0;checked<16&&admitted<MAX_WOUND_CHUNK_ADMISSIONS_PER_TICK&&!woundLoading.order.isEmpty()&&budget();checked++){
+                var column=woundLoading.poll();
+                if(!woundLoading.references.containsKey(column)||ticketed.contains(column))continue;
+                ServerLevel level=level(column.dimension);if(level==null||!enabled(level)){woundLoading.offer(column);continue;}
+                var pos=new net.minecraft.world.level.ChunkPos(column.x,column.z);level.getChunkSource().addTicketWithRadius(WOUND_TICKET,pos,WOUND_TICKET_RADIUS);
+                ticketed.add(column);admitted++;
+            }
+        }
         boolean within(ServerLevel level, Key key) {
+            Snapshot recorded=snapshots.get(key);
+            if(recorded!=null&&!recorded.failed&&recorded.knownCount>0)return true; // Recorded anchors and neighboring sections remain usable outside the player radius.
             int r=Math.max(0,Math.min(512,RADIUS_BLOCKS));
             for(Player player:level.players()) {
                 
@@ -676,6 +875,7 @@ public final class DimensionRegeneration {
             return false;
         }
         LevelChunk loaded(ServerLevel level, Key key) {
+            if(snapshotSectionIndex(key.y,level.getMinY(),(level.getMaxY()-level.getMinY())>>4)<0)return null;
             if(cachedChunkTick!=time||cachedChunkLevel!=level||cachedChunkX!=key.x||cachedChunkZ!=key.z) {
                 cachedChunkTick=time;cachedChunkLevel=level;cachedChunkX=key.x;cachedChunkZ=key.z;
                 cachedChunk=level.getChunkSource().getChunkNow(key.x,key.z);
@@ -687,6 +887,7 @@ public final class DimensionRegeneration {
         boolean budget() { return System.nanoTime()<deadline; }
         boolean naturalAt(ServerLevel level,BlockPos pos) {
             Key key=Key.of(level,pos);Snapshot snap=snapshots.get(key);
+            if(snap==null&&loaded(level,key)!=null){request(level,key);return false;} // Remote support checks must restore evicted baselines without a nearby player.
             if(snap==null||snap.loading!=null||snap.failed||!snap.known.get(index(pos))||snap.edited.get(index(pos))||loaded(level,key)==null)return false;
             BlockState original=snap.get(index(pos));if(!terrain(original))return false;
             comparisons++;return level.getBlockState(pos).equals(original);
@@ -708,20 +909,23 @@ public final class DimensionRegeneration {
                 if(supports.size()>=256)return 0;
                 search=new SupportSearch(pos.immutable(),key.floor);supports.put(key,search);supportQueue.add(key);
             }
-            return search.done?(search.valid?1:-1):0;
+            if(!search.done){supportWaitChecks++;return 0;}if(!search.valid)supportWaitChecks++;return search.valid?1:-1;
         }
         void supportStep(){SupportKey key=supportQueue.poll();if(key==null)return;SupportSearch search=supports.get(key);
             ServerLevel level=level(key.position.dimension);if(search==null)return;if(level==null){supports.remove(key);return;}
-            search.step(16,()->budget()&&comparisons<MAX_COMPARISONS_PER_TICK-2,p->naturalAt(level,p));
+            search.step(64,()->budget()&&comparisons<MAX_COMPARISONS_PER_TICK-2,p->naturalAt(level,p));
             if(search.done)search.expires=time+40;else supportQueue.add(key);}
         boolean woundSpace(Group group,BlockPos pos){return group.root().bounds.contains(pos,4);}
         void account(Snapshot snap) {long bytes=snap.bytes();estimatedBytes+=bytes-snap.accounted;snap.accounted=bytes;}
         Snapshot request(ServerLevel level, Key key) {
             Snapshot found=snapshots.get(key); if(found!=null) return found;
             if(exclusionWrites.contains(key)||pendingIO>=MAX_IO || estimatedBytes+49152>Math.max(1_048_576,SNAPSHOT_CACHE_BYTES)) return null;
-            if(loaded(level,key)==null) return null;
+            LevelChunk chunk=loaded(level,key);if(chunk==null)return null;
+            var sections=chunk.getSections();
+            int sectionIndex=snapshotSectionIndex(key.y,level.getMinY(),sections.length);
+            if(sectionIndex<0)return null;
             Snapshot snap=new Snapshot(key);snap.level=level;snap.scanOrder=scanSequence++;
-            snap.initial=loaded(level,key).getSections()[key.y-(level.getMinY()>>4)].getStates().copy();
+            snap.initial=sections[sectionIndex].getStates().copy();
             snap.lastActive=time; snapshots.put(key,snap);account(snap);
             pendingIO++;
             Path path=file(key);
@@ -842,12 +1046,13 @@ public final class DimensionRegeneration {
         void attach(Snapshot snap, Cell cell) {
             cell.group.trauma=Math.max(cell.group.trauma,snap.trauma);
             cell.group.networkBorn=Math.min(cell.group.networkBorn,cell.born);
+            if((cell.phase==1||cell.phase==2)&&cell.anchor!=null){cell.group.beamDepth=cell.depth;cell.group.beamVisibleSince=cell.grown;cell.group.beamLengths.put(cell.anchor.asLong(),cell.depth);}
             boolean wasConnected=cell.group.connected;
             if(!terrain(snap.get(cell.index)))cell.group.size=0; // Air-only detours do not increase wound thickness.
             else if(snap.healable(cell.index))cell.group.bounds.include(cell.pos);
             if(cell.anchor!=null)cell.group.groundAnchor=cell.anchor;
             if(snap.get(cell.index).isAir())snap.airDetours.set(cell.index);
-            snap.damage.put(cell.index,cell);cells.put(cell.position(),cell);repairs.add(cell);
+            snap.damage.put(cell.index,cell);if(cells.put(cell.position(),cell)==null)woundColumn(cell,1);repairs.add(cell);
             for(Direction direction:DIRECTIONS) {
                 Cell neighbor=cells.get(new Position(cell.key.dimension,cell.pos.relative(direction).asLong()));
                 if(neighbor!=null)Group.join(cell.group,neighbor.group);
@@ -858,6 +1063,7 @@ public final class DimensionRegeneration {
         }
         void remove(Cell cell) {
             if(cells.remove(cell.position(),cell)) {
+                woundColumn(cell,-1);
                 Snapshot snap=snapshots.get(cell.key);
                 if(snap!=null){
                     snap.trauma=Math.max(snap.trauma,cell.group.root().trauma);
@@ -868,15 +1074,43 @@ public final class DimensionRegeneration {
         }
         void discover() {
             if(discoveries++>=32)return;
+            // Do not advance coverage past sections which cannot yet be admitted.
+            if(pendingIO>=MAX_IO||estimatedBytes+49152>Math.max(1_048_576,SNAPSHOT_CACHE_BYTES))return;
             List<? extends Player> players=server.getPlayerList().getPlayers();if(players.isEmpty())return;
             playerCursor%=players.size();Player player=players.get(playerCursor);playerCursor=(playerCursor+1)%players.size();
             if(!(player.level() instanceof ServerLevel level) || !enabled(level))return;
             Key key=coverage.computeIfAbsent(player.getUUID(),id->new Coverage()).next(level,player.blockPosition(),time);
             if(key!=null&&within(level,key)) request(level,key);
         }
+        final LinkedHashSet<Position> changedPositions=new LinkedHashSet<>();
+        int changedChecks;
+        long detectedTotal,placedTotal,blockEntityWaits,occupiedWaits;
+        boolean writing;
+        void changed(ServerLevel level,BlockPos pos){
+            if(writing)return;
+            Key key=Key.of(level,pos);if(!snapshots.containsKey(key))return;
+            if(changedPositions.size()<8192)changedPositions.add(new Position(key.dimension,pos.asLong()));
+            prioritize(key);
+        }
+        void detectChanged(){
+            if(changedChecks>=256||comparisons>=MAX_COMPARISONS_PER_TICK||changedPositions.isEmpty())return;
+            var iterator=changedPositions.iterator();Position position=iterator.next();iterator.remove();changedChecks++;
+            ServerLevel level=level(position.dimension);if(level==null)return;
+            BlockPos pos=BlockPos.of(position.packed);Key key=Key.of(level,pos);Snapshot snap=snapshots.get(key);
+            if(snap==null||snap.failed||loaded(level,key)==null)return;
+            if(snap.loading!=null){changedPositions.add(position);return;}
+            comparisons++;detect(snap,index(pos),level.getBlockState(pos));account(snap);
+        }
+        void prioritize(Key key){if(urgentKeys.size()<2048&&urgentKeys.add(key))urgentScans.add(key);}
         void scan() {
             Snapshot snap=scanning;
+            if(snap==null&&!servedUrgent&&!urgentScans.isEmpty()){
+                Key urgent=urgentScans.poll();urgentKeys.remove(urgent);Snapshot candidate=snapshots.get(urgent);
+                if(candidate!=null&&candidate.loading!=null)prioritize(urgent);
+                else if(candidate!=null&&candidate.queued&&sectionChecks<MAX_SECTION_CHECKS_PER_TICK){scans.remove(candidate);candidate.queued=false;scanning=snap=candidate;sectionChecks++;servedUrgent=true;}
+            }
             if(snap==null) {
+                servedUrgent=false;
                 if(sectionChecks>=MAX_SECTION_CHECKS_PER_TICK||scans.isEmpty()||scans.peek().nextScan>time)return;
                 snap=scans.poll();snap.queued=false;scanning=snap;sectionChecks++;
             }
@@ -896,32 +1130,10 @@ public final class DimensionRegeneration {
                 if(snap.knownCount!=4096){snap.known.set(0,4096);snap.knownCount=4096;snap.revision++;}
                 snap.witness.end(section.getStates(),scratch,true);endScan(snap,SECTION_CHECK_INTERVAL);return;
             }
-            for(int n=0;n<(cells.isEmpty()?QUANTUM:32)&&comparisons<MAX_COMPARISONS_PER_TICK&&budget();n++) {
+            for(int n=0;n<QUANTUM&&comparisons<MAX_COMPARISONS_PER_TICK&&budget();n++) {
                 int i=snap.cursor;snap.cursor=(i+1)&4095;comparisons++;
                 BlockState current=section.getBlockState(i&15,i>>8,(i>>4)&15);
-                if(snap.edited.get(i)) {
-                    Cell excluded=snap.damage.get(i);if(excluded!=null&&excluded.phase==0)remove(excluded);
-                } else {
-                if(snap.knownCount!=4096&&!snap.known.get(i)){snap.set(i,snap.initial==null?current:snap.initial.get(i&15,i>>8,(i>>4)&15));if(snap.cursor!=0)continue;}
-                BlockState original=snap.get(i);
-                Cell cell=current==original&&!snap.airDetours.get(i)?null:snap.damage.get(i);
-                if(cell!=null) {
-                    if(current.equals(original)&&!(original.isAir()&&cell.detourTarget!=null&&cell.phase!=0))remove(cell);
-                    // External changes to temporary Caro become fresh damage, never silently accepted.
-                    else if(cell.phase!=0&&cell.phase!=3&&!current.is(tendon().getBlock())) {cell.interrupt(current,time);snap.revision++;}
-                } else if(!original.equals(current)) {
-                if(snap.healed.get(i)&&terrain(original)&&isRemoval(current)&&time>=snap.nextAdaptation){snap.trauma=Math.min(64,snap.trauma+1);snap.nextAdaptation=time+20;}
-                snap.healed.clear(i);
-                if(original.getBlock()==current.getBlock()) {
-                    // Normal state updates do not rewrite the original orientation/properties.
-                } else if(!terrain(original)||current.hasBlockEntity()||!isRemoval(current)&&!current.is(tendon().getBlock())) {
-                    if(!isRemoval(current))snap.exclude(i);
-                } else if(cells.size()>=MAX_WOUND_CELLS) {
-                    snap.blockedDuringPass=true;
-                    backlog.add(key); // Keep the baseline and retry when capacity frees up.
-                } else {Cell damage=new Cell(key,i,current,time);attach(snap,damage);snap.revision++;}
-                }
-                }
+                detect(snap,i,current);
                 if(snap.cursor==0) {
                     if(!snap.blockedDuringPass)backlog.remove(key);
                     snap.witness.end(section.getStates(),scratch,!snap.blockedDuringPass&&snap.knownCount==4096);
@@ -929,6 +1141,32 @@ public final class DimensionRegeneration {
                 }
             }
             account(snap);
+        }
+        void detect(Snapshot snap,int i,BlockState current){
+            Key key=snap.key;
+                if(snap.edited.get(i)) {
+                    Cell excluded=snap.damage.get(i);if(excluded!=null&&excluded.phase==0)remove(excluded);
+                } else {
+                if(snap.knownCount!=4096&&!snap.known.get(i)){snap.set(i,snap.initial==null?current:snap.initial.get(i&15,i>>8,(i>>4)&15));}
+                BlockState original=snap.get(i);
+                Cell cell=current==original&&!snap.airDetours.get(i)?null:snap.damage.get(i);
+                if(cell!=null) {
+                    if(current.equals(original)&&!keepsTemporaryOwnership(original,cell.phase))remove(cell);
+                    // External changes to temporary Caro become fresh damage, never silently accepted.
+                    else if(cell.phase!=0&&cell.phase!=3&&!current.is(tendon().getBlock())) {cell.interrupt(current,time);snap.revision++;}
+                } else if(!original.equals(current)) {
+                if(snap.healed.get(i)&&terrain(original)&&isRemoval(current)&&time>=snap.nextAdaptation){snap.trauma=Math.min(64,snap.trauma+1);snap.nextAdaptation=time+20;}
+                snap.healed.clear(i);
+                if(original.getBlock()==current.getBlock()) {
+                    // Normal state updates do not rewrite the original orientation/properties.
+                } else if(!repairDifference(original,current,false)) {
+                    // Non-terrain baselines are deliberately outside restoration coverage.
+                } else if(cells.size()>=MAX_WOUND_CELLS) {
+                    snap.blockedDuringPass=true;
+                    backlog.add(key); // Keep the baseline and retry when capacity frees up.
+                } else {Cell damage=new Cell(key,i,current,time);attach(snap,damage);snap.revision++;detectedTotal++;}
+                }
+                }
         }
         void endScan(Snapshot snap,int delay) {
             if(snap.knownCount==4096)snap.initial=null;
@@ -938,6 +1176,7 @@ public final class DimensionRegeneration {
         void maintain(Snapshot snap) {
             if(snap.failed||snap.loading!=null)return;
             if(snap.revision!=snap.saved && snap.saving<0 && pendingIO<MAX_IO && (time-snap.lastSave>=100 || time-snap.lastActive>100)) save(snap);
+            if(!snap.damage.isEmpty())return; // Keep bounded wound memory available while waiting for a loading window.
             if(time-snap.lastActive>100 && snap.saved==snap.revision && snap.saving<0) {
                 estimatedBytes-=snap.accounted;snapshots.remove(snap.key);if(snap.queued){scans.remove(snap);snap.queued=false;}
                 backlog.remove(snap.key);
@@ -1008,16 +1247,84 @@ public final class DimensionRegeneration {
             }
             return false;
         }
-        int networkTarget(Group group){return Math.min(MAX_WOUND_SPANS,Math.max(2,2+group.root().size/2048));}
+        int networkTarget(Group group){
+            group=group.root();var b=group.bounds;
+            return b.present?tendonNetworkTarget(group.size,b.maxX-b.minX+1,b.maxY-b.minY+1,b.maxZ-b.minZ+1):2;
+        }
+        int beamLengthTarget(Group group){var b=group.root().bounds;return b.present?Math.min(8,Math.max(2,(1+Math.max(b.maxX-b.minX,Math.max(b.maxY-b.minY,b.maxZ-b.minZ)))/6)):2;}
+        int grownBeams(Group group){group=group.root();int required=beamLengthTarget(group),count=0;for(int length:group.beamLengths.values())if(length>=required)count++;return count;}
+        void recordBeam(Group group,BlockPos anchor,int length){
+            group=group.root();long id=anchor.asLong();
+            if(group.beamLengths.containsKey(id)||group.beamLengths.size()<MAX_WOUND_SPANS*4)group.beamLengths.merge(id,length,Math::max);
+        }
         boolean gapPhase(Group group,Cell cell){
             group=group.root();
+            int extent=group.bounds.present?1+Math.max(group.bounds.maxX-group.bounds.minX,Math.max(group.bounds.maxY-group.bounds.minY,group.bounds.maxZ-group.bounds.minZ)):0;
+            long visibleAge=group.beamVisibleSince==Long.MAX_VALUE?0:time-group.beamVisibleSince;
+            if(!visibleNetworkReady(group.size,extent,group.beamDepth,visibleAge)||group.size>=512&&grownBeams(group)<networkTarget(group)){group.filling=false;return false;}
             if(group.filling)return true;
             long age=time-Math.min(cell.born,group.networkBorn);
             // Phase two starts after the beam network settles; bounded fallback also handles one-sided cavities.
-            if(networkPhaseReady(age,time-group.lastGrowth,group.spansActive,group.spanStarts>=networkTarget(group)))group.filling=true;
+            if(networkPhaseReady(age,time-group.lastGrowth,group.spansActive,grownBeams(group)>=networkTarget(group)))group.filling=true;
             return group.filling;
         }
-        int growthInterval(Cell cell){return adaptedInterval(Math.max(4,tendonGrowthInterval(cell.group.root().diameter)-Math.min(6,(int)(Math.max(0,time-cell.born)/600))),cell.group.root().trauma);}
+        final NourishmentField nourishment=new NourishmentField();
+        boolean nourished(Cell cell){
+            Group group=cell.group.root();if(group.feedUntil>time)return true;
+            if(time<group.nextShareCheck)return false;group.nextShareCheck=time+5;
+            group.feedUntil=Math.max(group.feedUntil,nourishment.expires(cell.key.dimension,cell.pos,time));
+            return group.feedUntil>time;
+        }
+        int materialWait(Cell cell){return fedInterval(materialDelay(cell.pos.asLong()),nourished(cell));}
+        int growthInterval(Cell cell){
+            int interval=fedInterval(adaptedInterval(Math.max(4,tendonGrowthInterval(cell.group.root().diameter)-Math.min(6,(int)(Math.max(0,time-cell.born)/600))),cell.group.root().trauma),nourished(cell));
+            BlockPos anchor=cell.group.root().groundAnchor;return coordinatedInterval(interval,cell.key.dimension,anchor==null?cell.pos:anchor,time);
+        }
+        int feedQueries,consumedItems,consumedEntities;
+        long consumedTotal;
+        final Map<UUID,FeedingPull> feedingPulls=new HashMap<>();
+        final ArrayDeque<UUID> feedingOrder=new ArrayDeque<>();
+        Cell feedingTarget(ServerLevel level,Cell source){
+            if(source.phase>0&&source.phase<4&&level.getBlockState(source.pos).is(tendon().getBlock()))return source;
+            for(Direction side:DIRECTIONS){Cell neighbor=cells.get(new Position(source.key.dimension,source.pos.relative(side).asLong()));
+                if(neighbor!=null&&neighbor.group.root()==source.group.root()&&neighbor.phase>0&&neighbor.phase<4&&loaded(level,neighbor.key)!=null
+                        &&level.getBlockState(neighbor.pos).is(tendon().getBlock()))return neighbor;
+            }
+            return null;
+        }
+        void consumeDrop(ServerLevel level,Snapshot snap,Cell cell){
+            Group group=cell.group.root();
+            if(feedQueries>=MAX_FEED_QUERIES_PER_TICK||time<group.nextFeed||!snap.healable(cell.index)||!budget())return;
+            feedQueries++;group.nextFeed=time+1;Cell target=feedingTarget(level,cell);if(target==null)return;
+            var material=snap.get(cell.index).getBlock().asItem();if(material==net.minecraft.world.item.Items.AIR)return;
+            for(var drop:level.getEntitiesOfClass(net.minecraft.world.entity.item.ItemEntity.class,new AABB(target.pos).inflate(4.0),item->item.isAlive()&&item.getItem().is(material))){
+                if(!budget()||feedingPulls.size()>=64)break;
+                if(!group.bounds.contains(drop.blockPosition(),0)||feedingPulls.containsKey(drop.getUUID()))continue;
+                feedingPulls.put(drop.getUUID(),new FeedingPull(drop,cell.key.dimension,target.pos,material,time));feedingOrder.add(drop.getUUID());
+            }
+        }
+        void moveFeedingDrops(){
+            int visits=Math.min(64,feedingOrder.size());
+            for(int i=0;i<visits&&budget();i++){
+                UUID id=feedingOrder.poll();FeedingPull pull=feedingPulls.get(id);if(pull==null)continue;
+                var item=pull.item;ServerLevel level=level(pull.dimension);Key key=level==null?null:Key.of(level,pull.target);
+                Cell tip=cells.get(new Position(pull.dimension,pull.target.asLong()));
+                if(!item.isAlive()||time>=pull.expires||level==null||item.level()!=level||!enabled(level)||loaded(level,key)==null
+                        ||tip==null||tip.phase==0||tip.phase==4||tip.group.root().size==0||!level.getBlockState(pull.target).is(tendon().getBlock())||!item.getItem().is(pull.material)){
+                    feedingPulls.remove(id);continue;
+                }
+                var offset=net.minecraft.world.phys.Vec3.atCenterOf(pull.target).subtract(item.position());
+                if(offset.lengthSqr()<=0.81&&time-pull.started>=10&&consumedItems<MAX_CONSUMED_ITEMS_PER_TICK&&consumedEntities<MAX_CONSUMED_ENTITIES_PER_TICK){
+                    var stack=item.getItem().copy();int amount=Math.min(stack.getCount(),MAX_CONSUMED_ITEMS_PER_TICK-consumedItems);
+                    if(amount>0){stack.shrink(amount);consumedItems+=amount;consumedEntities++;consumedTotal+=amount;
+                        Group group=tip.group.root();group.feedUntil=Math.max(group.feedUntil,time+FEED_BOOST_TICKS);nourishment.feed(pull.dimension,item.blockPosition(),time);
+                        if(stack.isEmpty()){item.discard();feedingPulls.remove(id);continue;}item.setItem(stack);
+                    }
+                }
+                item.setDeltaMovement(feedingVelocity(item.getDeltaMovement(),offset,!item.isNoGravity()));item.needsSync=true;
+                feedingOrder.add(id);
+            }
+        }
         void repair() {
             // Do not heal a large woodbound blast before its incremental exemptions finish.
             if(!exemptExplosions.isEmpty())return;
@@ -1034,14 +1341,21 @@ public final class DimensionRegeneration {
             BlockState original=snap.get(cell.index),current=level.getBlockState(cell.pos);
             if(cell.phase==4){withdraw(level,snap,cell,current);return;}
             if(snap.edited.get(cell.index)){remove(cell);return;}
-            if(current.equals(original)&&!(original.isAir()&&cell.detourTarget!=null&&cell.phase!=0)){remove(cell);return;}
-            if(current.hasBlockEntity()) {accept(level,cell.pos);return;}
-            // Solid additions, including command-built structures, are obstacles rather than repair material.
-            if(!isRemoval(current)&&!current.is(tendon().getBlock())){accept(level,cell.pos);return;}
+            if(current.equals(original)&&!keepsTemporaryOwnership(original,cell.phase)){remove(cell);return;}
+            // Preserve the baseline while a foreign block entity occupies the cell; never erase inventories.
+            // Original air is temporary scaffolding, never a permanently protected terrain block.
+            if(retireTemporary(original,wound.size,wound.filling,routeHolds.containsKey(cell.position()),time-cell.grown,materialWait(cell))){
+                if(wound.size==0)wound.filling=true;
+                cell.phase=4;cell.detourTarget=null;cell.scaffold=false;snap.revision++;
+                withdraw(level,snap,cell,current);return;
+            }
+            if(current.hasBlockEntity()){blockEntityWaits++;return;}
+            consumeDrop(level,snap,cell);
+            // Unexplained solid replacements follow the same Caro growth and maturation phases as air wounds.
             if(occupied(level,cell.pos))return;
             // Mature Caro is a temporary placeholder, including shell cells and interrupted spans.
             if(gapPhase(wound,cell)&&cell.phase!=0&&current.is(tendon().getBlock())&&snap.healable(cell.index)
-                    &&time-cell.grown>=materialDelay(cell.pos.asLong())
+                    &&time-cell.grown>=materialWait(cell)
                     &&!routeHolds.containsKey(cell.position())&&restorationFront(level,cell)) {
                 if(placeRepair(level,cell,original)){snap.healed.set(cell.index);snap.revision++;remove(cell);}return;
             }
@@ -1052,6 +1366,9 @@ public final class DimensionRegeneration {
                 if(supported<0){
                     // Preserve existing tissue when its old anchor is damaged; find another surviving edge.
                     for(Direction side:DIRECTIONS){BlockPos candidate=cell.pos.relative(side);
+                        Cell neighbor=cells.get(new Position(cell.key.dimension,candidate.asLong()));
+                        if(neighbor!=null&&neighbor.group.root()==wound&&neighbor.anchor!=null
+                                &&level.getBlockState(candidate).is(tendon().getBlock())&&supportStatus(level,neighbor.anchor,wound)==1){cell.anchor=neighbor.anchor;return;}
                         if(supportStatus(level,candidate,wound)==1){cell.anchor=candidate;wound.groundAnchor=candidate;return;}}
                     return;
                 }
@@ -1067,24 +1384,24 @@ public final class DimensionRegeneration {
                 if(cell.phase==1){planDetour(level,cell);if(cell.tipBehind>0)thicken(level,cell);}
                 if(cell.phase==1&&cell.brushRadius>=0&&cell.brushCursor<(cell.brushRadius*2+1)*(cell.brushRadius*2+1)*(cell.brushRadius*2+1))return;
                 if(!routeHolds.containsKey(cell.position())&&(!cell.scaffold||wound.spansActive==0&&(wound.connected||cell.detourTarget==null))
-                        &&gapPhase(wound,cell)&&time-cell.grown>=materialDelay(cell.pos.asLong()) && placements<MAX_PLACEMENTS_PER_TICK && budget()) {
-                    if(!terrain(original)){withdraw(level,snap,cell,current);return;}
+                        &&gapPhase(wound,cell)&&time-cell.grown>=materialWait(cell) && placements<placementLimit && budget()) {
+                    if(!terrain(original)){cell.phase=4;cell.detourTarget=null;cell.scaffold=false;snap.revision++;withdraw(level,snap,cell,current);return;}
                     if(wound.connected&&restorationFront(level,cell)&&placeRepair(level,cell,original)){snap.healed.set(cell.index);snap.revision++;remove(cell);}
                 }
                 return;
             }
             if(time-cell.born<HEAL_DELAY_TICKS)return;
-            if(wound.size>=64&&(!wound.connected||wound.spansActive>0)) {
+            if(wound.size>=64&&(!wound.connected||wound.spansActive>0||grownBeams(wound)<networkTarget(wound))) {
                 if(!gapPhase(wound,cell)&&cell.nextRoute<=time&&time>=wound.nextSpan
-                        &&wound.spanStarts<networkTarget(wound)&&wound.spansActive<Math.min(MAX_DETOUR_JOBS,2+wound.size/4096)&&routes.size()+probes.size()<MAX_DETOUR_JOBS) {
+                        &&grownBeams(wound)<networkTarget(wound)&&wound.spansActive<parallelSpans(wound.size)&&routes.size()+probes.size()<MAX_DETOUR_JOBS) {
                     for(Direction wall:new Direction[]{Direction.NORTH,Direction.SOUTH,Direction.WEST,Direction.EAST,Direction.DOWN}) {
                         BlockPos anchor=cell.pos.relative(wall);Key anchorKey=Key.of(level,anchor);Snapshot edge=snapshots.get(anchorKey);
                         if(edge==null||edge.loading!=null||edge.failed||!edge.known.get(index(anchor))||edge.edited.get(index(anchor))
                                 ||loaded(level,anchorKey)==null||!budget()||comparisons>=MAX_COMPARISONS_PER_TICK)continue;
-                        if(supportStatus(level,anchor,wound)==1) {
+                        if(wound.beamLengths.getOrDefault(anchor.asLong(),0)<beamLengthTarget(wound)&&supportStatus(level,anchor,wound)==1) {
                             cell.anchor=anchor;wound.groundAnchor=anchor;
-                            probes.add(new SpanProbe(cell,wall.getOpposite()));wound.spansActive++;wound.nextSpan=time+20;
-                            cell.nextRoute=time+200;routeHolds.merge(cell.position(),1,Integer::sum);break;
+                            probes.add(new SpanProbe(cell,wall.getOpposite()));wound.spansActive++;wound.nextSpan=time+2;
+                            cell.nextRoute=time+20;routeHolds.merge(cell.position(),1,Integer::sum);break;
                         }
                     }
                 }
@@ -1096,7 +1413,7 @@ public final class DimensionRegeneration {
             int tissueNeighbors=0;
             for(Direction side:DIRECTIONS){Cell adjacent=cells.get(new Position(cell.key.dimension,cell.pos.relative(side).asLong()));if(adjacent!=null&&(adjacent.phase==1||adjacent.phase==2))tissueNeighbors++;}
             boolean gapFill=filling;
-            if(!filling&&wound.size>=512)return; // Large wounds are built from planned spanning beams, never random walkers.
+            if(!filling&&wound.size>=512){networkWaitChecks++;return;} // Large wounds are built from planned spanning beams, never random walkers.
             for(Direction direction:DIRECTIONS) {
                 BlockPos neighborPos=cell.pos.relative(direction);
                 Key neighborKey=Key.of(level,neighborPos);if(loaded(level,neighborKey)==null)continue;
@@ -1111,7 +1428,7 @@ public final class DimensionRegeneration {
                     if(ns!=null&&ns.loading==null&&ns.known.get(ni)&&!ns.edited.get(ni)&&terrain(ns.get(ni))&&level.getBlockState(neighborPos).equals(ns.get(ni))) {
                         Group group=cell.group.root();
                         // Sparse roots: each later wave adds strands, rather than coating every edge at once.
-                        if(wound.size>=64&&!gapFill&&Math.floorMod(cell.pos.asLong()^(cell.pos.asLong()>>>19),97)!=Math.floorMod((time-cell.born-HEAL_DELAY_TICKS)/600,97))continue;
+                        if(wound.size>=64&&!gapFill&&wound.beamDepth>0&&Math.floorMod(cell.pos.asLong()^(cell.pos.asLong()>>>19),97)!=Math.floorMod((time-cell.born-HEAL_DELAY_TICKS)/600,97))continue;
                         if(supportStatus(level,neighborPos,group)==1){incoming=direction.getOpposite();anchor=neighborPos;}
                         else if(group.groundAnchor!=null&&ns.healed.get(ni)&&supportStatus(level,group.groundAnchor,group)==1){incoming=direction.getOpposite();anchor=group.groundAnchor;}
                     }
@@ -1124,7 +1441,8 @@ public final class DimensionRegeneration {
                     cell.phase=gapFill?2:1;cell.axis=incoming.ordinal();cell.depth=depth;cell.grown=time;
                     Cell stem=parentTip;
                     for(int behind=1;stem!=null&&behind<=4;behind++){stem.tipBehind=Math.max(stem.tipBehind,behind);Snapshot owner=snapshots.get(stem.key);if(owner!=null)owner.revision++;stem=cells.get(new Position(stem.key.dimension,stem.pos.relative(DIRECTIONS[stem.axis].getOpposite()).asLong()));}
-                    Group group=cell.group.root();group.seeded=true;group.lastGrowth=time;group.diameter=Math.max(group.diameter,tendonDiameter(group.size));snap.revision++;
+                    Group group=cell.group.root();group.seeded=true;group.lastGrowth=time;
+                    if(!gapFill){group.beamDepth=Math.max(group.beamDepth,cell.depth);group.beamVisibleSince=Math.min(group.beamVisibleSince,time);}group.diameter=Math.max(group.diameter,tendonDiameter(group.size));snap.revision++;
                 }
             }
         }
@@ -1145,12 +1463,13 @@ public final class DimensionRegeneration {
             SpanProbe probe=probes.poll();if(probe==null)return;
             Cell source=probe.source;
             if(source.group.root().filling){finishProbe(probe);return;}
+            if(time<probe.readyAt){probes.add(probe);return;}
             ServerLevel level=level(source.key.dimension);
             if(level==null||cells.get(source.position())!=source||loaded(level,source.key)==null||!within(level,source.key)){finishProbe(probe);return;}
             for(int work=0;probe.goal==null&&work<16&&budget()&&comparisons<MAX_COMPARISONS_PER_TICK;work++) {
-                if(probe.distance>MAX_SPAN_DISTANCE){finishProbe(probe);return;}
+                if(probe.distance>MAX_SPAN_DISTANCE){if(probe.lastMissing!=null){probe.goal=probe.lastMissing;probe.inward=true;break;}finishProbe(probe);return;}
                 BlockPos pos=probe.at(probe.distance);Key key=Key.of(level,pos);
-                if(!woundSpace(source.group,pos)||!within(level,key)||loaded(level,key)==null){finishProbe(probe);return;}
+                if(!woundSpace(source.group,pos)||!within(level,key)||loaded(level,key)==null){if(probe.lastMissing!=null){probe.goal=probe.lastMissing;probe.inward=true;break;}finishProbe(probe);return;}
                 Snapshot snap=snapshots.get(key);
                 if(snap==null){request(level,key);probes.add(probe);return;}
                 if(snap.failed){finishProbe(probe);return;}
@@ -1162,20 +1481,21 @@ public final class DimensionRegeneration {
                     if(status==0){probes.add(probe);return;}
                     if(status==1){probe.goal=pos;break;}
                 }
+                if(probe.distance>=6&&snap.healable(index(pos))&&!current.equals(original)&&!current.hasBlockEntity())probe.lastMissing=pos;
                 probe.distance++;
             }
-            if(probe.goal==null||placements>=MAX_PLACEMENTS_PER_TICK||!budget()){probes.add(probe);return;}
+            if(probe.goal==null||placements>=placementLimit||!budget()){probes.add(probe);return;}
             if(source.group.root().spanGoals.contains(probe.goal.asLong())){finishProbe(probe);return;}
             List<BlockPos> spine=beamPath(source.pos,probe.goal,source.pos.asLong()^source.group.root().spanStarts);
             if(spine.size()>MAX_SPAN_DISTANCE*4||spine.stream().anyMatch(p->!woundSpace(source.group,p))){finishProbe(probe);return;}
             if(supportStatus(level,source.anchor,source.group)!=1){probes.add(probe);return;}
             comparisons++;BlockState current=level.getBlockState(source.pos);
-            if(!isRemoval(current)){finishProbe(probe);return;}
-            if(occupied(level,source.pos)||!place(level,source.pos,tendon())){probes.add(probe);return;}
+            if(!isRemoval(current)&&!current.is(tendon().getBlock())){finishProbe(probe);return;}
+            if(occupied(level,source.pos)||!current.is(tendon().getBlock())&&!place(level,source.pos,tendon())){probes.add(probe);return;}
             source.phase=1;source.axis=probe.heading.ordinal();source.scaffold=true;source.detourTarget=probe.goal;source.grown=time;
             Snapshot snap=snapshots.get(source.key);snap.revision++;
             Direction side=(source.pos.asLong()&1)==0?Direction.UP:Direction.DOWN;
-            RouteJob job=new RouteJob(source,probe.goal,side,time);job.search=null;job.path=spine;job.span=true;source.group.root().spanStarts++;
+            RouteJob job=new RouteJob(source,probe.goal,side,time);job.search=null;job.path=spine;job.span=true;job.inward=probe.inward;source.group.root().spanStarts++;
             source.group.root().spanGoals.add(probe.goal.asLong());
             hold(job,source);routeKeys.add(job.key);routes.add(job);
             // Transfer the probe's group reservation to the growing span.
@@ -1206,8 +1526,12 @@ public final class DimensionRegeneration {
                 }
             }
             if(!resume&&!connected&&!job.head.group.root().filling&&cells.get(job.head.position())==job.head){
-                job.head.detourTarget=job.goal;job.head.scaffold=job.span;job.head.nextRoute=time+20;
-                Snapshot owner=snapshots.get(job.head.key);if(owner!=null)owner.revision++;
+                Cell tip=job.head;tip.detourTarget=null;tip.scaffold=false;tip.nextRoute=time+20;
+                Snapshot owner=snapshots.get(tip.key);if(owner!=null)owner.revision++;
+                if(job.span&&tip.phase!=4&&tip.anchor!=null&&probes.size()+routes.size()<MAX_DETOUR_JOBS){
+                    SpanProbe retry=new SpanProbe(tip,DIRECTIONS[tip.axis]);retry.readyAt=time+20;probes.add(retry);tip.group.root().spansActive++;
+                    routeHolds.merge(tip.position(),1,Integer::sum);
+                }
             }
         }
         void planDetour(ServerLevel level,Cell source) {
@@ -1269,7 +1593,7 @@ public final class DimensionRegeneration {
             if(snap.failed||snap.loading!=null||!snap.known.get(index(pos))||snap.edited.get(index(pos))||snap.get(index(pos)).hasBlockEntity())return false;
             comparisons++;BlockState current=level.getBlockState(pos);
             Cell owned=cells.get(new Position(key.dimension,pos.asLong()));
-            return current.isAir()||owned!=null&&owned.phase!=0&&current.is(tendon().getBlock());
+            return current.isAir()||owned!=null&&!current.hasBlockEntity()&&snap.healable(index(pos))&&!current.equals(snap.get(index(pos)))||owned!=null&&owned.phase!=0&&current.is(tendon().getBlock());
         }
         boolean strandSpace(ServerLevel level,BlockPos pos,RouteJob job){
             if(!routeSpace(level,pos,job.head.group))return false;
@@ -1280,7 +1604,7 @@ public final class DimensionRegeneration {
         }
         void route() {
             RouteJob job=routes.poll();if(job==null)return;
-            if(job.head.group.root().filling||time-job.lastProgress>=STRAND_IDLE_TIMEOUT_TICKS){finishRoute(job,false,job.head.group.root().filling);return;}
+            if(job.head.group.root().filling||time-job.lastProgress>=STRAND_IDLE_TIMEOUT_TICKS){finishRoute(job,false,false);return;}
             ServerLevel level=level(job.dimension);
             if(level==null){finishRoute(job);return;}
             if(time-job.created>MAX_ROUTE_TICKS||job.steps>MAX_SPAN_DISTANCE*4||job.anchor==null){finishRoute(job);return;}
@@ -1301,6 +1625,7 @@ public final class DimensionRegeneration {
                 // The persisted target lets the loaded strand re-plan without force-loading chunks.
                 finishRoute(job,true);return;
             }
+            if(job.head.phase==3){routes.add(job);return;}
             if(job.search!=null) {
                 job.search.step(32,()->budget()&&comparisons<MAX_COMPARISONS_PER_TICK,
                         pos->strandSpace(level,pos,job)||pos.equals(job.goal)&&woundSpace(job.head.group,pos)&&naturalAt(level,pos));
@@ -1309,13 +1634,13 @@ public final class DimensionRegeneration {
                 if(job.path==null||job.path.isEmpty()){finishRoute(job);return;}
                 if(!job.continuation.isEmpty()){ArrayList<BlockPos> combined=new ArrayList<>(job.path);combined.addAll(job.continuation);job.path=List.copyOf(combined);job.continuation=List.of();}
             }
-            if(job.next>time||placements>=MAX_PLACEMENTS_PER_TICK){routes.add(job);return;}
+            if(job.next>time||placements>=placementLimit){routes.add(job);return;}
             for(Cell sleeve:job.tipTrail){
                 if(sleeve.tipBehind==0)continue;
                 int r=tipRadius(Math.min(MAX_TENDON_RADIUS,(sleeve.group.root().diameter-1)/2),sleeve.tipBehind);
                 int width=r*2+1;
-                if(sleeve.brushRadius!=r||sleeve.brushCursor<width*width*width){int before=sleeve.brushCursor;thicken(level,sleeve);
-                    if(sleeve.brushCursor!=before)job.lastProgress=time;
+                if(sleeve.brushRadius!=r||sleeve.brushCursor<width*width*width){int before=sleeve.brushCursor;long placedBefore=placements;thicken(level,sleeve);
+                    if(sleeve.brushCursor!=before||placements>placedBefore)job.lastProgress=time;
                     routes.add(job);return;}
             }
             BlockPos next=job.path.get(job.cursor);
@@ -1325,7 +1650,7 @@ public final class DimensionRegeneration {
             if(job.span&&!next.equals(job.goal)&&nextSnapshot!=null&&nextSnapshot.known.get(index(next))&&!nextSnapshot.healable(index(next))){
                 if(!replan(job,level)){finishRoute(job);return;}routes.add(job);return;
             }
-            if(next.equals(job.goal)&&job.span){int status=supportStatus(level,next,job.head.group);
+            if(next.equals(job.goal)&&job.span&&!job.inward){int status=supportStatus(level,next,job.head.group);
                 if(status==0){routes.add(job);return;}finishRoute(job,false,status==1);return;}
             if(next.equals(job.goal)&&routeAnchor(level,next,job.head.group)){finishRoute(job,false,true);return;}
             if(!routeSpace(level,next,job.head.group)) {
@@ -1349,6 +1674,7 @@ public final class DimensionRegeneration {
             step.phase=1;step.axis=heading.ordinal();step.depth=job.head.depth+1;step.grown=time;
             step.scaffold=job.span;
             step.anchor=job.anchor;job.steps++;job.lastProgress=time;step.group.root().lastGrowth=time;
+            Group network=step.group.root();if(job.span)recordBeam(network,job.anchor,job.steps);network.beamDepth=Math.max(network.beamDepth,step.depth);network.beamVisibleSince=Math.min(network.beamVisibleSince,time);
             step.detourTarget=job.goal;step.next=time+tendonGrowthInterval(step.group.root().diameter);
             job.tipTrail.add(step);
             int behind=job.tipTrail.size()-1;
@@ -1360,6 +1686,7 @@ public final class DimensionRegeneration {
             routes.add(job);
         }
         void thicken(ServerLevel level, Cell core) {
+            if(time<core.brushRetryTick)return;
             if(core.tangentX==0&&core.tangentY==0&&core.tangentZ==0){
                 if(core.anchor!=null&&core.detourTarget!=null){core.tangentX=core.detourTarget.getX()-core.anchor.getX();core.tangentY=core.detourTarget.getY()-core.anchor.getY();core.tangentZ=core.detourTarget.getZ()-core.anchor.getZ();}
                 else {Direction forward=DIRECTIONS[core.axis];core.tangentX=forward.getStepX();core.tangentY=forward.getStepY();core.tangentZ=forward.getStepZ();}
@@ -1367,7 +1694,7 @@ public final class DimensionRegeneration {
             int maximum=Math.min(MAX_TENDON_RADIUS,(core.group.root().diameter-1)/2);
             int behind=core.tipBehind; // A stationary tip never inflates into a sphere.
             int radius=tipRadius(maximum,behind),width=radius*2+1,total=width*width*width;
-            if(core.brushRadius!=radius){core.brushRadius=radius;core.brushCursor=0;}
+            if(core.brushRadius!=radius){core.brushRadius=radius;core.brushCursor=0;core.brushDeferred=false;}
             for(int work=0;work<64&&core.brushCursor<total&&budget()&&comparisons<MAX_COMPARISONS_PER_TICK;work++) {
                 int i=core.brushCursor,x=i%width-radius,y=(i/width)%width-radius,z=i/(width*width)-radius;
                 if((x==0&&y==0&&z==0)||!organicTube(core.anchor==null?0:core.anchor.asLong(),core.depth,x,y,z,core.tangentX,core.tangentY,core.tangentZ,radius)){core.brushCursor++;continue;}
@@ -1382,78 +1709,100 @@ public final class DimensionRegeneration {
                 if(!state.isAir()&&!state.is(tendon().getBlock())){core.brushCursor++;continue;}
                 if(!snap.healable(index(pos))){core.brushCursor++;continue;}
                 if(occupied(level,pos)){core.brushCursor++;continue;}
-                if(placements>=MAX_PLACEMENTS_PER_TICK)return;
+                if(placements>=placementLimit)return;
                 if(shell==null&&cells.size()>=MAX_WOUND_CELLS+MAX_ROUTE_EXTRA_CELLS-8192)return;
-                if(!state.is(tendon().getBlock())&&!placeFill(level,pos,tendon(),core.group))return;
+                if(!state.is(tendon().getBlock())&&!placeFill(level,pos,tendon(),core.group)){core.deferBrushVoxel();continue;}
                 if(shell==null){shell=new Cell(key,index(pos),state,time);attach(snap,shell);}
                 Group.join(shell.group,core.group);shell.phase=2;shell.anchor=core.anchor;shell.grown=time;
                 shell.group.root().lastGrowth=time;
                 shell.depth=core.depth;
                 shell.axis=core.axis;shell.detourTarget=core.detourTarget;shell.scaffold=core.scaffold;shell.tipBehind=core.tipBehind;snap.revision++;
                 if(core.detourTarget!=null)for(RouteJob job:routes)if(job.held.contains(core.position()))hold(job,shell);
-                core.brushCursor++;return; // One voxel per brush visit, never a whole cross-section.
+                core.brushCursor++;core.completeBrushPass(total,time);return; // One voxel per brush visit, never a whole cross-section.
             }
+            core.completeBrushPass(total,time);
         }
         boolean placeRepair(ServerLevel level,Cell cell,BlockState state){
             return placeFill(level,cell.pos,state,cell.group);
         }
-        boolean placeFill(ServerLevel level,BlockPos pos,BlockState state,Group group){
-            if(!group.root().filling)return place(level,pos,state);
-            Position tile=new Position(level.dimension().identifier().toString(),fillTile(pos));
-            if(filledThisTick.contains(tile))return false;
-            if(!place(level,pos,state))return false;
-            filledThisTick.add(tile);return true;
-        }
+        boolean placeFill(ServerLevel level,BlockPos pos,BlockState state,Group group){return place(level,pos,state);}
         boolean place(ServerLevel level,BlockPos pos,BlockState state) {
-            if(placements>=Math.min(MAX_PLACEMENTS_PER_TICK,placementLimit)||!budget())return false;
-            boolean changed=level.setBlock(pos,state,3);
-            if(changed)placements++;return changed;
+            if(placements>=Math.min(placementCeiling,placementLimit)||!budget())return false;
+            var column=new WoundChunk(level.dimension().identifier().toString(),pos.getX()>>4,pos.getZ()>>4);
+            if(!chunkPacing.allows(column)){pacingWaitChecks++;return false;}
+            Position tile=new Position(level.dimension().identifier().toString(),fillTile(pos));
+            if(filledThisTick.contains(tile)){pacingWaitChecks++;return false;}
+            writing=true;
+            try{boolean changed=level.setBlock(pos,state,3);if(changed){placements++;filledThisTick.add(tile);chunkPacing.placed(column);}return changed;}
+            finally{writing=false;}
         }
-        boolean occupied(ServerLevel level,BlockPos pos) {return !level.getEntities((Entity)null,new AABB(pos),e->e.isAlive()&&!e.isSpectator()).isEmpty();}
+        boolean occupied(ServerLevel level,BlockPos pos) {boolean blocked=!level.getEntities((Entity)null,new AABB(pos),e->e.isAlive()&&!e.isSpectator()&&blocksRepair(e instanceof net.minecraft.world.entity.item.ItemEntity,e instanceof net.minecraft.world.entity.ExperienceOrb)).isEmpty();if(blocked)occupiedWaits++;return blocked;}
         void tick() {
             if(closed)return;
-            filledThisTick.clear();
+            filledThisTick.clear();feedQueries=0;consumedItems=0;consumedEntities=0;
             long start=System.nanoTime();time++;comparisons=0;placements=0;sectionChecks=0;discoveries=0;
             if(time%200==0)refreshLevels();
-            if(time%20==0)flushExclusions();
+            if(time%20==0){flushExclusions();nourishment.prune(time);}
             boolean active=!cells.isEmpty()||!routes.isEmpty()||!probes.isEmpty()||!supportQueue.isEmpty()||!deferred.isEmpty()||!exemptExplosions.isEmpty();
             if(!active)activeSince=time;
-            placementLimit=healingRate(cells.size(),Math.max(0,time-activeSince));
+            var difficulty=server.getWorldData().getDifficulty();boolean hard=difficulty==net.minecraft.world.Difficulty.HARD;
+            int normalDemand=healingRate(cells.size(),Math.max(0,time-activeSince));
+            normalPlacementLimit=active?adaptivePlacementLimit(normalPlacementLimit,normalDemand,server.getAverageTickTimeNanos(),server.tickRateManager().nanosecondsPerTick(),lastWorkNanos,true):BASE_PLACEMENTS_PER_TICK;
+            placementCeiling=difficultyPlacements(MAX_PLACEMENTS_PER_TICK,hard);placementLimit=difficultyPlacements(normalPlacementLimit,hard);
+            int desired=difficultyPlacements(normalDemand,hard);
+            chunkPacing.begin(placementLimit);
             boolean recording=pendingIO>0||scanning!=null||!scans.isEmpty()&&scans.peek().knownCount<4096;
-            deadline=start+(active?TICK_BUDGET_NANOS:recording?RECORDING_BUDGET_NANOS:QUIET_BUDGET_NANOS);
-            int operations=0,repairChecks=0,routeChecks=0,deferredChecks=0;
+            long tickWorkBudget=active?workBudgetNanos(server.getAverageTickTimeNanos(),server.tickRateManager().nanosecondsPerTick()):recording?RECORDING_BUDGET_NANOS:QUIET_BUDGET_NANOS;
+            deadline=start+tickWorkBudget;
+            moveFeedingDrops();
+            int operations=0,repairChecks=0,routeChecks=0,deferredChecks=0;changedChecks=0;
+            int operationLimit=Math.max(4096,placementLimit*12),repairCheckLimit=Math.max(2304,placementLimit*8),routeCheckLimit=routeWorkLimit(placementLimit);
             // Rotate all work classes, including IO completion and discovery, so a massive wound cannot starve recording.
-            while(budget() && operations++<4096) {
+            while(budget() && operations++<operationLimit) {
                 switch(phase) {
-                    case 0 -> {Runnable ready=finished.poll();if(ready!=null)ready.run();else discover();}
-                    case 1 -> {if(comparisons<MAX_COMPARISONS_PER_TICK)scan();}
-                    case 2 -> {if(placements<MAX_PLACEMENTS_PER_TICK&&repairChecks++<256)repair();}
+                    case 0 -> {woundTicketStep();Runnable ready=finished.poll();if(ready!=null)ready.run();else discover();}
+                    case 1 -> {if(comparisons<MAX_COMPARISONS_PER_TICK){detectChanged();scan();}}
+                    case 2 -> {if(placements<placementLimit&&repairChecks++<repairCheckLimit)repair();}
                     case 3 -> {if(deferredChecks++<128)processDeferred();}
-                    case 4 -> {if(routeChecks++<16){if(!supportQueue.isEmpty()&&(routeChecks%3==0||routes.isEmpty()&&probes.isEmpty()))supportStep();
+                    case 4 -> {if(routeChecks++<routeCheckLimit){if(!supportQueue.isEmpty()&&(routeChecks%3==0||routes.isEmpty()&&probes.isEmpty()))supportStep();
                         else if(!probes.isEmpty()&&(routeChecks%2==0||routes.isEmpty()))probeSpan();else route();}}
                     default -> {if(operations%10==4)discover();else if(comparisons<MAX_COMPARISONS_PER_TICK)scan();}
                 }
                 if(++phase==6)phase=0;
                 if(operations%6==0) {
-                    boolean scanReady=comparisons<MAX_COMPARISONS_PER_TICK&&sectionChecks<MAX_SECTION_CHECKS_PER_TICK
-                            &&(scanning!=null||!scans.isEmpty()&&scans.peek().nextScan<=time);
-                    boolean repairReady=repairChecks<256&&placements<MAX_PLACEMENTS_PER_TICK&&!repairs.isEmpty();
-                    boolean routeReady=routeChecks<16&&(!routes.isEmpty()||!probes.isEmpty()||!supportQueue.isEmpty());
+                    boolean scanReady=comparisons<MAX_COMPARISONS_PER_TICK&&(changedChecks<256&&!changedPositions.isEmpty()||sectionChecks<MAX_SECTION_CHECKS_PER_TICK
+                            &&(scanning!=null||!scans.isEmpty()&&scans.peek().nextScan<=time));
+                    boolean repairReady=repairChecks<repairCheckLimit&&placements<placementLimit&&!repairs.isEmpty();
+                    boolean routeReady=routeChecks<routeCheckLimit&&(!routes.isEmpty()||!probes.isEmpty()||!supportQueue.isEmpty());
                     boolean editReady=deferredChecks<128&&(!exemptExplosions.isEmpty()||!deferred.isEmpty()&&deferred.peek().tick<time);
                     if(!scanReady&&!repairReady&&!routeReady&&!editReady&&finished.isEmpty()&&(discoveries>=32||server.getPlayerList().getPlayers().isEmpty()))break;
                 }
                 if(scanning==null&&scans.isEmpty()&&repairs.isEmpty()&&routes.isEmpty()&&probes.isEmpty()&&supportQueue.isEmpty()&&deferred.isEmpty()&&pendingIO==0&&server.getPlayerList().getPlayers().isEmpty())break;
             }
-            long elapsed=System.nanoTime()-start;ticks++;elapsedNanos+=elapsed;peakNanos=Math.max(peakNanos,elapsed);
+            chatPlacements+=placements;chatTicks++;chatHadActivity|=active;
+            if(time%CHAT_STATUS_INTERVAL_TICKS==0){
+                if(CHAT_STATUS_ENABLED&&chatHadActivity){
+                    var status=net.minecraft.network.chat.Component.literal(chatStatus(placementLimit,placements,chatPlacements,chatTicks,cells.size(),placementCeiling)+String.format(Locale.ROOT," | demand %d | budget %.1fms | %s",desired,tickWorkBudget/1_000_000.0,difficulty.name())+String.format(Locale.ROOT," | waits tendons %d / anchors %d / pacing %d",networkWaitChecks,supportWaitChecks,pacingWaitChecks));
+                    for(var player:server.getPlayerList().getPlayers())player.sendSystemMessage(status);
+                }
+                chatPlacements=0;chatTicks=0;chatHadActivity=false;networkWaitChecks=0;supportWaitChecks=0;pacingWaitChecks=0;
+            }
+            placedTotal+=placements;
+            long elapsed=System.nanoTime()-start;lastWorkNanos=elapsed;ticks++;elapsedNanos+=elapsed;peakNanos=Math.max(peakNanos,elapsed);
             if(time-lastWarning>=1200 && (estimatedBytes>=SNAPSHOT_CACHE_BYTES-16384||cells.size()>=MAX_WOUND_CELLS)) {
                 lastWarning=time;LOG.warn("Regeneration capacity reached: {} snapshot bytes, {} wound cells; coverage waits for capacity",estimatedBytes,cells.size());
             }
             if(time%1200==0) {
                 coverage.keySet().removeIf(id->server.getPlayerList().getPlayer(id)==null);
+                if(LOG_METRICS)LOG.info("Regeneration progress: {} detected, {} placements, {} block-entity waits, {} pending event cells, {} drops consumed, {} placements/tick allowed",detectedTotal,placedTotal,blockEntityWaits,changedPositions.size(),consumedTotal,placementLimit);
+                if(LOG_METRICS)LOG.info("Regeneration waits: {} occupied-cell checks, {} routes, {} support searches, {} forced wound columns",occupiedWaits,routes.size(),supportQueue.size(),ticketed.size());
                 if(LOG_METRICS)LOG.info("Regeneration: {} sections, {} cells, {} deferred sections, {} bytes, mean {} us/tick, peak {} us, {} IO tasks",snapshots.size(),cells.size(),backlog.size(),estimatedBytes,elapsedNanos/Math.max(1,ticks)/1000,peakNanos/1000,pendingIO);
             }
         }
         @Override public void close() {
+            releaseWoundTickets();
+            feedingPulls.clear();feedingOrder.clear();
+            woundLoading.clear();
             closed=true;
             time++;
             while(!deferred.isEmpty()||!exemptExplosions.isEmpty())processDeferred();
@@ -1463,6 +1812,8 @@ public final class DimensionRegeneration {
             }catch(Exception error){LOG.error("Cannot finish terrain memory loads before shutdown",error);}
             // Shutdown is outside the tick budget. Queue final immutable states after prior writes.
             for(Snapshot snap:snapshots.values()) if(!snap.failed&&snap.loading==null) {
+                // Completed clean snapshots are already durable. Preserve all wounds and adaptation state.
+                if(snap.saved>0&&snap.saved==snap.revision&&snap.saving<0&&snap.damage.isEmpty()&&snap.trauma==0)continue;
                 Disk disk=detach(snap);io.execute(()->{
                     try{write(file(snap.key),disk);}catch(RuntimeException error){LOG.error("Final terrain checkpoint failed: {}",file(snap.key),error);}
                 });
@@ -1488,6 +1839,19 @@ public final class DimensionRegeneration {
     private static Map<Integer,String> encodedEdits(Map<Integer,BlockState> edits) {
         if(edits==null)return Map.of();
         Map<Integer,String> encoded=new HashMap<>();edits.forEach((i,state)->encoded.put(i,encode(state)));return Map.copyOf(encoded);
+    }
+    private static boolean retireTemporary(BlockState original,int remaining,boolean filling,boolean held,long age,int wait){
+        return original.isAir()&&!held&&(remaining==0||filling&&age>=wait);
+    }
+    private static boolean keepsTemporaryOwnership(BlockState original,int phase){return original.isAir()&&phase>0&&phase<4;}
+    private static String chatStatus(int limit,long actual,long intervalPlacements,long intervalTicks,int activeCells,int ceiling){
+        return String.format(Locale.ROOT,"[Dimension Regen] Limit %d/%d | placed %d last tick | avg %.1f/tick | active cells %d",
+                limit,ceiling,actual,intervalPlacements/(double)Math.max(1,intervalTicks),activeCells);
+    }
+    public static int fedInterval(int interval,boolean fed){return fed?Math.max(1,interval/2):interval;}
+    private static boolean blocksRepair(boolean droppedItem,boolean experienceOrb){return !droppedItem&&!experienceOrb;}
+    private static boolean repairDifference(BlockState original,BlockState current,boolean edited) {
+        return !edited&&terrain(original)&&original.getBlock()!=current.getBlock();
     }
     private static boolean isRemoval(BlockState state) {
         return state.isAir()||state.canBeReplaced()||state.getBlock() instanceof LiquidBlock;

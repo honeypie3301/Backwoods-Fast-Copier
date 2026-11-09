@@ -15,6 +15,7 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
     public static final double FALSE_BRIDGE_CHANCE = 1.0; // Percent per complete bridge at each tier; false wins at crossings.
     public static final double ROOM_PORTAL_CHANCE = 0.001; // Percent per room: 1 in 100,000 before room-fit checks.
     public static final double GRAIN_PORTAL_CHANCE = 50.0; // Percent of portals leading to the Grain; remainder to Backwoods.
+    public static final int CYLINDER_PILLAR_PERMILLE = 5; // 0.5 percent of accepted support candidates.
     public static final int BOTTOM_PLATE_OFFSET = 5; // Vanilla bedrock occupies offsets 0..4; never overwritten.
     public static final int TOP_PLATE_THICKNESS = 2;
     public static final boolean ENABLE_CEILING_PLATE = false;
@@ -26,7 +27,7 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
     private static final String ID = "the_backwoods:suspended_ward";
     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
     private static final byte AIR=0, PLANK=1, LOG=2, GLASS=3, FENCE=4, LADDER=5, SPAWNER=6, FALSE_PLANK=7,
-        GRAIN_X=8, GRAIN_Z=9, BACKWOODS_X=10, BACKWOODS_Z=11;
+        GRAIN_X=8, GRAIN_Z=9, BACKWOODS_X=10, BACKWOODS_Z=11, PILLAR=12, PILLAR_LADDER=13, PILLAR_DOOR_LOWER=14, PILLAR_DOOR_UPPER=15, SETTLE_BED_FOOT=16, SETTLE_BED_HEAD=17, SETTLE_FURNACE=18, SETTLE_CRAFT=19, SETTLE_BARREL=20, SETTLE_LANTERN=21, SETTLE_BOOKS=22, SETTLE_FENCE=23, SETTLE_TABLE=24, SETTLE_CHEST=25, SETTLE_GLASS=26;
     private static final int PAD=20;
 
     public SuspendedWardFeature() { this(net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration.CODEC); }
@@ -103,15 +104,27 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
             var old=section.getBlockState(x-2,y&15,z-2);
             if(old.is(net.minecraft.world.level.block.Blocks.BEDROCK)) continue;
             net.minecraft.world.level.block.state.BlockState state;
-            if(kind==FENCE) {
+            if(kind==FENCE||kind==31||kind==32) {
                 int mask=(solid(plan[index-PAD])?1:0)|(solid(plan[index+1])?2:0)
                     |(solid(plan[index+PAD])?4:0)|(solid(plan[index-1])?8:0);
-                state=fences[mask];
-            } else state=switch(kind) {case PLANK->plank;case LOG->log;case GLASS->glass;case LADDER->ladder;case SPAWNER->spawner;
+                state=kind==32?net.minecraft.world.level.block.Blocks.GLASS_PANE.defaultBlockState().setValue(net.minecraft.world.level.block.IronBarsBlock.NORTH,(mask&1)!=0).setValue(net.minecraft.world.level.block.IronBarsBlock.EAST,(mask&2)!=0).setValue(net.minecraft.world.level.block.IronBarsBlock.SOUTH,(mask&4)!=0).setValue(net.minecraft.world.level.block.IronBarsBlock.WEST,(mask&8)!=0):fences[mask];
+            } else state=switch(kind) {case SETTLE_BED_FOOT,SETTLE_BED_HEAD->CrossworksLatticeFeature.settlementBed(level.getSeed(),baseX+x-2,baseZ+z-2-(kind==SETTLE_BED_HEAD?1:0)).defaultBlockState().setValue(net.minecraft.world.level.block.BedBlock.FACING,net.minecraft.core.Direction.SOUTH).setValue(net.minecraft.world.level.block.BedBlock.PART,kind==SETTLE_BED_FOOT?net.minecraft.world.level.block.state.properties.BedPart.FOOT:net.minecraft.world.level.block.state.properties.BedPart.HEAD);
+                case 30->net.minecraft.world.level.block.Blocks.OAK_WALL_SIGN.defaultBlockState().setValue(net.minecraft.world.level.block.WallSignBlock.FACING,net.minecraft.core.Direction.NORTH);
+                case 31->net.minecraft.world.level.block.Blocks.OAK_FENCE.defaultBlockState().setValue(net.minecraft.world.level.block.FenceBlock.EAST,true).setValue(net.minecraft.world.level.block.FenceBlock.WEST,true);
+                case 32->net.minecraft.world.level.block.Blocks.GLASS_PANE.defaultBlockState().setValue(net.minecraft.world.level.block.IronBarsBlock.EAST,true).setValue(net.minecraft.world.level.block.IronBarsBlock.WEST,true);
+                case SETTLE_FENCE->net.minecraft.world.level.block.Blocks.OAK_FENCE.defaultBlockState();case SETTLE_TABLE->net.minecraft.world.level.block.Blocks.OAK_SLAB.defaultBlockState();case SETTLE_CHEST->net.minecraft.world.level.block.Blocks.CHEST.defaultBlockState().setValue(net.minecraft.world.level.block.ChestBlock.FACING,net.minecraft.core.Direction.SOUTH);case SETTLE_GLASS->net.minecraft.world.level.block.Blocks.GLASS.defaultBlockState();
+                case SETTLE_FURNACE->net.minecraft.world.level.block.Blocks.FURNACE.defaultBlockState();case SETTLE_CRAFT->net.minecraft.world.level.block.Blocks.CRAFTING_TABLE.defaultBlockState();case SETTLE_BARREL->net.minecraft.world.level.block.Blocks.BARREL.defaultBlockState().setValue(net.minecraft.world.level.block.BarrelBlock.FACING,net.minecraft.core.Direction.SOUTH);case SETTLE_BOOKS->net.minecraft.world.level.block.Blocks.BOOKSHELF.defaultBlockState();case SETTLE_LANTERN->net.minecraft.world.level.block.Blocks.LANTERN.defaultBlockState().setValue(net.minecraft.world.level.block.LanternBlock.HANGING,true);
+                case PLANK,PILLAR->plank;case PILLAR_LADDER->ladder;
+                case PILLAR_DOOR_LOWER,PILLAR_DOOR_UPPER->net.minecraft.world.level.block.Blocks.OAK_DOOR.defaultBlockState().setValue(net.minecraft.world.level.block.DoorBlock.FACING,net.minecraft.core.Direction.NORTH).setValue(net.minecraft.world.level.block.DoorBlock.HALF,kind==PILLAR_DOOR_LOWER?net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER:net.minecraft.world.level.block.state.properties.DoubleBlockHalf.UPPER);case LOG->log;case GLASS->glass;case LADDER->ladder;case SPAWNER->spawner;
                 case FALSE_PLANK->falsePlank;case GRAIN_X->grainX;case GRAIN_Z->grainZ;case BACKWOODS_X->backwoodsX;case BACKWOODS_Z->backwoodsZ;default->air;};
+            if(kind>=27&&kind<=29)CrossworksLatticeFeature.invertedFurniture(level,new net.minecraft.core.BlockPos(baseX+x-2,y,baseZ+z-2),kind);
+            if(old==state)CrossworksLatticeFeature.ensureGeneratedBlockEntity(level,pos.set(baseX+x-2,y,baseZ+z-2),state);
             if(old!=state) {
                 pos.set(baseX+x-2,y,baseZ+z-2);
                 chunk.setBlockState(pos,state,false);
+                CrossworksLatticeFeature.ensureGeneratedBlockEntity(level,pos,state);
+                if(kind==30)CrossworksLatticeFeature.labelStillLife(level,pos,new CrossworksLatticeFeature.CityLot(0,0,baseX,baseZ,0,0,0,true),y,30);
+                if(kind==SETTLE_BARREL||kind==SETTLE_CHEST)CrossworksLatticeFeature.placeSettlementLoot(level,pos,state);
             }
           }
         }
@@ -121,8 +134,8 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
     public static int getTopRoomFloorY(int minY,int maxYExclusive) {
         int effectiveMax=getWardRoofY(maxYExclusive);
         int bottom=minY+BOTTOM_PLATE_OFFSET,roof=ENABLE_CEILING_PLATE?effectiveMax-TOP_PLATE_THICKNESS:effectiveMax;
-        if(FLOOR_SPACING<4||roof-bottom<3) throw new IllegalArgumentException("No room with two blocks of headroom");
-        return bottom+Math.floorDiv(roof-bottom-3,FLOOR_SPACING)*FLOOR_SPACING;
+        if(FLOOR_SPACING<4||roof-bottom<FLOOR_SPACING+1) throw new IllegalArgumentException("No room with two blocks of headroom");
+        return bottom+Math.floorDiv(roof-bottom-FLOOR_SPACING-1,FLOOR_SPACING)*FLOOR_SPACING;
     }
     public static net.minecraft.core.BlockPos findEntryRoom(long seed,int nearX,int nearZ,int minY,int maxYExclusive) {
         int cx=Math.floorDiv(nearX,CELL_SIZE),cz=Math.floorDiv(nearZ,CELL_SIZE);
@@ -134,7 +147,7 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
         }
         return closest==null?null:new net.minecraft.core.BlockPos(closest.x,getTopRoomFloorY(minY,maxYExclusive)+1,closest.z);
     }
-    private static boolean solid(byte kind) { return kind==PLANK || kind==LOG || kind==FENCE || kind==FALSE_PLANK; }
+    private static boolean solid(byte kind) { return kind==PLANK || kind==LOG || kind==FENCE || kind==FALSE_PLANK||kind==PILLAR||kind==31||kind==32; }
     private static int index(int x,int y,int z) { return y*PAD*PAD+z*PAD+x; }
     private static long hash(long seed,int x,int z) {
         long v=seed^((long)x*0x632BE59BD9B4E019L)^((long)z*0x9E3779B97F4A7C15L);
@@ -215,7 +228,103 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
             else segment(deck,baseX,baseZ,vs[i-1],us[i-1],vs[i],us[i]);
         }
     }
-    private static byte[] plan(int baseX,int baseZ,int floor,int roof,int max,long seed) {
+
+    private record PlanKey(int x,int z,int floor,int roof,int max,long seed) {}
+    private static final java.util.Map<PlanKey,byte[]> PLAN_CACHE=new java.util.LinkedHashMap<>(16,0.75f,true){
+        @Override protected boolean removeEldestEntry(java.util.Map.Entry<PlanKey,byte[]> entry){return size()>16;}
+    };
+    private static byte[] plan(int x,int z,int floor,int roof,int max,long seed){
+        var key=new PlanKey(x,z,floor,roof,max,seed);synchronized(PLAN_CACHE){var old=PLAN_CACHE.get(key);if(old!=null)return old;}
+        byte[] result=buildPlan(x,z,floor,roof,max,seed);
+        addSupportPillar(result,x,z,floor,roof,max,seed);
+        synchronized(PLAN_CACHE){var old=PLAN_CACHE.get(key);if(old!=null)return old;PLAN_CACHE.put(key,result);}return result;
+    }
+    public static byte[] plateSupportKinds(int baseX,int baseZ,int min,int max,long seed){
+        int roof=getWardRoofY(max),floor=min+BOTTOM_PLATE_OFFSET;
+        byte[] blocks=plan(baseX,baseZ,floor,ENABLE_CEILING_PLATE?roof-TOP_PLATE_THICKNESS:roof,roof,seed);
+        byte[] result=new byte[256];for(int z=0;z<16;z++)for(int x=0;x<16;x++){byte kind=blocks[index(x+2,3,z+2)];result[z*16+x]=kind==PILLAR||kind==PILLAR_LADDER?kind:0;}
+        return result;
+    }
+    private static void addSupportPillar(byte[] blocks,int baseX,int baseZ,int floor,int roof,int max,long seed){
+        if(!CrossworksLatticeFeature.ENABLE_PLATE_SUPPORTS)return;
+        int height=max-floor;if(height<3)return;
+        int half=CrossworksLatticeFeature.ROOF_PLATE_2_BOUNDARY/2;
+        int inner=CrossworksLatticeFeature.BOUNDARY_CLAMP_SIZE/2+CrossworksLatticeFeature.ROOF_PLATE_2_HEIGHT_OFFSET;
+        if(baseX < -half+16||baseX+15>=half-16||baseZ < -half+16||baseZ+15>=half-16
+                ||Math.abs(baseX)<inner+16&&Math.abs(baseZ)<inner+16)return;
+        long district=hash(seed^0xA110L,Math.floorDiv(baseX,32),Math.floorDiv(baseZ,32));
+        int slot=Math.floorMod(Math.floorDiv(baseX,16),2)+2*Math.floorMod(Math.floorDiv(baseZ,16),2);
+        if(Math.floorMod(district,4)!=slot)return; // One candidate per 2x2 chunks, then clearance rejection.
+        // Full-height occupancy projection includes every tower, bridge tier, railing and portal.
+        boolean[] occupied=new boolean[PAD*PAD];
+        for(int z=0;z<PAD;z++)for(int x=0;x<PAD;x++)for(int y=1;y<height;y++)
+            if(blocks[index(x,y,z)]!=AIR){occupied[z*PAD+x]=true;break;}
+        long h=hash(seed^0xC011D5L,baseX,baseZ);
+        boolean round=Math.floorMod(h,1000)<CYLINDER_PILLAR_PERMILLE;int radius=5,clearance=3;
+        for(int attempt=0;attempt<16;attempt++){
+            int cx=8+(int)Math.floorMod((h>>>8)+attempt,4),cz=8+(int)Math.floorMod((h>>>16)+attempt/4,4);
+            boolean clear=true;
+            for(int z=cz-radius-clearance;z<=cz+radius+clearance&&clear;z++)for(int x=cx-radius-clearance;x<=cx+radius+clearance;x++)
+                if(occupied[z*PAD+x]){clear=false;break;}
+            if(!clear)continue;
+            for(int z=cz-radius;z<=cz+radius;z++)for(int x=cx-radius;x<=cx+radius;x++){
+                if(round&&(x-cx)*(x-cx)+(z-cz)*(z-cz)>radius*radius)continue;
+                for(int y=1;y<height;y++)blocks[index(x,y,z)]=PILLAR;
+            }
+            if(Math.floorMod(h>>>24,100)<25&&CrossworksLatticeFeature.canExitPillarLadder(seed,baseX+cx-2,baseZ+cz-2)){
+                for(int y=1;y<height;y++)blocks[index(cx,y,cz)]=PILLAR_LADDER;
+                for(int z=cz-radius;z<cz;z++)for(int y=1;y<=2;y++)blocks[index(cx,y,z)]=AIR;
+                blocks[index(cx,1,cz-radius)]=PILLAR_DOOR_LOWER;blocks[index(cx,2,cz-radius)]=PILLAR_DOOR_UPPER;
+                addPillarSettlements(blocks,cx,cz,height,h,round);
+            }
+            return; // One thick, jittered shaft per eligible opening; no neighbor-chunk writes.
+        }
+    }
+
+    private static void addPillarSettlements(byte[] blocks,int cx,int cz,int height,long seed,boolean round){
+        var random=net.minecraft.util.RandomSource.create(seed);
+        for(int floor=8+random.nextInt(12);floor+6<height;){
+            int variant=random.nextInt(32);boolean spacious=(variant&1)==0;
+            int minX=spacious?-4:variant%3==0?0:-3,maxX=spacious?4:2+random.nextInt(2),halfZ=spacious?4:2+random.nextInt(2),roomHeight=3+random.nextInt(2);
+            for(int dx=minX;dx<=maxX;dx++)for(int dz=-halfZ;dz<=halfZ;dz++){
+                if(round&&dx*dx+dz*dz>16||dx==-1&&dz==0)continue; // Keep the shaft's backing spine.
+                for(int dy=1;dy<=roomHeight;dy++)blocks[index(cx+dx,floor+dy,cz+dz)]=AIR;
+            }
+            for(int y=floor;y<=floor+roomHeight+1;y++)blocks[index(cx,y,cz)]=PILLAR_LADDER;
+            int furnitureZ=Math.min(halfZ,round?3:halfZ);
+            int bedX=round?Math.min(maxX,3):maxX;
+            blocks[index(cx+bedX,floor+1,cz-1)]=SETTLE_BED_FOOT;blocks[index(cx+bedX,floor+1,cz)]=SETTLE_BED_HEAD;
+            blocks[index(cx+1,floor+1,cz-furnitureZ)]=(variant&1)==0?SETTLE_BARREL:SETTLE_CHEST;
+            if((variant&2)==0)blocks[index(cx+2,floor+1,cz-furnitureZ)]=SETTLE_BOOKS;
+            blocks[index(cx+2,floor+1,cz+furnitureZ)]=SETTLE_FURNACE;blocks[index(cx+1,floor+1,cz+furnitureZ)]=SETTLE_CRAFT;
+            blocks[index(cx+1,floor+roomHeight,cz+1)]=SETTLE_LANTERN;
+            if(minX<0){blocks[index(cx-2,floor+1,cz+1)]=SETTLE_FENCE;blocks[index(cx-2,floor+2,cz+1)]=SETTLE_TABLE;}
+            if(variant>=5){ // Glazed observation slit through the shell; never an open balcony.
+                for(int dx=Math.min(maxX,round?3:4)+1;dx<=5;dx++)if(!round||dx*dx+1<=25)
+                    for(int dy=2;dy<=3;dy++)blocks[index(cx+dx,floor+dy,cz+1)]=SETTLE_GLASS;
+            }
+            if(CrossworksLatticeFeature.invertedSettlement(seed,cx,cz,floor)){
+                blocks[index(cx+2,floor+1,cz+furnitureZ)]=AIR;blocks[index(cx+1,floor+1,cz+furnitureZ)]=AIR;
+                blocks[index(cx+2,floor+roomHeight,cz+furnitureZ)]=28;blocks[index(cx+1,floor+roomHeight,cz+furnitureZ-1)]=27;
+                blocks[index(cx+2,floor+roomHeight,cz-2)]=29;if(random.nextInt(1000)<2)blocks[index(cx+1,floor+roomHeight,cz+furnitureZ)]=30;
+            }
+            if(variant%8==0){
+                int end=cz+7;boolean balconyFits=end<=17&&cx-2>=2&&cx+2<=17;
+                if(balconyFits){boolean clear=true;
+                    for(int bz=cz+6;bz<=end;bz++)for(int bx=cx-2;bx<=cx+2;bx++)for(int by=floor;by<=floor+roomHeight;by++)if(blocks[index(bx,by,bz)]!=AIR)clear=false;
+                    if(clear){
+                        for(int bz=cz+5;bz<=end;bz++)for(int bx=cx-2;bx<=cx+2;bx++){
+                            blocks[index(bx,floor,bz)]=PLANK;
+                            if(bz==end||bx==cx-2||bx==cx+2)blocks[index(bx,floor+1,bz)]=(byte)(variant%32==0?32:31);
+                        }
+                        for(int bz=cz+halfZ;bz<=cz+5;bz++)for(int by=1;by<=2;by++)blocks[index(cx+1,floor+by,bz)]=AIR;
+                    }
+                }
+            }
+            floor+=floor<Math.min(160,height/3)?14+random.nextInt(18):48+random.nextInt(64);
+        }
+    }
+    private static byte[] buildPlan(int baseX,int baseZ,int floor,int roof,int max,long seed) {
         int height=max-floor;byte[] blocks=new byte[PAD*PAD*height];
         boolean[] interior=new boolean[PAD*PAD];
         for(int z=0;z<PAD;z++) for(int x=0;x<PAD;x++) {
@@ -242,9 +351,10 @@ public class SuspendedWardFeature extends net.minecraft.world.level.levelgen.fea
                         boolean window=layer%FLOOR_SPACING>=2&&layer%FLOOR_SPACING<=3
                             &&Math.floorMod(along,4)>=2;
                         kind=window?GLASS:PLANK;
-                    } else if(layer%FLOOR_SPACING==0&&y+2<roof) kind=PLANK;
+                    } else if(layer%FLOOR_SPACING==0&&y+FLOOR_SPACING<roof) kind=PLANK;
                     // The ladder stays against a continuous corner wall, clear of bridge doorways.
-                    if(dx==-t.halfX+1&&dz==-t.halfZ+1) kind=LADDER;
+                    if(dx==-t.halfX+1&&dz==-t.halfZ+1&&y<roof-1) kind=LADDER;
+                    if(y==roof-1)kind=PLANK; // Complete individual tower roofs even without a dimension-wide ceiling.
                     blocks[index(x,layer,z)]=kind;
                 }
             }
